@@ -89,7 +89,18 @@ class MinecraftLauncher:
         self.root.geometry("1080x720")
         self.root.configure(bg=COLORS['main_bg'])
         self.minecraft_dir = get_minecraft_dir()
-        self.config_file = "launcher_config.json"
+        
+        # Use AppData for config to ensure persistence
+        app_data = os.getenv('APPDATA')
+        if app_data:
+            self.config_dir = os.path.join(app_data, ".nlc")
+        else:
+            self.config_dir = os.path.join(os.path.expanduser("~"), ".nlc") # Fallback to user home
+            
+        if not os.path.exists(self.config_dir):
+            os.makedirs(self.config_dir, exist_ok=True)
+            
+        self.config_file = os.path.join(self.config_dir, "launcher_config.json")
         
         self.last_version = ""
         self.profiles = [] # List of {"name": str, "type": "offline", "skin_path": str, "uuid": str}
