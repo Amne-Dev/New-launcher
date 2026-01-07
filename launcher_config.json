@@ -1,0 +1,24 @@
+{
+    "profiles": [
+        {
+            "name": "Crimson_ev",
+            "type": "offline",
+            "skin_path": "C:/Users/amdev/Downloads/58c66a1b1ddc3eb5.png",
+            "uuid": ""
+        },
+        {
+            "name": "uFeat",
+            "type": "offline",
+            "skin_path": "C:/Users/amdev/Downloads/Crimson_ev.png",
+            "uuid": ""
+        }
+    ],
+    "current_profile_index": 0,
+    "loader": "Fabric",
+    "last_version": "",
+    "auto_download_mod": true,
+    "ram_allocation": 5120,
+    "java_args": "",
+    "minecraft_dir": "C:\\Users\\amdev\\AppData\\Roaming\\.minecraft",
+    "rpc_enabled": true
+}
