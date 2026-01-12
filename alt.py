@@ -134,6 +134,7 @@ class MinecraftLauncher:
         self.rpc = None
         self.rpc_connected = False
         self.auto_update_check = True # Default True
+        self.icon_cache = {}
 
         self.start_time = None
         self.current_tab = None
@@ -274,7 +275,7 @@ class MinecraftLauncher:
 
     def _create_sidebar_link(self, text, url_or_command, indicator_text=None, is_action=False, pack_side="top", icon=None):
         frame = tk.Frame(self.sidebar, bg=COLORS['sidebar_bg'], cursor="hand2", padx=15, pady=8)
-        frame.pack(fill="x", side=pack_side)
+        frame.pack(fill="x", side=cast(Any, pack_side))
         
         # Indicator (like "Java" or "Mods")
         if indicator_text:
@@ -384,17 +385,54 @@ class MinecraftLauncher:
         left_frame = tk.Frame(bottom_bar, bg=COLORS['bottom_bar_bg'])
         left_frame.grid(row=0, column=0, sticky="w", padx=30)
         
-        # Removed label "INSTALLATION"
+        # Custom Dropdown Trigger
+        self.inst_selector_frame = tk.Frame(left_frame, bg=COLORS['bottom_bar_bg'], cursor="hand2")
+        self.inst_selector_frame.pack(fill="x", ipadx=10, ipady=5)
         
-        self.installation_var = tk.StringVar()
-        style = ttk.Style()
-        style.configure("Large.TCombobox", padding=5, font=("Segoe UI", 11))
+        # Text (Left) - Name and version
+        self.inst_selector_text_frame = tk.Frame(self.inst_selector_frame, bg=COLORS['bottom_bar_bg']) 
+        self.inst_selector_text_frame.pack(side="left", padx=(10, 0))
         
-        self.installation_dropdown = ttk.Combobox(left_frame, textvariable=self.installation_var, 
-                                                 state="readonly", width=35,
-                                                 style="Large.TCombobox")
-        self.installation_dropdown.pack(fill="x", ipady=4)
-        self.installation_dropdown.bind("<<ComboboxSelected>>", self.on_installation_change)
+        self.inst_name_lbl = tk.Label(self.inst_selector_text_frame, text="", font=("Segoe UI", 11, "bold"), 
+                                     bg=COLORS['bottom_bar_bg'], fg="white", cursor="hand2", anchor="w")
+        self.inst_name_lbl.pack(anchor="w")
+        
+        self.inst_ver_lbl = tk.Label(self.inst_selector_text_frame, text="", font=("Segoe UI", 9), 
+                                    bg=COLORS['bottom_bar_bg'], fg=COLORS['text_secondary'], cursor="hand2", anchor="w")
+        self.inst_ver_lbl.pack(anchor="w")
+
+        # Icon (Right)
+        self.inst_selector_icon = tk.Label(self.inst_selector_frame, bg=COLORS['bottom_bar_bg'], cursor="hand2")
+        self.inst_selector_icon.pack(side="left", before=self.inst_selector_text_frame)
+
+        # Chevron (Far Right)
+        self.inst_selector_arrow = tk.Label(self.inst_selector_frame, text="▼", font=("Segoe UI", 8), 
+                                           bg=COLORS['bottom_bar_bg'], fg=COLORS['text_secondary'], cursor="hand2")
+        self.inst_selector_arrow.pack(side="right", padx=(15, 5))
+
+        # Hover logic
+        def on_hover(e):
+             bg = "#3A3B3C" # Sidebar selected color
+             self.inst_selector_frame.config(bg=bg)
+             self.inst_selector_text_frame.config(bg=bg)
+             self.inst_name_lbl.config(bg=bg)
+             self.inst_ver_lbl.config(bg=bg)
+             self.inst_selector_icon.config(bg=bg)
+             self.inst_selector_arrow.config(bg=bg)
+
+        def on_leave(e):
+             bg = COLORS['bottom_bar_bg']
+             self.inst_selector_frame.config(bg=bg)
+             self.inst_selector_text_frame.config(bg=bg)
+             self.inst_name_lbl.config(bg=bg)
+             self.inst_ver_lbl.config(bg=bg)
+             self.inst_selector_icon.config(bg=bg)
+             self.inst_selector_arrow.config(bg=bg)
+
+        for w in [self.inst_selector_frame, self.inst_selector_text_frame, self.inst_name_lbl, self.inst_ver_lbl, self.inst_selector_icon, self.inst_selector_arrow]:
+             w.bind("<Enter>", on_hover, add="+")
+             w.bind("<Leave>", on_leave, add="+")
+             w.bind("<Button-1>", self.open_selector_menu, add="+")
         
         # Populate with installations
         self.update_installation_dropdown()
@@ -584,18 +622,56 @@ class MinecraftLauncher:
 
             self.create_installation_item(self.inst_list_frame, idx, inst)
 
+    def get_icon_image(self, icon_identifier, size=(40, 40)):
+        # icon_identifier can be a path "icons/grass.png" or just "grass" or an emoji
+        if not icon_identifier: return None
+        
+        # Check if it's a known image file
+        if str(icon_identifier).endswith(".png"):
+            key = (icon_identifier, size)
+            if key in self.icon_cache: 
+                return self.icon_cache[key]
+                
+            try:
+                # Try finding it
+                path = resource_path(icon_identifier)
+                if os.path.exists(path):
+                    img = Image.open(path)
+                    img = img.resize(size, RESAMPLE_NEAREST)
+                    photo = ImageTk.PhotoImage(img)
+                    self.icon_cache[key] = photo
+                    return photo
+            except Exception:
+                pass
+        return None
+
     def create_installation_item(self, parent, idx, inst):
         item = tk.Frame(parent, bg=COLORS['card_bg'], pady=15, padx=20)
         item.pack(fill="x", pady=2)
         
         # Determine Icon
         loader = inst.get("loader", "Vanilla")
-        icon_char = "⬜" # Default grass block
-        if loader == "Fabric": icon_char = "🧵"
-        elif loader == "Forge": icon_char = "🔨"
+        custom_icon = inst.get("icon")
         
-        icon_lbl = tk.Label(item, text=icon_char, bg=COLORS['card_bg'], fg=COLORS['text_secondary'], font=("Segoe UI", 16))
-        icon_lbl.pack(side="left", padx=(0, 20))
+        # Try loading as image
+        icon_img = self.get_icon_image(custom_icon, (40, 40))
+        
+        if icon_img:
+            icon_lbl = tk.Label(item, image=icon_img, bg=COLORS['card_bg'])
+            icon_lbl.image = icon_img # type: ignore # Keep reference
+            icon_lbl.pack(side="left", padx=(0, 20))
+        else:
+            # Fallback to Emoji / Default
+            icon_char = "⬜"
+            if custom_icon and not str(custom_icon).endswith(".png"):
+                icon_char = custom_icon
+            elif loader == "Fabric": icon_char = "🧵"
+            elif loader == "Forge": icon_char = "🔨"
+            elif loader == "BatMod": icon_char = "🦇"
+            elif loader == "LabyMod": icon_char = "🐺"
+            
+            icon_lbl = tk.Label(item, text=icon_char, bg=COLORS['card_bg'], fg=COLORS['text_secondary'], font=("Segoe UI", 20))
+            icon_lbl.pack(side="left", padx=(0, 20))
         
         # Details
         info_frame = tk.Frame(item, bg=COLORS['card_bg'])
@@ -632,92 +708,423 @@ class MinecraftLauncher:
             pass
 
     def update_installation_dropdown(self):
-        # Update values of self.installation_dropdown based on self.installations
-        if not hasattr(self, 'installation_dropdown'): return
+        # Update dropdown - now custom button
+        if not hasattr(self, 'inst_selector_frame'): return
         
-        # Format: "Name (Version - Loader)"
-        values = []
-        for p in self.installations:
-            name = p.get("name", "Unnamed")
-            ver = p.get("version", "Latest") 
-            loader = p.get("loader", "Vanilla")
-            values.append(f"{name} ({ver} - {loader})")
-            
-        self.installation_dropdown['values'] = values
-        if values:
+        if self.installations:
             # Restore selection
             current = getattr(self, 'current_installation_index', 0)
-            if 0 <= current < len(values):
-                 self.installation_dropdown.current(current)
-            else:
-                 self.installation_dropdown.current(0)
-            # Trigger update state
-            self.on_installation_change(None)
+            if current >= len(self.installations): 
+                current = 0
+            self.select_installation(current)
+        else:
+            self.inst_name_lbl.config(text="No Installations")
+            self.inst_ver_lbl.config(text="")
 
-    def on_installation_change(self, event):
-        idx = self.installation_dropdown.current()
-        if idx >= 0:
-            self.current_installation_index = idx
-            inst = self.installations[idx]
-            ver = inst.get("version", "")
-            loader = inst.get("loader", "")
-            self.set_status(f"Selected: {ver} ({loader})")
+    def select_installation(self, index):
+        if not self.installations: return
+        if not (0 <= index < len(self.installations)): return
+        
+        self.current_installation_index = index
+        inst = self.installations[index]
+        
+        # Update Text
+        name = inst.get("name", "Unnamed")
+        ver = inst.get("version", "Latest")
+        
+        self.inst_name_lbl.config(text=name)
+        self.inst_ver_lbl.config(text=ver)
+        
+        # Update Icon
+        icon_path = inst.get("icon", "icons/crafting_table_front.png")
+        img = self.get_icon_image(icon_path, (32, 32))
+        
+        if img:
+            self.inst_selector_icon.config(image=img, text="", width=32, height=32)
+            self.inst_selector_icon.image = img # type: ignore
+        else:
+             self.inst_selector_icon.config(image="", text="?", font=("Segoe UI", 12), fg="white", width=4, height=2)
+             
+        loader = inst.get("loader", "")
+        self.set_status(f"Selected: {ver} ({loader})")
+
+    def open_selector_menu(self, event=None):
+        if not self.installations: return
+        
+        # Prevent duplication
+        if hasattr(self, '_selector_menu') and self._selector_menu and self._selector_menu.winfo_exists():
+            self._selector_menu.destroy()
+            return
+
+        menu = tk.Toplevel(self.root)
+        self._selector_menu = menu
+        menu.wm_overrideredirect(True)
+        menu.config(bg=COLORS['card_bg'])
+        
+        # Border Frame
+        menu_frame = tk.Frame(menu, bg=COLORS['card_bg'], highlightbackground="#454545", highlightthickness=1)
+        menu_frame.pack(fill="both", expand=True)
+
+        w = max(self.inst_selector_frame.winfo_width(), 300) # Enforce min width for longer names
+        item_h = 55
+        count = len(self.installations)
+        h = min(count * item_h, 400) 
+        
+        x = self.inst_selector_frame.winfo_rootx()
+        target_y = self.inst_selector_frame.winfo_rooty() - h - 5
+        
+        if target_y < 0: 
+            target_y = self.inst_selector_frame.winfo_rooty() + self.inst_selector_frame.winfo_height() + 5
+            
+        menu.geometry(f"{w}x{h}+{x}+{target_y}")
+        
+        # Scrollable area
+        canvas = tk.Canvas(menu_frame, bg=COLORS['card_bg'], highlightthickness=0)
+        scrollbar = tk.Scrollbar(menu_frame, orient="vertical", command=canvas.yview)
+        scroll_frame = tk.Frame(canvas, bg=COLORS['card_bg'])
+        
+        scroll_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=scroll_frame, anchor="nw", width=w-20)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        # Close on click outside (Lose Focus)
+        def on_focus_out(event):
+            self.root.after(150, lambda: menu.destroy() if menu.winfo_exists() else None)
+            
+        menu.bind("<FocusOut>", on_focus_out)
+        menu.focus_force()
+
+        # Populate
+        for i, inst in enumerate(self.installations):
+            name = inst.get("name", "Unnamed")
+            ver = inst.get("version", "Latest")
+            icon_path = inst.get("icon", "icons/crafting_table_front.png")
+            
+            # Row Container
+            row = tk.Frame(scroll_frame, bg=COLORS['card_bg'], cursor="hand2")
+            row.pack(fill="x", ipady=5)
+            
+            # Icon
+            img = self.get_icon_image(icon_path, (32, 32)) 
+            ico_lbl = tk.Label(row, bg=COLORS['card_bg'], cursor="hand2")
+            if img:
+                ico_lbl.config(image=img)
+                ico_lbl.image = img # type: ignore
+            else:
+                 ico_lbl.config(text="?", fg="white")
+            ico_lbl.pack(side="left", padx=10)
+            
+            # Text
+            txt_cx = tk.Frame(row, bg=COLORS['card_bg'], cursor="hand2")
+            txt_cx.pack(side="left", fill="x", expand=True)
+            
+            tk.Label(txt_cx, text=name, font=("Segoe UI", 10, "bold"), 
+                    bg=COLORS['card_bg'], fg="white", anchor="w", cursor="hand2").pack(fill="x")
+            tk.Label(txt_cx, text=ver, font=("Segoe UI", 9), 
+                    bg=COLORS['card_bg'], fg=COLORS['text_secondary'], anchor="w", cursor="hand2").pack(fill="x")
+            
+            # Hover & Click
+            def on_enter(e, r=row):
+                r["bg"] = "#454545"
+                for c in r.winfo_children():
+                    c["bg"] = "#454545"
+                    for gc in c.winfo_children(): # Text frame children
+                        gc["bg"] = "#454545"
+                        
+            def on_leave(e, r=row):
+                r["bg"] = COLORS['card_bg']
+                for c in r.winfo_children():
+                    c["bg"] = COLORS['card_bg']
+                    for gc in c.winfo_children():
+                        gc["bg"] = COLORS['card_bg']
+
+            row.bind("<Enter>", on_enter)
+            row.bind("<Leave>", on_leave)
+            
+            def do_select(e, idx=i):
+                self.select_installation(idx)
+                menu.destroy()
+                
+            row.bind("<Button-1>", do_select)
+            for child in row.winfo_children():
+                child.bind("<Button-1>", do_select)
+                for grand in child.winfo_children():
+                    grand.bind("<Button-1>", do_select)
+
 
     def open_new_installation_modal(self, edit_mode=False, index=None):
         # Modal for Name, Version, etc.
         win = tk.Toplevel(self.root)
-        title = "Edit installation" if edit_mode else "Create new installation"
+        title = "Edit Installation" if edit_mode else "New Installation"
         win.title(title)
-        win.geometry("500x650")
-        win.configure(bg="#1e1e1e") # Darker modal
+        win.geometry("650x600")
+        win.configure(bg="#1e1e1e")
+        win.resizable(True, True) # Allow resizing to help fit content
         
         # Pre-load data if editing
         existing_data = {}
         if edit_mode and index is not None and 0 <= index < len(self.installations):
             existing_data = self.installations[index]
 
-        # Icon + Name
-        top_sec = tk.Frame(win, bg="#1e1e1e")
-        top_sec.pack(fill="x", padx=20, pady=20)
+        # --- Header ---
+        header = tk.Frame(win, bg="#1e1e1e")
+        header.pack(fill="x", padx=25, pady=(25, 20))
+        tk.Label(header, text=title, font=("Segoe UI", 16, "bold"), 
+                bg="#1e1e1e", fg="white", anchor="w").pack(fill="x")
+
+        # --- Content Area (Icon + Fields) ---
+        content = tk.Frame(win, bg="#1e1e1e")
+        content.pack(fill="both", expand=True, padx=25)
+
+        # Icon Selector
+        icon_frame = tk.Frame(content, bg="#1e1e1e")
+        icon_frame.grid(row=0, column=0, rowspan=2, sticky="n", padx=(0, 20))
         
-        tk.Label(top_sec, text="Name", font=("Segoe UI", 9, "bold"), fg=COLORS['text_secondary'], bg="#1e1e1e").pack(anchor="w")
-        name_entry = tk.Entry(top_sec, bg="black", fg="white", insertbackground="white", relief="flat", font=("Segoe UI", 11))
-        name_entry.pack(fill="x", pady=(5, 15), ipady=8)
+        # Default to crafting table if no icon or strictly emoji (legacy)
+        initial_icon = existing_data.get("icon", "icons/crafting_table_front.png")
+        if not str(initial_icon).endswith(".png"):
+            initial_icon = "icons/crafting_table_front.png"
+            
+        current_icon_var = tk.StringVar(value=initial_icon)
         
+        # Main Icon Display (Image based)
+        icon_btn = tk.Label(icon_frame, bg="#3A3B3C", cursor="hand2")
+        icon_btn.pack()
+        
+        def update_main_icon(val):
+            # Attempt to load
+            img = self.get_icon_image(val, (64, 64))
+            if img:
+                # When image is present, width/height are in pixels
+                icon_btn.config(image=img, text="", width=64, height=64)
+                icon_btn.image = img # type: ignore
+            else:
+                # When text is present, width/height are in characters (approx)
+                icon_btn.config(image="", text="?", font=("Segoe UI", 20), fg="white", width=4, height=2)
+
+        update_main_icon(initial_icon)
+
+        # Hint label
+        tk.Label(icon_frame, text="Change", font=("Segoe UI", 8, "underline"), 
+                bg="#1e1e1e", fg="#5A5B5C").pack(pady=(5,0))
+                
+        # Icon Selector Modal
+        def open_icon_selector(e):
+             sel_win = tk.Toplevel(win)
+             sel_win.title("Select Icon")
+             sel_win.geometry("460x500")
+             sel_win.configure(bg="#2d2d2d")
+             sel_win.transient(win)
+             # Center
+             x = win.winfo_x() + (win.winfo_width()//2) - 230
+             y = win.winfo_y() + (win.winfo_height()//2) - 250
+             sel_win.geometry(f"+{x}+{y}")
+
+             tk.Label(sel_win, text="Select Block", font=("Segoe UI", 12, "bold"), bg="#2d2d2d", fg="white").pack(pady=(15,10))
+             
+             # Scrollable Frame for Icons
+             container = tk.Frame(sel_win, bg="#2d2d2d")
+             container.pack(expand=True, fill="both", padx=10, pady=10)
+             
+             canvas = tk.Canvas(container, bg="#2d2d2d", highlightthickness=0)
+             scrollbar = tk.Scrollbar(container, orient="vertical", command=canvas.yview)
+             
+             icons_grid = tk.Frame(canvas, bg="#2d2d2d")
+             
+             icons_grid.bind(
+                 "<Configure>",
+                 lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+             )
+             
+             canvas.create_window((0, 0), window=icons_grid, anchor="nw")
+             
+             canvas.configure(yscrollcommand=scrollbar.set)
+             
+             canvas.pack(side="left", fill="both", expand=True)
+             scrollbar.pack(side="right", fill="y")
+             
+             def _on_mousewheel(event):
+                 canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+             
+             # Bind scrolling to the window so it works when hovering anywhere in the modal
+             sel_win.bind("<MouseWheel>", _on_mousewheel)
+             
+             # Popular Minecraft Blocks
+             block_names = [
+                 "grass_block_side.png", "dirt.png", "stone.png", "cobblestone.png", "oak_planks.png", 
+                 "crafting_table_front.png", "furnace_front.png", "barrel_side.png", "tnt_side.png", "bookshelf.png",
+                 "sand.png", "gravel.png", "bedrock.png", "obsidian.png", "spruce_log.png",
+                 "diamond_ore.png", "gold_ore.png", "iron_ore.png", "coal_ore.png", "redstone_ore.png",
+                 "diamond_block.png", "gold_block.png", "iron_block.png", "emerald_block.png", "lapis_block.png",
+                 "snow.png", "ice.png", "clay.png", "pumpkin_side.png", "melon_side.png",
+                 "netherrack.png", "soul_sand.png", "glowstone.png", "end_stone.png", "red_wool.png"
+             ]
+             
+             # Inventory Slot Style
+             slot_bg = "#8b8b8b"
+             
+             cols = 5
+             for i, name in enumerate(block_names):
+                 path = f"icons/{name}"
+                 
+                 # Slot Container
+                 slot = tk.Frame(icons_grid, bg=slot_bg, width=64, height=64, 
+                                highlightbackground="white", highlightthickness=0)
+                 slot.grid(row=i//cols, column=i%cols, padx=6, pady=6)
+                 slot.pack_propagate(False)
+                 
+                 # Image
+                 img = self.get_icon_image(path, (48, 48))
+                 
+                 lbl = tk.Label(slot, bg=slot_bg, cursor="hand2")
+                 if img:
+                     lbl.config(image=img)
+                     lbl.image = img # type: ignore
+                 else:
+                     lbl.config(text="?", fg="white")
+                 
+                 lbl.place(relx=0.5, rely=0.5, anchor="center")
+                 
+                 def set_ico(val=path):
+                     current_icon_var.set(val)
+                     update_main_icon(val)
+                     sel_win.destroy()
+                     
+                 def on_hover(s=slot, l=lbl):
+                     s.config(bg="#a0a0a0")
+                     l.config(bg="#a0a0a0")
+                     
+                 def on_leave(s=slot, l=lbl):
+                     s.config(bg=slot_bg)
+                     l.config(bg=slot_bg)
+
+                 lbl.bind("<Button-1>", lambda e, val=path: set_ico(val))
+                 slot.bind("<Button-1>", lambda e, val=path: set_ico(val))
+                 lbl.bind("<Enter>", lambda e: on_hover())
+                 lbl.bind("<Leave>", lambda e: on_leave())
+                 slot.bind("<Enter>", lambda e: on_hover())
+                 slot.bind("<Leave>", lambda e: on_leave())
+        
+        icon_btn.bind("<Button-1>", open_icon_selector)
+
+
+        # Fields Container
+        fields_frame = tk.Frame(content, bg="#1e1e1e")
+        fields_frame.grid(row=0, column=1, sticky="nsew")
+        content.columnconfigure(1, weight=1) # Fields take remaining width
+
+        # Label Helper
+        def create_label(text):
+            return tk.Label(fields_frame, text=text, font=("Segoe UI", 9, "bold"), 
+                           bg="#1e1e1e", fg="#B0B0B0", anchor="w")
+
+        # Input Style Helper
+        input_bg_color = "#48494A" # Softer Gray
+        input_fg_color = "white"
+
+        # 1. NAME
+        create_label("NAME").pack(fill="x", pady=(0,5))
+        name_entry = tk.Entry(fields_frame, bg=input_bg_color, fg=input_fg_color, 
+                             insertbackground="white", relief="flat", font=("Segoe UI", 10))
+        name_entry.pack(fill="x", ipady=8, pady=(0, 15))
+
         if edit_mode: name_entry.insert(0, existing_data.get("name", ""))
+
+
+        # 2. CLIENT / LOADER (Grouped)
+        create_label("CLIENT / LOADER").pack(fill="x", pady=(0,5))
         
-        # Mod Loader
-        tk.Label(top_sec, text="Client / Loader", font=("Segoe UI", 9, "bold"), fg=COLORS['text_secondary'], bg="#1e1e1e").pack(anchor="w")
         loader_var = tk.StringVar()
-        loader_combo = ttk.Combobox(top_sec, textvariable=loader_var, values=["Vanilla", "Fabric", "Forge", "BatMod", "LabyMod", "Lunar Client"], state="readonly", font=("Segoe UI", 10))
-        loader_combo.pack(fill="x", pady=(5, 15), ipady=5)
+        loader_combo = ttk.Combobox(fields_frame, textvariable=loader_var, 
+                                   values=["Vanilla", "Fabric", "Forge", "Other versions (ie: BatMod, Laby Mod)"], 
+                                   state="readonly", font=("Segoe UI", 10), width=40)
+        loader_combo.pack(fill="x", ipady=5, pady=(0, 5))
         
-        if edit_mode: loader_combo.set(existing_data.get("loader", "Vanilla"))
-        
-        # Game Version
-        tk.Label(top_sec, text="Game Version", font=("Segoe UI", 9, "bold"), fg=COLORS['text_secondary'], bg="#1e1e1e").pack(anchor="w")
+        # Disclaimer
+        self.disclaimer_lbl = tk.Label(fields_frame, text="⚠️ These versions need to be downloaded externally", 
+                                      bg="#1e1e1e", fg="#F1C40F", font=("Segoe UI", 8), anchor="w")
+
+        # 3. VERSION
+        create_label("VERSION").pack(fill="x", pady=(10,5))
         
         self.modal_version_var = tk.StringVar()
-        self.modal_ver_combo = ttk.Combobox(top_sec, textvariable=self.modal_version_var, state="disabled", font=("Segoe UI", 10))
-        self.modal_ver_combo.pack(fill="x", pady=(5, 15), ipady=5)
-        
+        self.modal_ver_combo = ttk.Combobox(fields_frame, textvariable=self.modal_version_var, 
+                                           state="disabled", font=("Segoe UI", 10), width=40)
+        self.modal_ver_combo.pack(fill="x", ipady=5, pady=(0, 5))
+
+        # Status / Helper below version
+        self.modal_status_lbl = tk.Label(fields_frame, text="Select a loader to fetch versions", 
+                                        bg="#1e1e1e", fg="#5A5B5C", font=("Segoe UI", 8), anchor="w")
+        self.modal_status_lbl.pack(fill="x", pady=(0, 10))
+
+        # Start logic if edit mode
         if edit_mode:
-            self.modal_version_var.set(existing_data.get("version", ""))
-        
-        # Helper Label
-        self.modal_status_lbl = tk.Label(top_sec, text="Select a loader to fetch versions", bg="#1e1e1e", fg=COLORS['text_secondary'], font=("Segoe UI", 8))
-        self.modal_status_lbl.pack(anchor="w", pady=(0, 5))
+             loader_combo.set(existing_data.get("loader", "Vanilla"))
+             self.modal_version_var.set(existing_data.get("version", ""))
 
-        # Version Filters in Modal
-        filter_frame = tk.Frame(top_sec, bg="#1e1e1e")
+        # --- Filters (Snapshots) ---
+        filter_frame = tk.Frame(fields_frame, bg="#1e1e1e")
         filter_frame.pack(fill="x", pady=(0, 15))
-        
         self.modal_show_snapshots = tk.BooleanVar(value=False)
-        tk.Checkbutton(filter_frame, text="Show Snapshots", variable=self.modal_show_snapshots, 
+        snap_chk = tk.Checkbutton(filter_frame, text="Show Snapshots", variable=self.modal_show_snapshots,
                       bg="#1e1e1e", fg="white", selectcolor="#1e1e1e", activebackground="#1e1e1e",
-                      command=lambda: self.update_modal_versions_list()).pack(side="left")
+                      command=lambda: self.update_modal_versions_list())
+        snap_chk.pack(side="left")
 
-        # Logic
+
+        # --- More Options (Collapsible) ---
+        more_opts_frame = tk.Frame(fields_frame, bg="#1e1e1e")
+        more_opts_frame.pack(fill="x", pady=(5, 0))
+        
+        opts_exposed = tk.BooleanVar(value=False)
+        opts_container = tk.Frame(fields_frame, bg="#1e1e1e")
+        
+        def toggle_opts():
+             if opts_exposed.get():
+                  opts_container.pack_forget()
+                  opts_exposed.set(False)
+                  opts_btn.config(text="▸ MORE OPTIONS")
+             else:
+                  opts_container.pack(fill="x", pady=(10,0))
+                  opts_exposed.set(True)
+                  opts_btn.config(text="▾ MORE OPTIONS")
+
+        opts_btn = tk.Label(more_opts_frame, text="▸ MORE OPTIONS", font=("Segoe UI", 9, "bold"),
+                           bg="#1e1e1e", fg="white", cursor="hand2")
+        opts_btn.pack(side="left")
+        opts_btn.bind("<Button-1>", lambda e: toggle_opts())
+
+        # Java Executable
+        create_label("JAVA EXECUTABLE").pack(in_=opts_container, fill="x", pady=(5,5))
+        java_entry = tk.Entry(opts_container, bg=input_bg_color, fg=input_fg_color, relief="flat", font=("Segoe UI", 10))
+        java_entry.pack(fill="x", ipady=6)
+        java_entry.insert(0, "<Use Bundled Java Runtime>")
+        java_entry.config(state="disabled") # Placeholder for now
+
+        # Resolution
+        create_label("RESOLUTION").pack(in_=opts_container, fill="x", pady=(15,5))
+        res_frame = tk.Frame(opts_container, bg="#1e1e1e")
+        res_frame.pack(fill="x")
+        
+        res_w = tk.Entry(res_frame, bg=input_bg_color, fg=input_fg_color, width=10, relief="flat", font=("Segoe UI", 10))
+        res_w.pack(side="left", ipady=6)
+        res_w.insert(0, "Auto")
+        
+        tk.Label(res_frame, text=" x ", bg="#1e1e1e", fg="white").pack(side="left")
+        
+        res_h = tk.Entry(res_frame, bg=input_bg_color, fg=input_fg_color, width=10, relief="flat", font=("Segoe UI", 10))
+        res_h.pack(side="left", ipady=6)
+        res_h.insert(0, "Auto")
+
+
+        # -- Logic --
         self.cached_loader_versions = [] 
 
         def check_installed(version_id, loader_type):
@@ -731,7 +1138,8 @@ class MinecraftLauncher:
                     return any("forge" in iv.lower() and version_id in iv for iv in installed_list)
                 else: 
                      # For other clients, check exact match + client name usually
-                     return any(loader_type.lower() in iv.lower() and version_id in iv for iv in installed_list)
+                     # Broad check for anything that looks like a version match in installed list
+                     return any(version_id in iv for iv in installed_list)
             except:
                 pass
             return False
@@ -768,12 +1176,23 @@ class MinecraftLauncher:
                                 temp_list.append({'id': mc_ver, 'type': 'release'})
                     raw_versions = temp_list
                 
-                # --- 3RD PARTY CLIENTS (Simulated for now, can be expanded to real APIs) ---
-                elif loader_type in ["BatMod", "LabyMod", "Lunar Client"]:
-                     # These usually support specific versions
-                     supported = ["1.8.9", "1.12.2", "1.16.5", "1.17.1", "1.18.2", "1.19.4", "1.20.1"]
-                     for v in supported:
-                         raw_versions.append({'id': v, 'type': 'release'})
+                # --- 3RD PARTY CLIENTS ---
+                elif loader_type == "Other versions (ie: BatMod, Laby Mod)":
+                     # Scan installed versions directory for custom clients
+                     try:
+                         installed = minecraft_launcher_lib.utils.get_installed_versions(self.minecraft_dir)
+                         # Get known vanilla versions to filter
+                         vanilla_ids = {v['id'] for v in minecraft_launcher_lib.utils.get_version_list()}
+                         
+                         for inst in installed:
+                             vid = inst['id']
+                             # Filter out standard loaders and vanilla versions
+                             if "fabric" in vid.lower() or "forge" in vid.lower() or vid in vanilla_ids:
+                                 continue
+                             # Add to list
+                             raw_versions.append({'id': vid, 'type': inst['type']})
+                     except Exception as e:
+                         print(f"Error scanning installed versions: {e}")
 
                 self.cached_loader_versions = raw_versions
                 if win.winfo_exists():
@@ -795,7 +1214,7 @@ class MinecraftLauncher:
                 is_inst = check_installed(v['id'], loader)
                 entry = v['id']
                 if not is_inst:
-                     if loader in ["BatMod", "LabyMod", "Lunar Client"]:
+                     if loader == "Other versions (ie: BatMod, Laby Mod)":
                           entry += " (External Install Required)" # Hint that we might not auto-install these
                      else:
                           entry += " (Not Installed)"
@@ -816,6 +1235,13 @@ class MinecraftLauncher:
         def on_loader_change(e):
             loader = loader_var.get()
             if not loader: return
+            
+            # Update Disclaimer
+            if loader == "Other versions (ie: BatMod, Laby Mod)":
+                self.disclaimer_lbl.pack(anchor="w", pady=(0, 10))
+            else:
+                self.disclaimer_lbl.pack_forget()
+
             self.modal_ver_combo.set("Fetching...")
             self.modal_ver_combo.config(state="disabled")
             self.modal_status_lbl.config(text=f"Fetching {loader} versions...")
@@ -837,11 +1263,13 @@ class MinecraftLauncher:
              
              version_id = v_selection.split(" ")[0]
              loader = loader_var.get()
+             icon_val = current_icon_var.get()
              
              new_profile = {
                  "name": name,
                  "version": version_id,
                  "loader": loader,
+                 "icon": icon_val,
                  "last_played": existing_data.get("last_played", "Never"),
                  "created": existing_data.get("created", "2024-01-01")
              }
@@ -856,23 +1284,26 @@ class MinecraftLauncher:
              self.update_installation_dropdown()
              win.destroy()
 
-        # Actions
+        # --- Footer Actions ---
         btn_row = tk.Frame(win, bg="#1e1e1e")
-        btn_row.pack(side="bottom", fill="x", padx=20, pady=20)
+        btn_row.pack(side="bottom", fill="x", padx=25, pady=25)
         
         btn_text = "Save" if edit_mode else "Create"
+        # Create/Save (Green)
         tk.Button(btn_row, text=btn_text, bg=COLORS['success_green'], fg="white", font=("Segoe UI", 10, "bold"),
-                 relief="flat", padx=20, pady=8, cursor="hand2",
-                 command=create_action).pack(side="right", padx=5)
+                 relief="flat", padx=25, pady=8, cursor="hand2",
+                 command=create_action).pack(side="right", padx=(10, 0))
                  
-        tk.Button(btn_row, text="Cancel", bg="#1e1e1e", fg=COLORS['text_primary'], font=("Segoe UI", 10),
-                 relief="flat", padx=10, pady=8, cursor="hand2",
-                 command=win.destroy).pack(side="right", padx=5)
+        # Cancel (Text only typically, but we keep button style for consistency)
+        tk.Button(btn_row, text="Cancel", bg="#1e1e1e", fg="white", font=("Segoe UI", 10),
+                 relief="flat", padx=15, pady=8, cursor="hand2",
+                 activebackground="#1e1e1e", activeforeground="#B0B0B0",
+                 command=win.destroy).pack(side="right")
 
     def open_installation_menu(self, idx, btn_widget):
         # Create a popup menu (Edit, Delete)
         menu = tk.Toplevel(self.root)
-        menu.overrideredirect(True)
+        menu.wm_overrideredirect(True)
         menu.config(bg=COLORS['card_bg'])
         
         # Position
@@ -1665,6 +2096,7 @@ class MinecraftLauncher:
                             "name": "Latest Release",
                             "version": "latest-release", # Metadata placeholder
                             "loader": "Vanilla",
+                            "icon": "icons/grass_block_side.png",
                             "last_played": "Never",
                             "created": "2024-01-01"
                         }]
@@ -1796,6 +2228,7 @@ class MinecraftLauncher:
             "name": "Latest Release",
             "version": "latest-release",
             "loader": "Vanilla",
+            "icon": "icons/grass_block_side.png",
             "last_played": "Never",
             "created": "2024-01-01"
         }]

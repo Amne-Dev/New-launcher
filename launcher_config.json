@@ -16,8 +16,9 @@
     "installations": [
         {
             "name": "Latest Release",
-            "version": "latest-release",
+            "version": "1.21.11",
             "loader": "Vanilla",
+            "icon": "icons/grass_block_side.png",
             "last_played": "Never",
             "created": "2024-01-01"
         },
@@ -53,6 +54,14 @@
             "name": "Aquatic",
             "version": "1.13",
             "loader": "Vanilla",
+            "last_played": "Never",
+            "created": "2024-01-01"
+        },
+        {
+            "name": "Bat",
+            "version": "BatMod",
+            "loader": "Other versions (ie: BatMod, Laby Mod)",
+            "icon": "icons/emerald_block.png",
             "last_played": "Never",
             "created": "2024-01-01"
         }

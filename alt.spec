@@ -5,7 +5,7 @@ a = Analysis(
     ['alt.py'],
     pathex=[],
     binaries=[],
-    datas=[('logo.png', '.'), ('logo.ico', '.'), ('background.png', '.'), ('image1.png', '.')],
+    datas=[('logo.png', '.'), ('logo.ico', '.'), ('background.png', '.'), ('image1.png', '.'), ('icons', 'icons'), ('wallpapers', 'wallpapers')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
