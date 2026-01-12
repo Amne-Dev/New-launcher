@@ -14,6 +14,7 @@ body {
     background-color: var(--bg-color);
     color: var(--text-main);
     line-height: 1.6;
+    scroll-behavior: smooth;
 }
 
 /* Nav */
@@ -82,7 +83,14 @@ nav {
     text-align: center;
     padding: 80px 20px 60px;
     max-width: 1200px;
-    margin: 0 auto; /* Center the hero container itself */
+    margin: 0 auto;
+}
+
+.hero-content {
+    display: flex;
+    flex-direction: column;
+    align-items: center; /* Ensures all children like p and sub-text are centered */
+    width: 100%;
 }
 
 .hero h1 {
@@ -146,13 +154,16 @@ nav {
 .sub-text {
     font-size: 0.9rem !important; 
     opacity: 0.6;
+    text-align: center;
+    width: 100%;
+    margin-top: 15px; /* Spacing from buttons */
 }
 
 .hero-image {
     margin-top: 60px;
     width: 100%;
     max-width: 900px;
-    perspective: 1000px;
+    /* perspective removed here to apply directly on transform for sharpness */
 }
 
 .placeholder-window {
@@ -160,11 +171,14 @@ nav {
     border-radius: 12px;
     border: 1px solid #333;
     box-shadow: 0 20px 50px rgba(0,0,0,0.5);
-    height: 500px; /* Placeholder Aspect Ratio */
+    /* height removed in favor of aspect-ratio on content */ 
     display: flex;
     flex-direction: column;
     overflow: hidden;
-    transform: rotateX(2deg);
+    transform: perspective(1000px) rotateX(2deg) translateZ(0);
+    backface-visibility: hidden;
+    -webkit-font-smoothing: subpixel-antialiased;
+    will-change: transform;
     transition: transform 0.5s;
 }
 
@@ -201,7 +215,16 @@ nav {
     justify-content: center;
     color: #444;
     font-weight: 600;
-    background: radial-gradient(circle at center, #2a2a2a 0%, #1e1e1e 100%);
+    /* Preview Image */
+    width: 100%;
+    aspect-ratio: 1919 / 948;
+    background-image: url('https://raw.githubusercontent.com/Amne-Dev/New-launcher/main/preview.png');
+    background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
+    background-color: #1e1e1e; /* Fallback */
+    image-rendering: -webkit-optimize-contrast;
+    image-rendering: high-quality;
 }
 
 /* Features */
