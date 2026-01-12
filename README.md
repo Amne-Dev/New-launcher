@@ -1,55 +1,34 @@
-# New Launcher
+# 🚀 New Launcher
 
-A modern, lightweight, and customizable Minecraft launcher built with Python.
+**The Better Way to Play Minecraft.**
+Simple. Fast. Customizable.
 
-## Features
+## ✨ What does it do?
+*   **Play Everything**: Supports **Vanilla**, **Fabric**, and **Forge**.
+*   **Looks Familiar**: A modern design that looks like the official launcher, but feels faster.
+*   **Custom Icons**: Pick real **Minecraft Blocks** (like Diamond Block, TNT, or Workbench) for your installation icons!
+*   **Discord Status**: Shows your friends exactly what you're playing with built-in Rich Presence.
+*   **Offline Support**: Create offline ("Developer") accounts easily.
 
-*   **Multi-Loader Support**: Seamlessly launch **Vanilla**, **Forge**, and **Fabric** versions of Minecraft.
-*   **Version Management**: Automatically detects your installed Minecraft versions. easily switch between different versions.
-*   **Profile System**: 
-    *   Create and manage multiple profiles.
-    *   Supports **Offline/Developer Mode** accounts.
-    *   Skin customization support (view your skin head in the launcher).
-*   **Performance Control**:
-    *   **RAM Allocation**: Adjust memory usage with a slider or precise manual entry (1GB - 16GB+).
-    *   **Java Arguments**: Full control over JVM flags for optimization.
-*   **Discord Integration**: Built-in **Discord Rich Presence (RPC)** to show your friends what you're playing.
-*   **Customization**:
-    *   Change your Minecraft installation directory.
-    *   Dark mode UI with a clean, modern aesthetic.
-*   **Diagnostics**: Integrated log viewer to troubleshoot issues easily.
+## 📥 How to Install
+1.  Download the installer (e.g., `NLCSetup.exe`) from the Releases page.
+2.  Run the installer and follow the simple steps.
+3.  Open **New Launcher** from your desktop icon.
 
-## Installation
+## 🎮 How to Play
+1.  **Create a Profile**: On the sidebar, click the profile name (e.g. "Steve") to add your own offline username.
+2.  **Add a Version**: 
+    *   Go to the **Installations** tab.
+    *   Click **New Installation**.
+    *   Pick a Version (like 1.20.1) and a Loader (Vanilla, Fabric, etc.).
+    *   **Pro Tip**: Click the icon box to choose a cool block texture!
+3.  **Launch**: Go back to the **Play** tab, select your version from the bottom list, and hit **PLAY**.
 
-1.  Download the latest `alt.exe` from the releases page (or the `dist` folder if you built it yourself).
-2.  Place the executable in a folder of your choice (e.g., on your Desktop or in a dedicated "Games" folder).
-3.  Run `alt.exe`.
+## ⚡ Power Users (RAM)
+Need more memory for mods?
+1.  Click **Settings** on the sidebar.
+2.  Drag the **Java Memory** slider to the right.
+3.  That's it!
 
-## Usage
-
-### Getting Started
-1.  **Select Loader**: Choose between Vanilla, Forge, or Fabric from the dropdown menu.
-2.  **Select Version**: Pick the Minecraft version you want to play.
-3.  **Launch**: Click the big green **PLAY** button to start the game.
-
-### Managing Accounts
-*   Click the user profile icon (or the name in the sidebar) to open the profile menu.
-*   Select **Add Account** to create a new offline profile.
-*   Enter your desired username and save.
-
-### Settings
-Navigate to the **SETTINGS** tab to configure:
-*   **Memory (RAM)**: Use the slider to allocate more RAM if you are playing with heavy mods.
-*   **Game Directory**: Change where Minecraft files are stored.
-*   **Discord status**: Toggle Rich Presence on or off.
-
-## Configuration
-The launcher saves your preferences (profiles, RAM settings, etc.) in your AppData folder:
-`%APPDATA%\.nlc\launcher_config.json`
-
-## Requirements
-*   A valid Minecraft installation (recommended).
-*   Java runtime environment (JRE) installed for the versions of Minecraft you intend to play.
-
-## Disclaimer
-This launcher is an independent project and is not affiliated with Mojang Studios or Microsoft.
+---
+*This is an open-source project and is not affiliated with Mojang Studios or Microsoft.*

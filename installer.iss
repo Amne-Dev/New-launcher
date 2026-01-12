@@ -1,5 +1,5 @@
 #define MyAppName "New Launcher"
-#define MyAppVersion "1.2.5"
+#define MyAppVersion "1.2.6"
 #define MyAppPublisher "@amne-dev on github"
 #define MyAppURL "https://github.com/Amne-Dev/New-launcher"
 #define MyAppExeName "NewLauncher.exe"

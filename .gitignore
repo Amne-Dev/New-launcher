@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+
+# PyInstaller
+build/
+dist/
+
+# Inno Setup Output
+installer/
+
+# Logs
+logs/

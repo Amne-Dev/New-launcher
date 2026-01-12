@@ -30,7 +30,7 @@ try:
 except AttributeError:
     RESAMPLE_NEAREST = Image.NEAREST  # type: ignore # Older Pillow
 
-CURRENT_VERSION = "1.2"
+CURRENT_VERSION = "1.2.6"
 
 # --- Helpers ---
 def resource_path(relative_path):
