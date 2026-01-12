@@ -1,0 +1,4 @@
+minecraft-launcher-lib
+requests
+Pillow
+pypresence

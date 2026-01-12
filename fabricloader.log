@@ -1,0 +1,8 @@
+[01:44:19] [WARN] [FabricLoader/Knot]: Class path entries reference missing files: C:\Users\amdev\AppData\Roaming\.minecraft\versions\fabric-loader-0.18.4-1.21.5\fabric-loader-0.18.4-1.21.5.jar - the game may not load properly!
+[01:44:19] [ERROR] [FabricLoader/GameProvider]: Minecraft game provider couldn't locate the game! The game may be absent from the class path, lacks some expected files, suffers from jar corruption or is of an unsupported variety/version.
+[01:44:19] [ERROR] [FabricLoader/]: Uncaught exception in thread "main"
+java.lang.RuntimeException: Minecraft game provider couldn't locate the game! The game may be absent from the class path, lacks some expected files, suffers from jar corruption or is of an unsupported variety/version.
+	at net.fabricmc.loader.impl.launch.knot.Knot.createGameProvider(Knot.java:208)
+	at net.fabricmc.loader.impl.launch.knot.Knot.init(Knot.java:128)
+	at net.fabricmc.loader.impl.launch.knot.Knot.launch(Knot.java:66)
+	at net.fabricmc.loader.impl.launch.knot.KnotClient.main(KnotClient.java:23)

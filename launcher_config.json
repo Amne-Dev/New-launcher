@@ -3,7 +3,7 @@
         {
             "name": "Crimson_ev",
             "type": "offline",
-            "skin_path": "C:/Users/amdev/Downloads/58c66a1b1ddc3eb5.png",
+            "skin_path": "C:/Users/amdev/Downloads/Crimson_ev.png",
             "uuid": ""
         },
         {
@@ -13,12 +13,60 @@
             "uuid": ""
         }
     ],
-    "current_profile_index": 0,
+    "installations": [
+        {
+            "name": "Latest Release",
+            "version": "latest-release",
+            "loader": "Vanilla",
+            "last_played": "Never",
+            "created": "2024-01-01"
+        },
+        {
+            "name": "1.21.5 Fabric",
+            "version": "1.21.5",
+            "loader": "Fabric",
+            "last_played": "Never",
+            "created": "2024-01-01"
+        },
+        {
+            "name": "SMP",
+            "version": "1.21.8",
+            "loader": "Fabric",
+            "last_played": "Never",
+            "created": "2024-01-01"
+        },
+        {
+            "name": "Speedrun Optimal",
+            "version": "1.16.5",
+            "loader": "Fabric",
+            "last_played": "Never",
+            "created": "2024-01-01"
+        },
+        {
+            "name": "Legacy mods",
+            "version": "1.12.2",
+            "loader": "Forge",
+            "last_played": "Never",
+            "created": "2024-01-01"
+        },
+        {
+            "name": "Aquatic",
+            "version": "1.13",
+            "loader": "Vanilla",
+            "last_played": "Never",
+            "created": "2024-01-01"
+        }
+    ],
+    "current_profile_index": 1,
+    "current_installation_index": 2,
     "loader": "Fabric",
-    "last_version": "",
     "auto_download_mod": true,
     "ram_allocation": 5120,
     "java_args": "",
     "minecraft_dir": "C:\\Users\\amdev\\AppData\\Roaming\\.minecraft",
-    "rpc_enabled": true
+    "rpc_enabled": true,
+    "rpc_show_version": true,
+    "rpc_show_server": true,
+    "auto_update_check": true,
+    "current_wallpaper": null
 }

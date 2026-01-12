@@ -1,8 +1,8 @@
 #define MyAppName "New Launcher"
-#define MyAppVersion "1.0"
+#define MyAppVersion "1.2"
 #define MyAppPublisher "@amne-dev on github"
-#define MyAppURL ""
-#define MyAppExeName "alt.exe"
+#define MyAppURL "https://github.com/Amne-Dev/New-launcher"
+#define MyAppExeName "NewLauncher.exe"
 
 [Setup]
 ; NOTE: The value of AppId uniquely identifies this application. Do not use the same AppId value in installers for other applications.

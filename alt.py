@@ -10,10 +10,13 @@ import glob
 import json
 import shutil
 import requests
+import webbrowser
 from PIL import Image, ImageTk
 from datetime import datetime
 from typing import Any, cast
 import time
+
+import hashlib
 
 try:
     from pypresence import Presence # type: ignore
@@ -26,6 +29,8 @@ try:
     RESAMPLE_NEAREST = Image.Resampling.NEAREST  # Pillow >= 9.1
 except AttributeError:
     RESAMPLE_NEAREST = Image.NEAREST  # type: ignore # Older Pillow
+
+CURRENT_VERSION = "1.2"
 
 # --- Helpers ---
 def resource_path(relative_path):
@@ -63,7 +68,7 @@ def is_version_installed(version_id):
     path = os.path.join(minecraft_dir, "versions", version_id, f"{version_id}.json")
     return os.path.exists(path)
 
-LOADERS = ["Vanilla", "Forge", "Fabric"]
+LOADERS = ["Vanilla", "Forge", "Fabric", "BatMod", "LabyMod", "Lunar Client"]
 MOD_COMPATIBLE_LOADERS = {"Forge", "Fabric"}
 DEFAULT_USERNAME = "Steve"
 INSTALL_MARK = "✅ "
@@ -90,28 +95,46 @@ class MinecraftLauncher:
         self.root.configure(bg=COLORS['main_bg'])
         self.minecraft_dir = get_minecraft_dir()
         
-        # Use AppData for config to ensure persistence
-        app_data = os.getenv('APPDATA')
-        if app_data:
-            self.config_dir = os.path.join(app_data, ".nlc")
+        # Config Priority: 
+        # 1. Local "launcher_config.json" (Portable / Dev mode)
+        # 2. AppData/.nlc (Standard Install)
+        
+        local_config = "launcher_config.json"
+        
+        if os.path.exists(local_config):
+            self.config_file = os.path.abspath(local_config)
+            self.config_dir = os.path.dirname(self.config_file)
+            print(f"Using local config: {self.config_file}")
         else:
-            self.config_dir = os.path.join(os.path.expanduser("~"), ".nlc") # Fallback to user home
-            
-        if not os.path.exists(self.config_dir):
-            os.makedirs(self.config_dir, exist_ok=True)
-            
-        self.config_file = os.path.join(self.config_dir, "launcher_config.json")
+            app_data = os.getenv('APPDATA')
+            if app_data:
+                self.config_dir = os.path.join(app_data, ".nlc")
+            else:
+                self.config_dir = os.path.join(os.path.expanduser("~"), ".nlc")
+                
+            if not os.path.exists(self.config_dir):
+                os.makedirs(self.config_dir, exist_ok=True)
+                
+            self.config_file = os.path.join(self.config_dir, "launcher_config.json")
+            print(f"Using global config: {self.config_file}")
         
         self.last_version = ""
-        self.profiles = [] # List of {"name": str, "type": "offline", "skin_path": str, "uuid": str}
+        self.profiles = [] # List of {"name": str, "type": "offline", "skin_path": str, "uuid": str} (ACCOUNTS)
+        self.installations = [] # List of {"name": str, "version": str, "loader": str, "last_played": str, "created": str} (GAME PROFILES)
         self.current_profile_index = -1
         self.auto_download_mod = False
         self.mod_available_online = False
         self.ram_allocation = DEFAULT_RAM
         self.java_args = ""
+        self.loader_var = tk.StringVar(value="Vanilla")
+        self.version_var = tk.StringVar()
         self.rpc_enabled = True # Default True
+        self.rpc_show_version = True # Default True
+        self.rpc_show_server = True # Default True
         self.rpc = None
         self.rpc_connected = False
+        self.auto_update_check = True # Default True
+
         self.start_time = None
         self.current_tab = None
         self.log_file_path = None
@@ -120,7 +143,14 @@ class MinecraftLauncher:
         self.setup_styles()
         self.create_layout()
         self.load_from_config()
+        # Refresh UI with loaded data
+        self.update_installation_dropdown()
+        self.refresh_installations_list()
         self.load_versions()
+        
+        # Auto Update Check
+        if self.auto_update_check:
+            self.check_for_updates()
 
     def setup_styles(self):
         style = ttk.Style()
@@ -149,39 +179,82 @@ class MinecraftLauncher:
                        thickness=4)
 
     def create_layout(self):
-        # 1. Sidebar (Left)
-        self.sidebar = tk.Frame(self.root, bg=COLORS['sidebar_bg'], width=70)
+        # 1. Sidebar (Left) - width 250px for proper menu
+        self.sidebar = tk.Frame(self.root, bg=COLORS['sidebar_bg'], width=200)
         self.sidebar.pack(side="left", fill="y")
         self.sidebar.pack_propagate(False)
         
-        # Sidebar Icon
+        # --- Sidebar Profile Section (Top Left) ---
+        self.profile_frame = tk.Frame(self.sidebar, bg=COLORS['sidebar_bg'], cursor="hand2")
+        self.profile_frame.pack(fill="x", ipady=10, padx=10, pady=10)
+        self.profile_frame.bind("<Button-1>", lambda e: self.toggle_profile_menu())
+        
+        # Profile Icon
+        self.sidebar_head_label = tk.Label(self.profile_frame, bg=COLORS['sidebar_bg'])
+        self.sidebar_head_label.pack(side="left", padx=(5, 10))
+        self.sidebar_head_label.bind("<Button-1>", lambda e: self.toggle_profile_menu())
+        
+        # Profile Text Container
+        self.sidebar_text_frame = tk.Frame(self.profile_frame, bg=COLORS['sidebar_bg'])
+        self.sidebar_text_frame.pack(side="left", fill="x")
+        self.sidebar_text_frame.bind("<Button-1>", lambda e: self.toggle_profile_menu())
+        
+        self.sidebar_username = tk.Label(self.sidebar_text_frame, text="Steve", font=("Segoe UI", 11, "bold"),
+                                        bg=COLORS['sidebar_bg'], fg=COLORS['text_primary'], anchor="w")
+        self.sidebar_username.pack(fill="x")
+        self.sidebar_username.bind("<Button-1>", lambda e: self.toggle_profile_menu())
+        
+        self.sidebar_acct_type = tk.Label(self.sidebar_text_frame, text="Offline", font=("Segoe UI", 8),
+                                         bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'], anchor="w")
+        self.sidebar_acct_type.pack(fill="x")
+        self.sidebar_acct_type.bind("<Button-1>", lambda e: self.toggle_profile_menu())
+
+        tk.Frame(self.sidebar, bg="#454545", height=1).pack(fill="x", padx=10, pady=(0, 20)) # Separator
+
+        # --- Sidebar Menu Items ---
+        # Minecraft: Java Edition (Highlighted)
+        java_btn_frame = tk.Frame(self.sidebar, bg="#3A3B3C", cursor="hand2", padx=10, pady=10) # Lighter grey highlight
+        java_btn_frame.pack(fill="x", padx=5)
+        
+        # Small icon (simple square for now or reused logo)
         try:
-            logo_img = Image.open(resource_path("logo.png"))
-            logo_img = logo_img.resize((50, 50), RESAMPLE_NEAREST)
-            self.sidebar_logo = ImageTk.PhotoImage(logo_img)
-            tk.Label(self.sidebar, image=self.sidebar_logo, bg=COLORS['sidebar_bg']).pack(pady=(20, 20))
-        except Exception:
-            tk.Label(self.sidebar, text="M", font=("Georgia", 24, "bold"), 
-                    bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary']).pack(pady=(20, 20))
-        
-        # Profile Button
-        self.profile_btn = tk.Label(self.sidebar, bg=COLORS['sidebar_bg'], cursor="hand2")
-        self.profile_btn.pack(pady=10)
-        self.profile_btn.bind("<Button-1>", lambda e: self.toggle_profile_menu())
-        
+             # Just a small colored block or simple emoji
+            tk.Label(java_btn_frame, text="Java", bg="#2D8F36", fg="white", font=("Segoe UI", 8, "bold"), width=4).pack(side="left", padx=(0,10))
+        except: pass
+
+        tk.Label(java_btn_frame, text="Minecraft", font=("Segoe UI", 10, "bold"),
+                bg="#3A3B3C", fg="white").pack(side="left")
+
+        # --- Sidebar Links ---
+        # Spacer
+        tk.Frame(self.sidebar, bg=COLORS['sidebar_bg'], height=10).pack()
+
+        # Modrinth Link
+        self._create_sidebar_link("Modrinth", "https://modrinth.com/", indicator_text="Mods")
+
+        # Bottom spacer
+        tk.Frame(self.sidebar, bg=COLORS['sidebar_bg'], height=10).pack(side="bottom")
+
+        # Settings Link (Gear) - Packed to bottom first to be at the very bottom
+        self._create_sidebar_link("Settings", lambda: self.open_global_settings(), is_action=True, pack_side="bottom", icon="⚙")
+
+        # GitHub Link - Packed to bottom next to be above Settings
+        self._create_sidebar_link("GitHub", "https://github.com/Amne-Dev/New-launcher", pack_side="bottom")
+
         # 2. Main Content Area
         self.content_area = tk.Frame(self.root, bg=COLORS['main_bg'])
         self.content_area.pack(side="right", fill="both", expand=True)
         
         # 3. Top Navigation Bar
-        self.nav_bar = tk.Frame(self.content_area, bg=COLORS['tab_bar_bg'], height=50)
+        self.nav_bar = tk.Frame(self.content_area, bg=COLORS['tab_bar_bg'], height=60)
         self.nav_bar.pack(fill="x", side="top")
         self.nav_bar.pack_propagate(False)
         
         self.nav_buttons = {}
-        self.create_nav_btn("PLAY", lambda: self.show_tab("Play"))
-        self.create_nav_btn("SKINS", lambda: self.show_tab("Skins"))
-        self.create_nav_btn("SETTINGS", lambda: self.show_tab("Settings"))
+        # Tabs: Play, Installations, Locker
+        self.create_nav_btn("Play", lambda: self.show_tab("Play"))
+        self.create_nav_btn("Installations", lambda: self.show_tab("Installations"))
+        self.create_nav_btn("Locker", lambda: self.show_tab("Locker"))
 
         # 4. Tab Container
         self.tab_container = tk.Frame(self.content_area, bg=COLORS['main_bg'])
@@ -190,17 +263,68 @@ class MinecraftLauncher:
         # Initialize Tabs
         self.tabs = {}
         self.create_play_tab()
-        self.create_skins_tab()
+        self.create_locker_tab()
+        self.create_installations_tab()
         self.create_settings_tab()
         
         self.show_tab("Play")
 
+    def open_global_settings(self):
+        self.show_tab("Settings")
+
+    def _create_sidebar_link(self, text, url_or_command, indicator_text=None, is_action=False, pack_side="top", icon=None):
+        frame = tk.Frame(self.sidebar, bg=COLORS['sidebar_bg'], cursor="hand2", padx=15, pady=8)
+        frame.pack(fill="x", side=pack_side)
+        
+        # Indicator (like "Java" or "Mods")
+        if indicator_text:
+             bg_color = "#E74C3C" if indicator_text == "Mods" else "#2D8F36"
+             tk.Label(frame, text=indicator_text, bg=bg_color, fg="white", 
+                     font=("Segoe UI", 8, "bold"), width=4, cursor="hand2").pack(side="left", padx=(0,10))
+        
+        # Icon
+        if icon:
+             # Use a larger font for the symbol
+             tk.Label(frame, text=icon, font=("Segoe UI", 12), bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'], 
+                      cursor="hand2").pack(side="left", padx=(0, 10))
+
+        lbl = tk.Label(frame, text=text, font=("Segoe UI", 9), bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'], cursor="hand2")
+        lbl.pack(side="left")
+        
+        def handle_click(e):
+            if is_action:
+                url_or_command()
+            else:
+                webbrowser.open(url_or_command)
+            
+        frame.bind("<Button-1>", handle_click)
+        lbl.bind("<Button-1>", handle_click)
+        # bind children
+        for child in frame.winfo_children():
+            child.bind("<Button-1>", handle_click)
+        
+        # Hover effect
+        def on_enter(e):
+            frame.config(bg="#3A3B3C")
+            for child in frame.winfo_children():
+                if isinstance(child, tk.Label) and child.cget("text") != "Mods" and child.cget("text") != "Java": # Don't recolor badges
+                    child.config(bg="#3A3B3C", fg=COLORS['text_primary'])
+        
+        def on_leave(e):
+            frame.config(bg=COLORS['sidebar_bg'])
+            for child in frame.winfo_children():
+                if isinstance(child, tk.Label) and child.cget("text") != "Mods" and child.cget("text") != "Java":
+                    child.config(bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'])
+            
+        frame.bind("<Enter>", on_enter)
+        frame.bind("<Leave>", on_leave)
+
     def create_nav_btn(self, text, command):
-        btn = tk.Button(self.nav_bar, text=text, font=("Segoe UI", 10, "bold"),
+        btn = tk.Button(self.nav_bar, text=text.upper(), font=("Segoe UI", 11, "bold"),
                        bg=COLORS['tab_bar_bg'], fg=COLORS['text_secondary'],
                        activebackground=COLORS['tab_bar_bg'], activeforeground=COLORS['text_primary'],
                        relief="flat", bd=0, cursor="hand2", command=command)
-        btn.pack(side="left", padx=20, pady=10)
+        btn.pack(side="left", padx=30, pady=15)
         self.nav_buttons[text] = btn
 
     def show_tab(self, tab_name):
@@ -226,7 +350,7 @@ class MinecraftLauncher:
         frame = tk.Frame(self.tab_container, bg=COLORS['main_bg'])
         self.tabs["Play"] = frame
         
-        # Hero Section (Background)
+        # Hero Section (Background) - fills most of the space except bottom bar
         self.hero_canvas = tk.Canvas(frame, bg="#181818", highlightthickness=0)
         self.hero_canvas.pack(fill="both", expand=True, padx=0, pady=0)
         
@@ -234,6 +358,11 @@ class MinecraftLauncher:
         self.hero_img_raw = None
         try:
             bg_path = resource_path("background.png")
+            
+            # Use wallpaper from config if available (loaded in init -> load_from_config)
+            if hasattr(self, 'current_wallpaper') and self.current_wallpaper and os.path.exists(self.current_wallpaper):
+                 bg_path = self.current_wallpaper
+
             if os.path.exists(bg_path):
                 self.hero_img_raw = Image.open(bg_path)
         except Exception: 
@@ -242,51 +371,113 @@ class MinecraftLauncher:
         self.hero_canvas.bind("<Configure>", self._update_hero_layout)
 
         # Bottom Action Bar
-        bottom_bar = tk.Frame(frame, bg=COLORS['bottom_bar_bg'], height=90)
+        bottom_bar = tk.Frame(frame, bg=COLORS['bottom_bar_bg'], height=100) # Increased height
         bottom_bar.pack(fill="x", side="bottom")
         bottom_bar.pack_propagate(False)
-        
-        # Controls Container
-        controls = tk.Frame(bottom_bar, bg=COLORS['bottom_bar_bg'])
-        controls.pack(expand=True, fill="y", pady=15)
-        
-        # Version Selector Group
-        ver_group = tk.Frame(controls, bg=COLORS['bottom_bar_bg'])
-        ver_group.pack(side="left", padx=(0, 20))
-        
-        # Loader Dropdown
-        self.loader_var = tk.StringVar(value=LOADERS[0])
-        self.loader_dropdown = ttk.Combobox(ver_group, textvariable=self.loader_var, 
-                                           values=LOADERS, state="readonly", width=10,
-                                           style="Launcher.TCombobox")
-        self.loader_dropdown.pack(fill="x", pady=(0, 5))
-        self.loader_dropdown.bind("<<ComboboxSelected>>", self.on_loader_change)
-        
-        # Version Dropdown
-        self.version_var = tk.StringVar()
-        self.version_dropdown = ttk.Combobox(ver_group, textvariable=self.version_var, 
-                                            state="readonly", width=25,
-                                            style="Launcher.TCombobox")
-        self.version_dropdown.pack(fill="x")
-        self.version_dropdown.bind("<<ComboboxSelected>>", self.on_version_change)
 
-        # Play Button
-        self.launch_btn = tk.Button(controls, text="PLAY", font=("Segoe UI", 16, "bold"),
+        # We use grid for 3 distinct sections in the bottom bar to ensure centering
+        bottom_bar.columnconfigure(0, weight=1) # Left
+        bottom_bar.columnconfigure(1, weight=1) # Center
+        bottom_bar.columnconfigure(2, weight=1) # Right
+        
+        # 1. Left (Installation Selector)
+        left_frame = tk.Frame(bottom_bar, bg=COLORS['bottom_bar_bg'])
+        left_frame.grid(row=0, column=0, sticky="w", padx=30)
+        
+        # Removed label "INSTALLATION"
+        
+        self.installation_var = tk.StringVar()
+        style = ttk.Style()
+        style.configure("Large.TCombobox", padding=5, font=("Segoe UI", 11))
+        
+        self.installation_dropdown = ttk.Combobox(left_frame, textvariable=self.installation_var, 
+                                                 state="readonly", width=35,
+                                                 style="Large.TCombobox")
+        self.installation_dropdown.pack(fill="x", ipady=4)
+        self.installation_dropdown.bind("<<ComboboxSelected>>", self.on_installation_change)
+        
+        # Populate with installations
+        self.update_installation_dropdown()
+
+        # 2. Center (Play Button)
+        center_frame = tk.Frame(bottom_bar, bg=COLORS['bottom_bar_bg'])
+        center_frame.grid(row=0, column=1, pady=25)
+
+        # Composite Play Button (Frame)
+        self.play_container = tk.Frame(center_frame, bg=COLORS['play_btn_green'])
+        self.play_container.pack()
+
+        self.launch_btn = tk.Button(self.play_container, text="PLAY", font=("Segoe UI", 14, "bold"),
                                    bg=COLORS['play_btn_green'], fg="white",
                                    activebackground=COLORS['play_btn_hover'], activeforeground="white",
-                                   relief="flat", bd=0, cursor="hand2", width=15,
-                                   command=self.start_launch)
+                                   relief="flat", bd=0, cursor="hand2", width=14, pady=8,
+                                   command=lambda: self.start_launch(force_update=False))
         self.launch_btn.pack(side="left")
         
-        # Status Text
-        self.status_label = tk.Label(bottom_bar, text="Ready to launch", 
-                                    font=("Segoe UI", 9), bg=COLORS['bottom_bar_bg'], fg=COLORS['text_secondary'])
-        self.status_label.place(relx=0.5, rely=0.85, anchor="center")
+        # Divider line
+        tk.Frame(self.play_container, width=1, bg="#2D8F36").pack(side="left", fill="y")
+
+        self.launch_opts_btn = tk.Button(self.play_container, text="▼", font=("Segoe UI", 10),
+                                        bg=COLORS['play_btn_green'], fg="white",
+                                        activebackground=COLORS['play_btn_hover'], activeforeground="white",
+                                        relief="flat", bd=0, cursor="hand2", width=3,
+                                        command=self.open_launch_options)
+        self.launch_opts_btn.pack(side="left", fill="y")
         
-        # Progress Bar
+        
+        # 3. Right (Status / Account)
+        right_frame = tk.Frame(bottom_bar, bg=COLORS['bottom_bar_bg'])
+        right_frame.grid(row=0, column=2, sticky="e", padx=30)
+        
+        self.status_label = tk.Label(right_frame, text="Ready to launch", 
+                                    font=("Segoe UI", 9), bg=COLORS['bottom_bar_bg'], fg=COLORS['text_secondary'], anchor="e")
+        self.status_label.pack(anchor="e")
+        
+        # Small gamertag at bottom right
+        self.bottom_gamertag = tk.Label(right_frame, text="", font=("Segoe UI", 8),
+                                       bg=COLORS['bottom_bar_bg'], fg=COLORS['text_secondary'], anchor="e")
+        self.bottom_gamertag.pack(anchor="e")
+
+
+        # Progress Bar (Overlay at absolute bottom or integrated?)
+        # Let's place it at the very bottom of the bar
         self.progress_bar = ttk.Progressbar(bottom_bar, orient='horizontal', mode='determinate',
                                            style="Launcher.Horizontal.TProgressbar")
-        # self.progress_bar.place(relx=0, rely=0.96, relwidth=1, height=4) # Hidden by default
+        self.progress_bar.place(relx=0, rely=1.0, anchor="sw", relwidth=1, height=4) 
+
+    def open_launch_options(self):
+        # Popup near the arrow button
+        menu = tk.Toplevel(self.root)
+        menu.overrideredirect(True)
+        menu.config(bg=COLORS['card_bg'])
+        
+        try:
+             x = self.launch_opts_btn.winfo_rootx() + self.launch_opts_btn.winfo_width() - 150
+             y = self.launch_opts_btn.winfo_rooty() + self.launch_opts_btn.winfo_height() + 5
+             menu.geometry(f"150x40+{x}+{y}") 
+        except:
+             menu.geometry("150x40")
+             
+        def do_force():
+            menu.destroy()
+            self.start_launch(force_update=True)
+            
+        btn = tk.Label(menu, text="Force Update & Play", font=("Segoe UI", 10), 
+                      bg=COLORS['card_bg'], fg=COLORS['text_primary'], anchor="w", padx=10, pady=8)
+        btn.pack(fill="x")
+        btn.bind("<Button-1>", lambda e: do_force())
+        btn.bind("<Enter>", lambda e: btn.config(bg="#454545"))
+        btn.bind("<Leave>", lambda e: btn.config(bg=COLORS['card_bg']))
+
+        # Close on click outside
+        menu.bind("<FocusOut>", lambda e: self.root.after(100, lambda: menu.destroy() if menu.winfo_exists() else None))
+        menu.focus_set()
+
+    def update_bottom_gamertag(self):
+        # Update the small gamertag in the bottom right corner
+        if hasattr(self, 'bottom_gamertag') and self.profiles:
+             p = self.profiles[self.current_profile_index]
+             self.bottom_gamertag.config(text=p.get("name", ""))
 
     def _update_hero_layout(self, event):
         w, h = event.width, event.height
@@ -314,12 +505,465 @@ class MinecraftLauncher:
         self.hero_canvas.create_text(w//2, h*0.4, text="MINECRAFT", font=("Segoe UI", 40, "bold"), fill="white", anchor="center")
         self.hero_canvas.create_text(w//2, h*0.4 + 50, text="JAVA EDITION", font=("Segoe UI", 14), fill=COLORS['text_secondary'], anchor="center")
 
-    # --- SKINS TAB ---
-    def create_skins_tab(self):
+    # --- INSTALLATIONS TAB (New) ---
+    def create_installations_tab(self):
         frame = tk.Frame(self.tab_container, bg=COLORS['main_bg'])
-        self.tabs["Skins"] = frame
+        self.tabs["Installations"] = frame
         
-        container = tk.Frame(frame, bg=COLORS['main_bg'])
+        # 1. Top Bar (Search, Sort, Filters, New)
+        top_bar = tk.Frame(frame, bg=COLORS['main_bg'], pady=20, padx=40)
+        top_bar.pack(fill="x")
+        
+        # Search
+        search_frame = tk.Frame(top_bar, bg=COLORS['input_bg'], padx=10, pady=5)
+        search_frame.pack(side="left")
+        tk.Label(search_frame, text="🔍", bg=COLORS['input_bg'], fg=COLORS['text_secondary']).pack(side="left")
+        search_entry = tk.Entry(search_frame, bg=COLORS['input_bg'], fg=COLORS['text_primary'], relief="flat", font=("Segoe UI", 10))
+        search_entry.pack(side="left", padx=5)
+        
+        # Sort (Placeholder)
+        # tk.Label(top_bar, text="Sort by: Latest played", font=("Segoe UI", 9), bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(side="left", padx=20)
+        
+        # Filters (Checkboxes)
+        filter_frame = tk.Frame(top_bar, bg=COLORS['main_bg'])
+        filter_frame.pack(side="left", padx=40)
+        
+        self.show_releases = tk.BooleanVar(value=True)
+        self.show_snapshots = tk.BooleanVar(value=False)
+        self.show_modded = tk.BooleanVar(value=True)
+
+        def on_filter_change():
+            self.refresh_installations_list()
+
+        def create_filter(text, var):
+             cb = tk.Checkbutton(filter_frame, text=text, variable=var, 
+                                bg=COLORS['main_bg'], fg=COLORS['text_primary'], 
+                                selectcolor=COLORS['main_bg'], activebackground=COLORS['main_bg'],
+                                command=on_filter_change)
+             cb.pack(side="left", padx=10)
+             return cb
+             
+        create_filter("Releases", self.show_releases)
+        create_filter("Snapshots", self.show_snapshots)
+        create_filter("Modded", self.show_modded)
+        
+        # New Installation Button
+        tk.Button(top_bar, text="New installation", font=("Segoe UI", 10, "bold"),
+                 bg=COLORS['success_green'], fg="white", relief="flat", padx=15, pady=6, cursor="hand2",
+                 command=self.open_new_installation_modal).pack(side="right") 
+
+        # 2. Profile List
+        self.inst_list_frame = tk.Frame(frame, bg=COLORS['main_bg'])
+        self.inst_list_frame.pack(fill="both", expand=True, padx=40)
+        
+        self.refresh_installations_list()
+
+    def refresh_installations_list(self):
+        for w in self.inst_list_frame.winfo_children(): w.destroy()
+        
+        for idx, inst in enumerate(self.installations):
+            # Check Filters
+            # Determine type
+            v_id = inst.get("version", "").lower()
+            loader = inst.get("loader", "Vanilla")
+            
+            is_snapshot = "snapshot" in v_id or "pre" in v_id or "c" in v_id
+            is_modded = loader != "Vanilla"
+            
+            # If Modded: show if Show Modded is on. 
+            # Note: Modded can also be a snapshot (rarely tracked), usually releases.
+            
+            if is_modded:
+                if not self.show_modded.get(): continue
+            else:
+                if is_snapshot:
+                    if not self.show_snapshots.get(): continue
+                else:
+                    # Release
+                    if not self.show_releases.get(): continue
+
+            self.create_installation_item(self.inst_list_frame, idx, inst)
+
+    def create_installation_item(self, parent, idx, inst):
+        item = tk.Frame(parent, bg=COLORS['card_bg'], pady=15, padx=20)
+        item.pack(fill="x", pady=2)
+        
+        # Determine Icon
+        loader = inst.get("loader", "Vanilla")
+        icon_char = "⬜" # Default grass block
+        if loader == "Fabric": icon_char = "🧵"
+        elif loader == "Forge": icon_char = "🔨"
+        
+        icon_lbl = tk.Label(item, text=icon_char, bg=COLORS['card_bg'], fg=COLORS['text_secondary'], font=("Segoe UI", 16))
+        icon_lbl.pack(side="left", padx=(0, 20))
+        
+        # Details
+        info_frame = tk.Frame(item, bg=COLORS['card_bg'])
+        info_frame.pack(side="left", fill="x", expand=True)
+        
+        name = inst.get("name", "Unnamed Installation")
+        ver = inst.get("version", "Latest")
+        
+        tk.Label(info_frame, text=name, font=("Segoe UI", 11, "bold"), bg=COLORS['card_bg'], fg=COLORS['text_primary']).pack(anchor="w")
+        tk.Label(info_frame, text=f"{loader} {ver}", font=("Segoe UI", 9), bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(anchor="w")
+        
+        # Actions
+        actions = tk.Frame(item, bg=COLORS['card_bg'])
+        actions.pack(side="right")
+        
+        # Play
+        tk.Button(actions, text="Play", bg=COLORS['success_green'], fg="white", font=("Segoe UI", 9, "bold"),
+                 relief="flat", padx=15, cursor="hand2",
+                 command=lambda: self.launch_installation(idx)).pack(side="left", padx=5)
+                 
+        # Folder
+        tk.Button(actions, text="📁", bg=COLORS['input_bg'], fg=COLORS['text_primary'], relief="flat", cursor="hand2",
+                 command=lambda: self.open_installation_folder(idx)).pack(side="left", padx=5)
+                 
+        # Edit/Menu
+        menu_btn = tk.Button(actions, text="...", bg=COLORS['input_bg'], fg=COLORS['text_primary'], relief="flat", cursor="hand2")
+        menu_btn.config(command=lambda b=menu_btn: self.open_installation_menu(idx, b))
+        menu_btn.pack(side="left", padx=5)
+
+    def open_installation_folder(self, idx):
+        try:
+            os.startfile(self.minecraft_dir)
+        except Exception:
+            pass
+
+    def update_installation_dropdown(self):
+        # Update values of self.installation_dropdown based on self.installations
+        if not hasattr(self, 'installation_dropdown'): return
+        
+        # Format: "Name (Version - Loader)"
+        values = []
+        for p in self.installations:
+            name = p.get("name", "Unnamed")
+            ver = p.get("version", "Latest") 
+            loader = p.get("loader", "Vanilla")
+            values.append(f"{name} ({ver} - {loader})")
+            
+        self.installation_dropdown['values'] = values
+        if values:
+            # Restore selection
+            current = getattr(self, 'current_installation_index', 0)
+            if 0 <= current < len(values):
+                 self.installation_dropdown.current(current)
+            else:
+                 self.installation_dropdown.current(0)
+            # Trigger update state
+            self.on_installation_change(None)
+
+    def on_installation_change(self, event):
+        idx = self.installation_dropdown.current()
+        if idx >= 0:
+            self.current_installation_index = idx
+            inst = self.installations[idx]
+            ver = inst.get("version", "")
+            loader = inst.get("loader", "")
+            self.set_status(f"Selected: {ver} ({loader})")
+
+    def open_new_installation_modal(self, edit_mode=False, index=None):
+        # Modal for Name, Version, etc.
+        win = tk.Toplevel(self.root)
+        title = "Edit installation" if edit_mode else "Create new installation"
+        win.title(title)
+        win.geometry("500x650")
+        win.configure(bg="#1e1e1e") # Darker modal
+        
+        # Pre-load data if editing
+        existing_data = {}
+        if edit_mode and index is not None and 0 <= index < len(self.installations):
+            existing_data = self.installations[index]
+
+        # Icon + Name
+        top_sec = tk.Frame(win, bg="#1e1e1e")
+        top_sec.pack(fill="x", padx=20, pady=20)
+        
+        tk.Label(top_sec, text="Name", font=("Segoe UI", 9, "bold"), fg=COLORS['text_secondary'], bg="#1e1e1e").pack(anchor="w")
+        name_entry = tk.Entry(top_sec, bg="black", fg="white", insertbackground="white", relief="flat", font=("Segoe UI", 11))
+        name_entry.pack(fill="x", pady=(5, 15), ipady=8)
+        
+        if edit_mode: name_entry.insert(0, existing_data.get("name", ""))
+        
+        # Mod Loader
+        tk.Label(top_sec, text="Client / Loader", font=("Segoe UI", 9, "bold"), fg=COLORS['text_secondary'], bg="#1e1e1e").pack(anchor="w")
+        loader_var = tk.StringVar()
+        loader_combo = ttk.Combobox(top_sec, textvariable=loader_var, values=["Vanilla", "Fabric", "Forge", "BatMod", "LabyMod", "Lunar Client"], state="readonly", font=("Segoe UI", 10))
+        loader_combo.pack(fill="x", pady=(5, 15), ipady=5)
+        
+        if edit_mode: loader_combo.set(existing_data.get("loader", "Vanilla"))
+        
+        # Game Version
+        tk.Label(top_sec, text="Game Version", font=("Segoe UI", 9, "bold"), fg=COLORS['text_secondary'], bg="#1e1e1e").pack(anchor="w")
+        
+        self.modal_version_var = tk.StringVar()
+        self.modal_ver_combo = ttk.Combobox(top_sec, textvariable=self.modal_version_var, state="disabled", font=("Segoe UI", 10))
+        self.modal_ver_combo.pack(fill="x", pady=(5, 15), ipady=5)
+        
+        if edit_mode:
+            self.modal_version_var.set(existing_data.get("version", ""))
+        
+        # Helper Label
+        self.modal_status_lbl = tk.Label(top_sec, text="Select a loader to fetch versions", bg="#1e1e1e", fg=COLORS['text_secondary'], font=("Segoe UI", 8))
+        self.modal_status_lbl.pack(anchor="w", pady=(0, 5))
+
+        # Version Filters in Modal
+        filter_frame = tk.Frame(top_sec, bg="#1e1e1e")
+        filter_frame.pack(fill="x", pady=(0, 15))
+        
+        self.modal_show_snapshots = tk.BooleanVar(value=False)
+        tk.Checkbutton(filter_frame, text="Show Snapshots", variable=self.modal_show_snapshots, 
+                      bg="#1e1e1e", fg="white", selectcolor="#1e1e1e", activebackground="#1e1e1e",
+                      command=lambda: self.update_modal_versions_list()).pack(side="left")
+
+        # Logic
+        self.cached_loader_versions = [] 
+
+        def check_installed(version_id, loader_type):
+            try:
+                installed_list = [v['id'] for v in minecraft_launcher_lib.utils.get_installed_versions(self.minecraft_dir)]
+                if loader_type == "Vanilla":
+                    return version_id in installed_list
+                elif loader_type == "Fabric":
+                    return any("fabric" in iv.lower() and version_id in iv for iv in installed_list)
+                elif loader_type == "Forge":
+                    return any("forge" in iv.lower() and version_id in iv for iv in installed_list)
+                else: 
+                     # For other clients, check exact match + client name usually
+                     return any(loader_type.lower() in iv.lower() and version_id in iv for iv in installed_list)
+            except:
+                pass
+            return False
+
+        def fetch_versions_thread(loader_type):
+            try:
+                raw_versions = []
+                if loader_type == "Vanilla":
+                    vlist = minecraft_launcher_lib.utils.get_version_list()
+                    for v in vlist:
+                        raw_versions.append({'id': v['id'], 'type': v['type']})
+                elif loader_type == "Fabric":
+                    # Real Fetch using library
+                    fab_list = minecraft_launcher_lib.fabric.get_all_minecraft_versions()
+                    for v in fab_list:
+                        # v is {'version': '1.21.1', 'stable': True}
+                        v_type = 'release' if v['stable'] else 'snapshot'
+                        raw_versions.append({'id': v['version'], 'type': v_type})
+                elif loader_type == "Forge":
+                    # Real Fetch using library
+                    forge_strs = minecraft_launcher_lib.forge.list_forge_versions()
+                    # format: MC-ForgeVersion e.g. 1.21-51.0.33
+                    seen_mc = set()
+                    temp_list = []
+                    for fv in forge_strs:
+                        # specific handling for old forge versions might be needed, 
+                        # but generally it starts with MC version
+                        parts = fv.split('-', 1)
+                        if len(parts) >= 2:
+                            mc_ver = parts[0]
+                            if mc_ver not in seen_mc:
+                                seen_mc.add(mc_ver)
+                                # We assume it's a release for simplicity unless verified otherwise
+                                temp_list.append({'id': mc_ver, 'type': 'release'})
+                    raw_versions = temp_list
+                
+                # --- 3RD PARTY CLIENTS (Simulated for now, can be expanded to real APIs) ---
+                elif loader_type in ["BatMod", "LabyMod", "Lunar Client"]:
+                     # These usually support specific versions
+                     supported = ["1.8.9", "1.12.2", "1.16.5", "1.17.1", "1.18.2", "1.19.4", "1.20.1"]
+                     for v in supported:
+                         raw_versions.append({'id': v, 'type': 'release'})
+
+                self.cached_loader_versions = raw_versions
+                if win.winfo_exists():
+                    self.root.after(0, self.update_modal_versions_list)
+            except Exception as e:
+                print(f"Fetch error: {e}")
+                if win.winfo_exists():
+                    self.root.after(0, lambda: self.modal_status_lbl.config(text=f"Error: {e}"))
+
+        def update_list():
+            if not win.winfo_exists(): return
+            loader = loader_var.get()
+            show_snaps = self.modal_show_snapshots.get()
+            display_values = []
+            
+            for v in self.cached_loader_versions:
+                if v['type'] == 'snapshot' and not show_snaps: continue
+                
+                is_inst = check_installed(v['id'], loader)
+                entry = v['id']
+                if not is_inst:
+                     if loader in ["BatMod", "LabyMod", "Lunar Client"]:
+                          entry += " (External Install Required)" # Hint that we might not auto-install these
+                     else:
+                          entry += " (Not Installed)"
+                else: entry += " (Installed)" 
+                display_values.append(entry)
+            
+            self.modal_ver_combo['values'] = display_values
+            if display_values:
+                self.modal_ver_combo.current(0)
+                self.modal_ver_combo.config(state="readonly")
+                self.modal_status_lbl.config(text=f"Found {len(display_values)} versions")
+            else:
+                self.modal_ver_combo.set("")
+                if loader: self.modal_status_lbl.config(text="No versions found")
+
+        self.update_modal_versions_list = update_list
+
+        def on_loader_change(e):
+            loader = loader_var.get()
+            if not loader: return
+            self.modal_ver_combo.set("Fetching...")
+            self.modal_ver_combo.config(state="disabled")
+            self.modal_status_lbl.config(text=f"Fetching {loader} versions...")
+            threading.Thread(target=fetch_versions_thread, args=(loader,), daemon=True).start()
+
+        loader_combo.bind("<<ComboboxSelected>>", on_loader_change)
+        
+        # Trigger fetch if editing
+        if edit_mode and loader_var.get():
+             self.root.after(500, lambda: on_loader_change(None))
+        
+        def create_action():
+             name = name_entry.get().strip() or "New Installation"
+             v_selection = self.modal_version_var.get()
+             # Allow keeping existing version if not fetching/changing
+             if not v_selection or "Fetching" in v_selection: 
+                 if edit_mode: v_selection = existing_data.get("version", "")
+                 else: return
+             
+             version_id = v_selection.split(" ")[0]
+             loader = loader_var.get()
+             
+             new_profile = {
+                 "name": name,
+                 "version": version_id,
+                 "loader": loader,
+                 "last_played": existing_data.get("last_played", "Never"),
+                 "created": existing_data.get("created", "2024-01-01")
+             }
+             
+             if edit_mode and index is not None:
+                 self.installations[index] = new_profile
+             else:
+                 self.installations.append(new_profile)
+                 
+             self.save_config()
+             self.refresh_installations_list()
+             self.update_installation_dropdown()
+             win.destroy()
+
+        # Actions
+        btn_row = tk.Frame(win, bg="#1e1e1e")
+        btn_row.pack(side="bottom", fill="x", padx=20, pady=20)
+        
+        btn_text = "Save" if edit_mode else "Create"
+        tk.Button(btn_row, text=btn_text, bg=COLORS['success_green'], fg="white", font=("Segoe UI", 10, "bold"),
+                 relief="flat", padx=20, pady=8, cursor="hand2",
+                 command=create_action).pack(side="right", padx=5)
+                 
+        tk.Button(btn_row, text="Cancel", bg="#1e1e1e", fg=COLORS['text_primary'], font=("Segoe UI", 10),
+                 relief="flat", padx=10, pady=8, cursor="hand2",
+                 command=win.destroy).pack(side="right", padx=5)
+
+    def open_installation_menu(self, idx, btn_widget):
+        # Create a popup menu (Edit, Delete)
+        menu = tk.Toplevel(self.root)
+        menu.overrideredirect(True)
+        menu.config(bg=COLORS['card_bg'])
+        
+        # Position
+        try:
+             x = btn_widget.winfo_rootx()
+             y = btn_widget.winfo_rooty() + btn_widget.winfo_height()
+             menu.geometry(f"120x80+{x-80}+{y}") 
+        except:
+             menu.geometry("120x80")
+             
+        # Edit
+        def do_edit():
+            menu.destroy()
+            self.edit_installation(idx)
+            
+        edit_btn = tk.Label(menu, text="Edit", font=("Segoe UI", 10), bg=COLORS['card_bg'], fg=COLORS['text_primary'], anchor="w", padx=10, pady=5)
+        edit_btn.pack(fill="x")
+        edit_btn.bind("<Button-1>", lambda e: do_edit())
+        edit_btn.bind("<Enter>", lambda e: edit_btn.config(bg="#454545"))
+        edit_btn.bind("<Leave>", lambda e: edit_btn.config(bg=COLORS['card_bg']))
+
+        # Delete
+        def do_delete():
+            menu.destroy()
+            if messagebox.askyesno("Delete", "Are you sure you want to delete this installation?"):
+                self.installations.pop(idx)
+                self.save_config()
+                self.refresh_installations_list()
+                self.update_installation_dropdown()
+            
+        del_btn = tk.Label(menu, text="Delete", font=("Segoe UI", 10), bg=COLORS['card_bg'], fg=COLORS['error_red'], anchor="w", padx=10, pady=5)
+        del_btn.pack(fill="x")
+        del_btn.bind("<Button-1>", lambda e: do_delete())
+        del_btn.bind("<Enter>", lambda e: del_btn.config(bg="#454545"))
+        del_btn.bind("<Leave>", lambda e: del_btn.config(bg=COLORS['card_bg']))
+
+        # Close on click outside
+        menu.bind("<FocusOut>", lambda e: self.root.after(100, lambda: menu.destroy() if menu.winfo_exists() else None))
+        menu.focus_set()
+
+    def edit_installation(self, idx):
+        self.open_new_installation_modal(edit_mode=True, index=idx)
+
+    # --- LOCKER TAB (Skins/Wallpapers) ---
+    def create_locker_tab(self):
+        frame = tk.Frame(self.tab_container, bg=COLORS['main_bg'])
+        self.tabs["Locker"] = frame
+        
+        # Sub-tabs Header
+        header = tk.Frame(frame, bg=COLORS['main_bg'], pady=20)
+        header.pack(fill="x")
+        
+        self.locker_view = tk.StringVar(value="Skins")
+        
+        btn_frame = tk.Frame(header, bg=COLORS['input_bg'])
+        btn_frame.pack()
+        
+        def switch_view(v):
+            self.locker_view.set(v)
+            self.refresh_locker_view()
+            
+        self.locker_btns = {}
+        for v in ["Skins", "Wallpapers"]:
+             b = tk.Button(btn_frame, text=v, font=("Segoe UI", 10, "bold"),
+                          command=lambda x=v: switch_view(x), relief="flat", padx=20, pady=5)
+             b.pack(side="left")
+             self.locker_btns[v] = b
+             
+        self.locker_content = tk.Frame(frame, bg=COLORS['main_bg'])
+        self.locker_content.pack(fill="both", expand=True)
+        
+        self.refresh_locker_view()
+        
+    def refresh_locker_view(self):
+        v = self.locker_view.get()
+        # Update buttons
+        for name, btn in self.locker_btns.items():
+            if name == v:
+                btn.config(bg=COLORS['success_green'], fg="white")
+            else:
+                btn.config(bg=COLORS['input_bg'], fg=COLORS['text_primary'])
+        
+        for w in self.locker_content.winfo_children(): w.destroy()
+        
+        if v == "Skins":
+            self.render_skins_view(self.locker_content)
+        else:
+            self.render_wallpapers_view(self.locker_content)
+
+    def render_skins_view(self, parent):
+        container = tk.Frame(parent, bg=COLORS['main_bg'])
         container.pack(expand=True)
         
         # Skin Preview Card
@@ -346,11 +990,131 @@ class MinecraftLauncher:
                  relief="flat", bd=0, padx=20, pady=8,
                  command=self.select_skin).pack(side="left", padx=10)
                  
-        self.auto_download_var = tk.BooleanVar()
+        self.auto_download_var = tk.BooleanVar(value=self.auto_download_mod)
         tk.Checkbutton(btn_frame, text="Auto-download Mod", variable=self.auto_download_var,
                       bg=COLORS['main_bg'], fg=COLORS['text_primary'],
                       selectcolor=COLORS['main_bg'], activebackground=COLORS['main_bg'],
                       command=lambda: self._set_auto_download(self.auto_download_var.get())).pack(side="left", padx=10)
+        
+        # Trigger render if profile loaded
+        if self.profiles: self.update_active_profile()
+
+    def render_wallpapers_view(self, parent):
+        container = tk.Frame(parent, bg=COLORS['main_bg'], padx=40, pady=20)
+        container.pack(fill="both", expand=True)
+        
+        tk.Label(container, text="Select a background", font=("Segoe UI", 12, "bold"), bg=COLORS['main_bg'], fg="white").pack(anchor="w", pady=(0, 20))
+        
+        grid = tk.Frame(container, bg=COLORS['main_bg'])
+        grid.pack(fill="both", expand=True)
+        
+        # Defaults
+        defaults = ["background.png", "image1.png"]
+        
+        row, col = 0, 0
+        for fname in defaults:
+            path = resource_path(fname)
+            if not os.path.exists(path): continue
+            
+            p_frame = tk.Frame(grid, bg=COLORS['card_bg'], padx=5, pady=5)
+            p_frame.grid(row=row, column=col, padx=10, pady=10)
+            
+            # Thumb
+            try:
+                img = Image.open(path)
+                img.thumbnail((200, 120))
+                tk_img = ImageTk.PhotoImage(img)
+                lbl = tk.Button(p_frame, image=tk_img, bg=COLORS['card_bg'], relief="flat",
+                               command=lambda p=path: self.set_wallpaper(p))
+                lbl.image = tk_img # type: ignore
+                lbl.pack()
+                tk.Label(p_frame, text=fname, bg=COLORS['card_bg'], fg="white").pack()
+            except: pass
+            
+            col += 1
+            
+        # Add Custom
+        btn = tk.Button(grid, text="+ Add Wallpaper", font=("Segoe UI", 12),
+                       bg=COLORS['input_bg'], fg="white", relief="flat", width=20, height=5,
+                       command=self.add_custom_wallpaper)
+        btn.grid(row=row, column=col, padx=10, pady=10)
+
+    def add_custom_wallpaper(self):
+        path = filedialog.askopenfilename(filetypes=[("Images", "*.png;*.jpg;*.jpeg")])
+        if path:
+            self.set_wallpaper(path)
+
+    def set_wallpaper(self, path):
+        if not path or not os.path.exists(path): return
+        
+        # Save wallpaper to local config dir so it persists even if source is deleted
+        try:
+            wp_dir = os.path.join(self.config_dir, "wallpapers")
+            if not os.path.exists(wp_dir):
+                os.makedirs(wp_dir)
+            
+            # Check if we are already using a file in the config dir to avoid unnecessary copy
+            abs_path = os.path.abspath(path)
+            abs_wp_dir = os.path.abspath(wp_dir)
+
+            if not abs_path.startswith(abs_wp_dir):
+                # Calculate hash of source file to detect duplicates
+                BUF_SIZE = 65536
+                sha1 = hashlib.sha1()
+                with open(path, 'rb') as f:
+                    while True:
+                        data = f.read(BUF_SIZE)
+                        if not data: break
+                        sha1.update(data)
+                src_hash = sha1.hexdigest()
+                
+                # Check existance in target dir
+                existing_file = None
+                for wp in os.listdir(wp_dir):
+                    wp_path = os.path.join(wp_dir, wp)
+                    if not os.path.isfile(wp_path): continue
+                    
+                    # Compute hash for existing
+                    try:
+                        sha1_e = hashlib.sha1()
+                        with open(wp_path, 'rb') as f:
+                            while True:
+                                data = f.read(BUF_SIZE)
+                                if not data: break
+                                sha1_e.update(data)
+                        if sha1_e.hexdigest() == src_hash:
+                            existing_file = wp_path
+                            break
+                    except: pass
+                
+                if existing_file:
+                    path = existing_file
+                    print(f"Using existing wallpaper: {path}")
+                else:
+                    filename = os.path.basename(path)
+                    # Unique Name
+                    name, ext = os.path.splitext(filename)
+                    new_filename = f"{name}_{int(time.time())}{ext}"
+                    new_path = os.path.join(wp_dir, new_filename)
+                    shutil.copy2(path, new_path)
+                    path = new_path
+                    print(f"Wallpaper saved to: {path}")
+
+        except Exception as e:
+            print(f"Failed to save wallpaper locally: {e}")
+            # Continue using original path if copy fails
+
+        self.current_wallpaper = path
+        # Reload hero
+        try:
+            self.hero_img_raw = Image.open(path)
+            # Trigger resize
+            w = self.hero_canvas.winfo_width()
+            h = self.hero_canvas.winfo_height()
+            self._update_hero_layout(type('obj', (object,), {'width':w, 'height':h}))
+            self.save_config()
+        except Exception as e:
+            print(f"Wallpaper error: {e}")
 
     def toggle_profile_menu(self):
         if hasattr(self, 'profile_menu') and self.profile_menu.winfo_exists():
@@ -364,7 +1128,7 @@ class MinecraftLauncher:
 
         try:
             x = self.sidebar.winfo_rootx() + self.sidebar.winfo_width()
-            y = self.profile_btn.winfo_rooty()
+            y = self.profile_frame.winfo_rooty()
             menu.geometry(f"250x300+{x}+{y}")
         except: 
             menu.geometry("250x300")
@@ -473,14 +1237,45 @@ class MinecraftLauncher:
 
     # --- SETTINGS TAB ---
     def create_settings_tab(self):
-        frame = tk.Frame(self.tab_container, bg=COLORS['main_bg'])
-        self.tabs["Settings"] = frame
+        container = tk.Frame(self.tab_container, bg=COLORS['main_bg'])
+        self.tabs["Settings"] = container
         
-        # Main container with padding
-        main_container = tk.Frame(frame, bg=COLORS['main_bg'])
+        # Create a canvas with scrollbar
+        canvas = tk.Canvas(container, bg=COLORS['main_bg'], highlightthickness=0)
+        scrollbar = tk.Scrollbar(container, orient="vertical", command=canvas.yview)
+        
+        scrollable_frame = tk.Frame(canvas, bg=COLORS['main_bg'])
+        
+        # Configure scrolling
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw", width=container.winfo_reqwidth())
+        # Bind canvas resize to frame width to ensure fill
+        def on_canvas_configure(event):
+            canvas.itemconfig(canvas.find_withtag("all")[0], width=event.width)
+        canvas.bind("<Configure>", on_canvas_configure)
+
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # Bind mousewheel to canvas
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        
+        # Bind all children to mousewheel
+        def bind_to_mousewheel(widget):
+            widget.bind("<MouseWheel>", _on_mousewheel)
+            for child in widget.winfo_children():
+                bind_to_mousewheel(child)
+
+        # Main container with padding (inside scrollable frame)
+        main_container = tk.Frame(scrollable_frame, bg=COLORS['main_bg'])
         main_container.pack(fill="both", expand=True, padx=40, pady=30)
-        
-        # Scrollable area could be added here if needed, but for now using simple packing
         
         # --- JAVA SETTINGS ---
         tk.Label(main_container, text="JAVA SETTINGS", font=("Segoe UI", 14, "bold"),
@@ -537,11 +1332,27 @@ class MinecraftLauncher:
                 insertbackground="white").pack(side="left", padx=(10, 0), ipady=4)
 
         # Discord RPC
-        self.rpc_var = tk.BooleanVar()
-        tk.Checkbutton(main_container, text="Enable Discord Rich Presence", variable=self.rpc_var,
+        tk.Label(main_container, text="DISCORD INTEGRATION", font=("Segoe UI", 14, "bold"),
+                bg=COLORS['main_bg'], fg=COLORS['text_primary']).pack(anchor="w", pady=(20, 15))
+
+        self.rpc_var = tk.BooleanVar(value=True)
+        self.rpc_show_version_var = tk.BooleanVar(value=True)
+        self.rpc_show_server_var = tk.BooleanVar(value=True)
+
+        tk.Checkbutton(main_container, text="Enable Rich Presence", variable=self.rpc_var,
                       bg=COLORS['main_bg'], fg=COLORS['text_primary'],
                       selectcolor=COLORS['main_bg'], activebackground=COLORS['main_bg'],
-                      command=self._on_rpc_toggle).pack(anchor="w", pady=(0, 20))
+                      command=self._on_rpc_toggle).pack(anchor="w", pady=(0, 5))
+                      
+        tk.Checkbutton(main_container, text="Show Game Version", variable=self.rpc_show_version_var,
+                      bg=COLORS['main_bg'], fg=COLORS['text_primary'],
+                      selectcolor=COLORS['main_bg'], activebackground=COLORS['main_bg'],
+                      command=self.save_config).pack(anchor="w", padx=(20, 0), pady=(0, 5))
+
+        tk.Checkbutton(main_container, text="Show Server IP", variable=self.rpc_show_server_var,
+                      bg=COLORS['main_bg'], fg=COLORS['text_primary'],
+                      selectcolor=COLORS['main_bg'], activebackground=COLORS['main_bg'],
+                      command=self.save_config).pack(anchor="w", padx=(20, 0), pady=(0, 20))
 
         # --- ACCOUNT ---
         tk.Label(main_container, text="ACCOUNT", font=("Segoe UI", 14, "bold"),
@@ -564,6 +1375,34 @@ class MinecraftLauncher:
                                                  fg=COLORS['text_secondary'], font=("Consolas", 9), relief="flat")
         self.log_area.pack(fill="both", expand=True)
 
+        # --- UPDATES ---
+        tk.Label(main_container, text="UPDATES", font=("Segoe UI", 14, "bold"),
+                bg=COLORS['main_bg'], fg=COLORS['text_primary']).pack(anchor="w", pady=(30, 15))
+        
+        update_frame = tk.Frame(main_container, bg=COLORS['main_bg'])
+        update_frame.pack(fill="x", anchor="w")
+
+        tk.Label(update_frame, text=f"Current Version: {CURRENT_VERSION}", font=("Segoe UI", 10),
+                bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(side="left", padx=(0, 20))
+        
+        tk.Button(update_frame, text="Check for Updates", font=("Segoe UI", 9),
+                 bg=COLORS['input_bg'], fg=COLORS['text_primary'],
+                 relief="flat", command=self.check_for_updates).pack(side="left")
+
+        self.update_status_lbl = tk.Label(main_container, text="", font=("Segoe UI", 9),
+                                         bg=COLORS['main_bg'], fg=COLORS['text_secondary'])
+        self.update_status_lbl.pack(anchor="w", pady=(5, 0))
+        
+        self.auto_update_var = tk.BooleanVar(value=self.auto_update_check)
+        tk.Checkbutton(main_container, text="Automatically check for updates on startup", variable=self.auto_update_var,
+                      bg=COLORS['main_bg'], fg=COLORS['text_primary'],
+                      selectcolor=COLORS['main_bg'], activebackground=COLORS['main_bg'],
+                      command=self.save_config).pack(anchor="w", pady=(5, 0))
+        
+        # Apply mousewheel binding after all widgets are added
+        bind_to_mousewheel(scrollable_frame)
+        canvas.bind("<MouseWheel>", _on_mousewheel)
+
     def change_minecraft_dir(self):
         path = filedialog.askdirectory(initialdir=self.minecraft_dir)
         if path:
@@ -571,6 +1410,57 @@ class MinecraftLauncher:
             self.dir_entry.delete(0, tk.END)
             self.dir_entry.insert(0, path)
             self.load_versions()
+
+    def check_for_updates(self):
+        self.update_status_lbl.config(text="Checking for updates...", fg=COLORS['text_secondary'])
+        threading.Thread(target=self._update_check_thread, daemon=True).start()
+
+    def _update_check_thread(self):
+        try:
+            url = "https://api.github.com/repos/Amne-Dev/New-launcher/releases/latest"
+            response = requests.get(url, timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                latest_tag = data.get("tag_name", "").lstrip("v")
+                
+                # Check for updates (Simple Semantic Versioning)
+                try:
+                    current_parts = [int(x) for x in CURRENT_VERSION.split(".")]
+                    latest_parts = [int(x) for x in latest_tag.split(".")]
+                    
+                    update_available = False
+                    # Compare parts
+                    for i in range(max(len(current_parts), len(latest_parts))):
+                        cur = current_parts[i] if i < len(current_parts) else 0
+                        lat = latest_parts[i] if i < len(latest_parts) else 0
+                        if lat > cur:
+                            update_available = True
+                            break
+                        elif lat < cur:
+                            break # Latest is older than current
+                            
+                    if update_available:
+                        self.root.after(0, lambda: self._on_update_found(latest_tag, data.get("html_url")))
+                    else:
+                         self.root.after(0, lambda: self.update_status_lbl.config(text="You are on the latest version.", fg=COLORS['success_green']))
+
+                except ValueError:
+                    # Fallback to string comparison if version format is weird
+                    if latest_tag and latest_tag != CURRENT_VERSION:
+                         self.root.after(0, lambda: self._on_update_found(latest_tag, data.get("html_url")))
+                    else:
+                         self.root.after(0, lambda: self.update_status_lbl.config(text="You are on the latest version.", fg=COLORS['success_green']))
+            else:
+                 self.root.after(0, lambda: self.update_status_lbl.config(text=f"Failed to check: {response.status_code}", fg=COLORS['error_red']))
+        except Exception as e:
+            self.root.after(0, lambda: self.update_status_lbl.config(text=f"Error checking updates", fg=COLORS['error_red']))
+            print(f"Update check error: {e}")
+
+    def _on_update_found(self, version, url):
+        self.update_status_lbl.config(text=f"New version available: {version}", fg=COLORS['accent_blue'])
+        if messagebox.askyesno("Update Available", f"A new version ({version}) is available.\nDo you want to download it now?"):
+            if url:
+                webbrowser.open(url)
             self.save_config()
 
     def open_minecraft_dir(self):
@@ -730,30 +1620,63 @@ class MinecraftLauncher:
         
         self.update_skin_indicator()
         self.update_profile_btn()
+        if hasattr(self, 'update_bottom_gamertag'): self.update_bottom_gamertag()
         self.save_config()
 
     def update_profile_btn(self):
-        if not hasattr(self, 'profile_btn'): return
-        img = self.get_head_from_skin(self.skin_path)
-        if img:
-            self.profile_btn_img = img 
-            self.profile_btn.config(image=img)
+        # Update text labels
+        if not self.profiles: return
+        p = self.profiles[self.current_profile_index]
+        
+        if hasattr(self, 'sidebar_username'):
+            self.sidebar_username.config(text=p.get("name", "Steve"))
+        
+        if hasattr(self, 'sidebar_acct_type'):
+            t = p.get("type", "offline")
+            label_text = "Microsoft Account" if t == "microsoft" else "Offline Account"
+            self.sidebar_acct_type.config(text=label_text)
+
+        # Update Head Image
+        if hasattr(self, 'sidebar_head_label'):
+            img = self.get_head_from_skin(self.skin_path, size=35)
+            if img:
+                self.sidebar_head_img = img 
+                self.sidebar_head_label.config(image=img)
 
     def load_from_config(self):
+        print(f"Loading config from: {self.config_file}")
         if os.path.exists(self.config_file):
             try:
                 with open(self.config_file, "r") as f:
                     data = json.load(f)
                     
-                    # Profiles
+                    # Profiles (Accounts)
                     self.profiles = data.get("profiles", [])
                     if not self.profiles:
                         old_user = data.get("username", DEFAULT_USERNAME)
                         old_skin = data.get("skin_path", "")
                         self.profiles = [{"name": old_user, "type": "offline", "skin_path": old_skin, "uuid": ""}]
                     
+                    # Installations (Game Configs)
+                    self.installations = data.get("installations", [])
+                    if not self.installations:
+                        # Create default
+                        self.installations = [{
+                            "name": "Latest Release",
+                            "version": "latest-release", # Metadata placeholder
+                            "loader": "Vanilla",
+                            "last_played": "Never",
+                            "created": "2024-01-01"
+                        }]
+                        print("Initialized default installations")
+                    else:
+                        print(f"Loaded {len(self.installations)} installations")
+                    
                     idx = data.get("current_profile_index", 0)
                     self.current_profile_index = idx if 0 <= idx < len(self.profiles) else 0
+                    
+                    inst_idx = data.get("current_installation_index", 0)
+                    self.current_installation_index = inst_idx if 0 <= inst_idx < len(self.installations) else 0
 
                     self.update_active_profile()
 
@@ -769,6 +1692,18 @@ class MinecraftLauncher:
                     # Load RPC
                     self.rpc_enabled = data.get("rpc_enabled", True)
                     self.rpc_var.set(self.rpc_enabled)
+                    
+                    self.rpc_show_version = data.get("rpc_show_version", True)
+                    self.rpc_show_server = data.get("rpc_show_server", True)
+                    self.auto_update_check = data.get("auto_update_check", True)
+                    
+                    if hasattr(self, 'rpc_show_version_var'):
+                        self.rpc_show_version_var.set(self.rpc_show_version)
+                    if hasattr(self, 'rpc_show_server_var'):
+                        self.rpc_show_server_var.set(self.rpc_show_server)
+                    if hasattr(self, 'auto_update_var'):
+                        self.auto_update_var.set(self.auto_update_check)
+
                     if self.rpc_enabled:
                         self.root.after(1000, self.connect_rpc)
 
@@ -786,12 +1721,33 @@ class MinecraftLauncher:
                     if hasattr(self, 'dir_entry'):
                         self.dir_entry.delete(0, tk.END)
                         self.dir_entry.insert(0, self.minecraft_dir)
-            except: 
+                    
+                    # Load Wallpaper
+                    wp = data.get("current_wallpaper")
+                    if wp and os.path.exists(wp):
+                         self.current_wallpaper = wp
+                         try:
+                             self.hero_img_raw = Image.open(wp)
+                             if hasattr(self, 'hero_canvas'):
+                                  w = self.hero_canvas.winfo_width()
+                                  h = self.hero_canvas.winfo_height()
+                                  # If window is already visible/sized
+                                  if w > 1 and h > 1:
+                                      self._update_hero_layout(type('obj', (object,), {'width':w, 'height':h}))
+                         except Exception as e:
+                             print(f"Failed to load saved wallpaper: {e}")
+                    else:
+                         self.current_wallpaper = None
+                         
+            except Exception as e: 
+                print(f"Error loading config: {e}")
                 self.create_default_profile()
         else: 
+            print("Config file not found, creating default")
             self.create_default_profile()
 
     def save_config(self, *args):
+        print(f"Saving config to: {self.config_file}")
         # Update current profile info before saving
         if self.profiles and 0 <= self.current_profile_index < len(self.profiles):
             self.profiles[self.current_profile_index]["skin_path"] = self.skin_path
@@ -804,71 +1760,54 @@ class MinecraftLauncher:
         # Update java args from entry if it exists
         if hasattr(self, 'java_args_entry'):
              self.java_args = self.java_args_entry.get().strip()
+             
+        # Get RPC settings
+        show_ver = True
+        show_svr = True
+        if hasattr(self, 'rpc_show_version_var'): show_ver = self.rpc_show_version_var.get()
+        if hasattr(self, 'rpc_show_server_var'): show_svr = self.rpc_show_server_var.get()
+        if hasattr(self, 'auto_update_var'): self.auto_update_check = self.auto_update_var.get()
         
         config = {
             "profiles": self.profiles,
+            "installations": self.installations,
             "current_profile_index": self.current_profile_index,
+            "current_installation_index": getattr(self, 'current_installation_index', 0),
             "loader": self.loader_var.get(), 
-            "last_version": self.version_var.get(), 
             "auto_download_mod": self.auto_download_mod, 
             "ram_allocation": self.ram_allocation,
             "java_args": self.java_args,
             "minecraft_dir": self.minecraft_dir,
-            "rpc_enabled": self.rpc_enabled
+            "rpc_enabled": self.rpc_enabled,
+            "rpc_show_version": show_ver,
+            "rpc_show_server": show_svr,
+            "auto_update_check": self.auto_update_check,
+            "current_wallpaper": getattr(self, 'current_wallpaper', None)
         }
         try:
             with open(self.config_file, "w") as f: json.dump(config, f, indent=4)
+            print("Config saved successfully")
         except Exception as e:
             print(f"Failed to save config: {e}")
 
     def create_default_profile(self):
         self.profiles = [{"name": DEFAULT_USERNAME, "type": "offline", "skin_path": "", "uuid": ""}]
+        self.installations = [{
+            "name": "Latest Release",
+            "version": "latest-release",
+            "loader": "Vanilla",
+            "last_played": "Never",
+            "created": "2024-01-01"
+        }]
         self.current_profile_index = 0
+        self.current_installation_index = 0
         self.update_active_profile()
 
     def load_versions(self):
-        loader = self.loader_var.get()
-        self.set_status(f"Refreshing {loader} versions...")
-        threading.Thread(target=self._fetch_logic, args=(loader,), daemon=True).start()
-
-    def _fetch_logic(self, loader):
-        try:
-            raw_list = self._fetch_versions_for_loader(loader)
-            display_list = [self.format_version_display(v_id) for v_id in raw_list]
-            self.root.after(0, lambda: self._apply_version_list(loader, display_list))
-        except Exception as e:
-            self.log(f"Fetch Error: {e}")
-
-    def is_version_installed(self, version_id):
-        path = os.path.join(self.minecraft_dir, "versions", version_id, f"{version_id}.json")
-        return os.path.exists(path)
-
-    def format_version_display(self, version_id):
-        return f"{INSTALL_MARK}{version_id}" if self.is_version_installed(version_id) else version_id
-
-    def _fetch_versions_for_loader(self, loader):
-        if loader in {"Vanilla", "Forge"}:
-            versions = minecraft_launcher_lib.utils.get_available_versions(self.minecraft_dir) or []
-            return [v["id"] for v in versions if isinstance(v, dict) and v.get("type") == "release" and isinstance(v.get("id"), str)]
-        if loader == "Fabric":
-            fabric_versions = minecraft_launcher_lib.fabric.get_stable_minecraft_versions() or []
-            return [v for v in fabric_versions if isinstance(v, str)]
-        return []
+        pass
 
     def _apply_version_list(self, loader, display_list):
-        self.version_dropdown.config(values=display_list)
-        if self.last_version in display_list:
-            self.version_dropdown.set(self.last_version)
-        elif display_list:
-            self.version_dropdown.current(0)
-        else:
-            self.version_var.set("")
-        self.set_status(f"Ready to play {loader}")
-        version = normalize_version_text(self.version_var.get())
-        if version:
-            self.mod_available_online = False
-            threading.Thread(target=self.check_mod_online, args=(version, loader), daemon=True).start()
-        self.update_skin_indicator()
+        pass
 
     def _matching_mod_filename(self, loader, version):
         mods_dir = os.path.join(self.minecraft_dir, "mods")
@@ -897,27 +1836,42 @@ class MinecraftLauncher:
             except: pass
 
     def check_mod_present(self, loader=None, version=None):
-        loader = loader or self.loader_var.get()
-        version = version or normalize_version_text(self.version_var.get())
+        if not self.installations: return False
+        if not loader or not version:
+             idx = getattr(self, 'current_installation_index', 0)
+             if idx < len(self.installations):
+                 inst = self.installations[idx]
+                 loader = inst.get("loader", "Vanilla")
+                 version = inst.get("version", "")
+        
         if not version: return False
         return bool(self._matching_mod_filename(loader, version))
 
     def on_loader_change(self, event):
-        self.mod_available_online = False
-        self.update_skin_indicator()
-        self.load_versions()
-        self.save_config()
+        pass
 
     def on_version_change(self, event):
-        version = normalize_version_text(self.version_var.get())
-        self.mod_available_online = False
-        self.update_skin_indicator()
-        threading.Thread(target=self.check_mod_online, args=(version, self.loader_var.get()), daemon=True).start()
-        self.save_config()
+        pass
+
+    def launch_installation(self, idx):
+        if 0 <= idx < len(self.installations):
+            self.current_installation_index = idx
+            self.show_tab("Play")
+            self.update_installation_dropdown()
+            self.start_launch()
 
     def update_skin_indicator(self):
-        loader = self.loader_var.get()
-        version = normalize_version_text(self.version_var.get())
+        if not hasattr(self, 'skin_indicator') or not self.skin_indicator.winfo_exists(): return
+
+        # Get stats from current installation
+        idx = getattr(self, 'current_installation_index', 0)
+        loader = "Vanilla"
+        version = ""
+        if self.installations and 0 <= idx < len(self.installations):
+            inst = self.installations[idx]
+            loader = inst.get("loader", "Vanilla")
+            version = inst.get("version", "")
+
         mod_exists = bool(version and self.check_mod_present(loader, version))
         
         if not self.skin_path:
@@ -1007,34 +1961,43 @@ class MinecraftLauncher:
         except Exception as e: self.log(f"Download Error: {e}")
         return False
 
-    def start_launch(self):
-        v_text = self.version_var.get()
-        if not v_text: return
-        version = normalize_version_text(v_text)
+    def start_launch(self, force_update=False):
+        if not self.installations: return
         
+        idx = getattr(self, 'current_installation_index', 0)
+        if not (0 <= idx < len(self.installations)): return
+        
+        inst = self.installations[idx]
+        version_id = inst.get("version")
+        loader = inst.get("loader", "Vanilla")
+        
+        if not version_id or version_id == "latest-release":
+            # Heuristic for latest release if not specific
+            version_id = minecraft_launcher_lib.utils.get_latest_version()["release"]
+
         # Get username from current profile or entry
-        username = self.user_entry.get().strip()
+        username = DEFAULT_USERNAME
+        if hasattr(self, 'user_entry'):
+            username = self.user_entry.get().strip() or DEFAULT_USERNAME
+        
         if self.profiles and 0 <= self.current_profile_index < len(self.profiles):
              # Sync back to profile
              self.profiles[self.current_profile_index]["name"] = username
-        
-        if not username: username = DEFAULT_USERNAME
+             username = self.profiles[self.current_profile_index]["name"]
 
-        self.last_version = v_text
-        
-        # Save config
         self.save_config()
         
         # Show Progress Bar
         self.progress_bar.place(relx=0, rely=0.96, relwidth=1, height=4)
         
-        self.update_rpc("Launching...", f"Version: {v_text}")
+        self.update_rpc("Launching...", f"Version: {version_id} ({loader})")
 
         self.launch_btn.config(state="disabled", text="LAUNCHING...")
+        self.launch_opts_btn.config(state="disabled")
         self.set_status("Launching Minecraft...")
-        threading.Thread(target=self.launch_logic, args=(version, username, self.loader_var.get()), daemon=True).start()
+        threading.Thread(target=self.launch_logic, args=(version_id, username, loader, force_update), daemon=True).start()
 
-    def launch_logic(self, version, username, loader):
+    def launch_logic(self, version, username, loader, force_update=False):
         callback = cast(Any, {
             "setStatus": lambda t: self.log(f"Status: {t}"),
             "setProgress": lambda v: self.root.after(0, lambda: self.progress_bar.config(value=v)),
@@ -1042,20 +2005,60 @@ class MinecraftLauncher:
         })
         try:
             launch_id = version
+            
+            # --- Check for existing installations to avoid re-downloading ---
+            installed_versions = [v['id'] for v in minecraft_launcher_lib.utils.get_installed_versions(self.minecraft_dir)]
+            
+            if force_update:
+                self.log("Force Update enabled: Verifying and re-installing versions...")
+            
             if loader == "Fabric":
-                self.log(f"Installing Fabric for {version}...")
-                result = minecraft_launcher_lib.fabric.install_fabric(version, self.minecraft_dir, callback=callback)
-                if result: launch_id = result
+                # Look for existing fabric version matching this MC version
+                # Expected format: fabric-loader-<loader>-<mc_version>
+                found_fabric = None
+                if not force_update:
+                    for vid in installed_versions:
+                        if "fabric" in vid and version in vid:
+                             found_fabric = vid
+                             break
+                
+                if found_fabric:
+                    self.log(f"Using existing Fabric installation: {found_fabric}")
+                    launch_id = found_fabric
                 else:
-                    loader_v = minecraft_launcher_lib.fabric.get_latest_loader_version()
-                    launch_id = f"fabric-loader-{loader_v}-{version}"
-            elif loader == "Forge":
-                forge_v = minecraft_launcher_lib.forge.find_forge_version(version)
-                if forge_v:
-                    minecraft_launcher_lib.forge.install_forge_version(forge_v, self.minecraft_dir, callback=callback)
-                    launch_id = forge_v
+                    self.log(f"Installing Fabric for {version}...")
+                    result = minecraft_launcher_lib.fabric.install_fabric(version, self.minecraft_dir, callback=callback)
+                    if result: launch_id = result
+                    else:
+                        loader_v = minecraft_launcher_lib.fabric.get_latest_loader_version()
+                        launch_id = f"fabric-loader-{loader_v}-{version}"
 
-            if self.auto_download_mod and loader in ["Forge", "Fabric"] and not self.check_mod_present():
+            elif loader == "Forge":
+                found_forge = None
+                if not force_update:
+                    for vid in installed_versions:
+                        if "forge" in vid and version in vid:
+                            found_forge = vid
+                            break
+                        
+                if found_forge:
+                    self.log(f"Using existing Forge installation: {found_forge}")
+                    launch_id = found_forge
+                else:
+                    self.log(f"Installing Forge for {version}...")
+                    forge_v = minecraft_launcher_lib.forge.find_forge_version(version)
+                    if forge_v:
+                        minecraft_launcher_lib.forge.install_forge_version(forge_v, self.minecraft_dir, callback=callback)
+                        launch_id = forge_v
+            
+            else:
+                # Vanilla: Check if version exists, if not install
+                # Note: get_minecraft_command expects the version to be present for assets
+                if force_update or (version not in installed_versions and launch_id not in installed_versions):
+                     self.log(f"Installing/Updating Vanilla version {version}...")
+                     minecraft_launcher_lib.install.install_minecraft_version(version, self.minecraft_dir, callback=callback)
+
+            if self.auto_download_mod and loader in ["Forge", "Fabric"] and (force_update or not self.check_mod_present()):
                 self.download_offlineskins(version, loader)
 
             if self.skin_path and os.path.exists(self.skin_path):
@@ -1084,7 +2087,13 @@ class MinecraftLauncher:
             # self.log(f"Command: {command}") 
 
             self.root.after(0, self.root.withdraw)
-            self.root.after(0, lambda: self.update_rpc("In Game", f"Playing {version}", start=time.time()))
+            
+            # RPC Logic
+            rpc_details = "Playing Minecraft"
+            if getattr(self, 'rpc_show_version', True):
+                 rpc_details = f"Playing {version} ({loader})"
+            
+            self.root.after(0, lambda: self.update_rpc("In Game", rpc_details, start=time.time()))
             
             creationflags = 0
             if sys.platform == "win32":
@@ -1100,7 +2109,21 @@ class MinecraftLauncher:
             
             if process.stdout:
                 for line in process.stdout:
-                    self.root.after(0, lambda l=line: self.log(f"[GAME] {l.strip()}"))
+                    line_stripped = line.strip()
+                    self.root.after(0, lambda l=line_stripped: self.log(f"[GAME] {l}"))
+                    
+                    # Check for server connection in logs
+                    # Example: [12:34:56] [Render thread/INFO]: Connecting to mc.hypixel.net, 25565
+                    if "Connecting to" in line_stripped and "," in line_stripped:
+                         if getattr(self, 'rpc_show_server', True):
+                            try:
+                                # Extract server
+                                parts = line_stripped.split("Connecting to")[-1].strip()
+                                server_addr = parts.split(",")[0].strip()
+                                if server_addr:
+                                    self.root.after(0, lambda s=server_addr: self.update_rpc("In Game", f"Playing on {s}", start=time.time()))
+                            except: pass
+
             process.wait()
             self.root.after(0, self.root.deiconify)
             self.root.after(0, lambda: self.update_rpc("Idle", "In Launcher"))
@@ -1109,9 +2132,13 @@ class MinecraftLauncher:
             self.root.after(0, lambda: messagebox.showerror("Launch Error", str(e)))
             self.root.after(0, lambda: self.update_rpc("Idle", "In Launcher"))
         finally:
-            self.root.after(0, lambda: self.launch_btn.config(state="normal", text="PLAY"))
-            self.root.after(0, self.update_skin_indicator)
-            self.root.after(0, self.progress_bar.place_forget)
+            def reset_ui():
+                self.launch_btn.config(state="normal", text="PLAY")
+                self.launch_opts_btn.config(state="normal")
+                self.update_skin_indicator()
+                self.progress_bar.place_forget()
+                
+            self.root.after(0, reset_ui)
 
 if __name__ == "__main__":
     root = tk.Tk()
