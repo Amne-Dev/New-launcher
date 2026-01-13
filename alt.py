@@ -17,6 +17,155 @@ from typing import Any, cast
 import time
 
 import hashlib
+import http.server
+import socketserver
+import base64
+import uuid
+
+# --- Helper Classes ---
+
+class LocalSkinHandler(http.server.BaseHTTPRequestHandler):
+    """
+    Minimal Yggdrasil-compatible Skin Server for Offline Mode.
+    Serves the locally selected skin to the game via authlib-injector.
+    """
+    skin_path = None
+    player_name = "Player"
+    player_uuid = None
+
+    def log_message(self, format, *args):
+        pass # Suppress server logs
+
+    def do_GET(self):
+        # Root check
+        if self.path == '/':
+            self.send_response(200)
+            self.send_header('X-Authlib-Injector-API-Location', '/')
+            self.end_headers()
+            self.wfile.write(b'{"meta": {"serverName": "Local Skin Server", "implementationName": "NLC-Local", "implementationVersion": "1.0.0"}}')
+            return
+
+        # Profile request: /sessionserver/session/minecraft/profile/<uuid>
+        if self.path.startswith("/sessionserver/session/minecraft/profile/"):
+            requested_uuid = self.path.split("/")[-1].split("?")[0]
+            # Verify UUID matches (or just serve anyway)
+            
+            # Read skin file
+            if not self.skin_path or not os.path.exists(self.skin_path):
+                self.send_error(404)
+                return
+
+            try:
+                with open(self.skin_path, "rb") as f:
+                    skin_data = f.read()
+            except:
+                self.send_error(500)
+                return
+
+            # Construct Texture Payload
+            texture_model = "default" 
+            # Detect slim lines later if needed, assume distinct for now
+            
+            # We serve the skin texture directly as base64 in the Value field? 
+            # No, usually "url" points to a texture server.
+            # But authlib-injector supports data URLs? Or we serve the texture at another endpoint.
+            # Let's serve texture at /texture/<hash>
+            
+            # But wait, we can just embed the texture URL as http://localhost:PORT/textures/skin.png
+            
+            host = self.headers.get('Host')
+            texture_url = f"http://{host}/textures/skin.png"
+
+            textures = {
+                "timestamp": int(time.time() * 1000),
+                "profileId": requested_uuid,
+                "profileName": self.player_name,
+                "textures": {
+                    "SKIN": {
+                        "url": texture_url
+                    }
+                }
+            }
+            
+            json_textures = json.dumps(textures)
+            base64_textures = base64.b64encode(json_textures.encode('utf-8')).decode('utf-8')
+            
+            response = {
+                "id": requested_uuid,
+                "name": self.player_name,
+                "properties": [
+                    {
+                        "name": "textures",
+                        "value": base64_textures
+                    }
+                ]
+            }
+            
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps(response).encode('utf-8'))
+            return
+
+        # Texture Request
+        if self.path == "/textures/skin.png":
+             if not self.skin_path or not os.path.exists(self.skin_path):
+                self.send_error(404)
+                return
+             try:
+                with open(self.skin_path, "rb") as f:
+                    data = f.read()
+                self.send_response(200)
+                self.send_header('Content-type', 'image/png')
+                self.end_headers()
+                self.wfile.write(data)
+             except: self.send_error(500)
+             return
+
+        self.send_error(404)
+
+class LocalSkinServer:
+    def __init__(self, port=0):
+        self.handler = LocalSkinHandler
+        self.httpd = socketserver.TCPServer(("127.0.0.1", port), self.handler)
+        self.port = self.httpd.server_address[1]
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+
+    def start(self, skin_path, player_name, player_uuid):
+        self.handler.skin_path = skin_path
+        self.handler.player_name = player_name
+        self.handler.player_uuid = player_uuid
+        self.thread.start()
+        print(f"Local Skin Server started on port {self.port}")
+        return f"http://127.0.0.1:{self.port}"
+
+    def stop(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+class ElyByAuth:
+    AUTH_URL = "https://authserver.ely.by/auth/authenticate"
+    
+    @staticmethod
+    def authenticate(username, password):
+        payload = {
+            "agent": {
+                "name": "Minecraft",
+                "version": 1
+            },
+            "username": username,
+            "password": password,
+            "requestUser": True
+        }
+        try:
+            r = requests.post(ElyByAuth.AUTH_URL, json=payload, timeout=10)
+            if r.status_code == 200:
+                return r.json()
+            else:
+                return {"error": r.text}
+        except Exception as e:
+            return {"error": str(e)}
+
 
 try:
     from pypresence import Presence # type: ignore
@@ -30,7 +179,7 @@ try:
 except AttributeError:
     RESAMPLE_NEAREST = Image.NEAREST  # type: ignore # Older Pillow
 
-CURRENT_VERSION = "1.2.6"
+CURRENT_VERSION = "1.2.7"
 
 # --- Helpers ---
 def resource_path(relative_path):
@@ -1420,9 +1569,14 @@ class MinecraftLauncher:
                  bg=COLORS['input_bg'], fg=COLORS['text_primary'],
                  relief="flat", bd=0, padx=20, pady=8,
                  command=self.select_skin).pack(side="left", padx=10)
+
+        tk.Button(btn_frame, text="Refresh", font=("Segoe UI", 10),
+                 bg=COLORS['input_bg'], fg=COLORS['text_primary'],
+                 relief="flat", bd=0, padx=10, pady=8,
+                 command=self.refresh_skin).pack(side="left", padx=5)
                  
         self.auto_download_var = tk.BooleanVar(value=self.auto_download_mod)
-        tk.Checkbutton(btn_frame, text="Auto-download Mod", variable=self.auto_download_var,
+        tk.Checkbutton(btn_frame, text="Enable Skin Injection", variable=self.auto_download_var,
                       bg=COLORS['main_bg'], fg=COLORS['text_primary'],
                       selectcolor=COLORS['main_bg'], activebackground=COLORS['main_bg'],
                       command=lambda: self._set_auto_download(self.auto_download_var.get())).pack(side="left", padx=10)
@@ -1623,10 +1777,10 @@ class MinecraftLauncher:
         
         win = tk.Toplevel(self.root)
         win.title("Add Account")
-        win.geometry("400x350")
+        win.geometry("400x420")
         win.config(bg=COLORS['main_bg'])
         try:
-            win.geometry(f"+{self.root.winfo_x() + 340}+{self.root.winfo_y() + 180}")
+            win.geometry(f"+{self.root.winfo_x() + 340}+{self.root.winfo_y() + 150}")
         except: pass
         win.transient(self.root)
         win.resizable(False, False)
@@ -1636,11 +1790,70 @@ class MinecraftLauncher:
         
         tk.Button(win, text="Microsoft Account", font=("Segoe UI", 11),
                  bg=COLORS['play_btn_green'], fg="white", width=25, pady=8, relief="flat", cursor="hand2",
-                 command=lambda: messagebox.showinfo("Info", "Microsoft Auth placeholder")).pack(pady=10)
+                 command=lambda: messagebox.showinfo("Info", "Microsoft Auth placeholder")).pack(pady=5)
+
+        tk.Button(win, text="Ely.by Account", font=("Segoe UI", 11),
+                 bg="#3498DB", fg="white", width=25, pady=8, relief="flat", cursor="hand2",
+                 command=lambda: self.show_elyby_login(win)).pack(pady=5)
                  
         tk.Button(win, text="Offline Account", font=("Segoe UI", 11),
                  bg=COLORS['input_bg'], fg=COLORS['text_primary'], width=25, pady=8, relief="flat", cursor="hand2",
-                 command=lambda: self.show_offline_login(win)).pack(pady=10)
+                 command=lambda: self.show_offline_login(win)).pack(pady=5)
+
+    def show_elyby_login(self, parent):
+        for widget in parent.winfo_children(): widget.destroy()
+        
+        tk.Label(parent, text="Ely.by Login", font=("Segoe UI", 16, "bold"),
+                bg=COLORS['main_bg'], fg=COLORS['text_primary']).pack(pady=(20, 10))
+
+        frame = tk.Frame(parent, bg=COLORS['main_bg'])
+        frame.pack(fill="x", padx=40)
+
+        tk.Label(frame, text="Username / Email", font=("Segoe UI", 9), bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(anchor="w")
+        user_entry = tk.Entry(frame, font=("Segoe UI", 10), bg=COLORS['input_bg'], fg=COLORS['text_primary'], relief="flat")
+        user_entry.pack(fill="x", ipady=5, pady=(5, 15))
+
+        tk.Label(frame, text="Password", font=("Segoe UI", 9), bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(anchor="w")
+        pass_entry = tk.Entry(frame, font=("Segoe UI", 10), bg=COLORS['input_bg'], fg=COLORS['text_primary'], relief="flat", show="*")
+        pass_entry.pack(fill="x", ipady=5, pady=(5, 20))
+
+        def do_login():
+            u = user_entry.get().strip()
+            p = pass_entry.get().strip()
+            if not u or not p:
+                messagebox.showerror("Error", "Please fill all fields")
+                return
+            
+            res = ElyByAuth.authenticate(u, p)
+            if "error" in res:
+                messagebox.showerror("Login Failed", f"Could not login to Ely.by details: {res['error']}")
+            else:
+                # Success
+                profile = cast(dict, res.get("selectedProfile", {}))
+                uuid_ = profile.get("id", "")
+                name_ = profile.get("name", u)
+                token = res.get("accessToken", "")
+                
+                # Fetch Skin using shared logic
+                skin_cache_path = self.fetch_elyby_skin(name_, uuid_, profile.get("properties", []))
+
+                new_profile = {
+                    "name": name_,
+                    "type": "ely.by",
+                    "skin_path": skin_cache_path, 
+                    "uuid": uuid_,
+                    "token": token
+                }
+                self.profiles.append(new_profile)
+                self.current_profile_index = len(self.profiles) - 1
+                self.update_active_profile()
+                self.save_config()
+                parent.destroy()
+                messagebox.showinfo("Success", f"Logged in as {name_}")
+
+        tk.Button(parent, text="Login", font=("Segoe UI", 11, "bold"),
+                 bg=COLORS['play_btn_green'], fg="white", width=25, pady=8, relief="flat", cursor="hand2",
+                 command=do_login).pack(pady=10)
 
     def show_offline_login(self, parent):
         for widget in parent.winfo_children(): widget.destroy()
@@ -2064,7 +2277,12 @@ class MinecraftLauncher:
         
         if hasattr(self, 'sidebar_acct_type'):
             t = p.get("type", "offline")
-            label_text = "Microsoft Account" if t == "microsoft" else "Offline Account"
+            if t == "microsoft":
+                label_text = "Microsoft Account"
+            elif t == "ely.by":
+                label_text = "Ely.by Account"
+            else:
+                label_text = "Offline Account"
             self.sidebar_acct_type.config(text=label_text)
 
         # Update Head Image
@@ -2242,43 +2460,7 @@ class MinecraftLauncher:
     def _apply_version_list(self, loader, display_list):
         pass
 
-    def _matching_mod_filename(self, loader, version):
-        mods_dir = os.path.join(self.minecraft_dir, "mods")
-        if not os.path.isdir(mods_dir): return None
-        loader_token = loader.lower() if loader else ""
-        version_token = version.lower() if version else ""
-        for filename in os.listdir(mods_dir):
-            lower = filename.lower()
-            if not lower.endswith(".jar") or "offlineskins" not in lower: continue
-            if loader_token and loader_token not in lower: continue
-            if version_token and version_token not in lower: continue
-            return filename
-        return None
 
-    def _cleanup_conflicting_mods(self, loader, version):
-        mods_dir = os.path.join(self.minecraft_dir, "mods")
-        if not os.path.isdir(mods_dir) or not version: return
-        loader_token = loader.lower()
-        version_token = version.lower()
-        for filename in os.listdir(mods_dir):
-            lower = filename.lower()
-            if not lower.endswith(".jar") or "offlineskins" not in lower: continue
-            if loader_token not in lower: continue
-            if version_token in lower: continue
-            try: os.remove(os.path.join(mods_dir, filename))
-            except: pass
-
-    def check_mod_present(self, loader=None, version=None):
-        if not self.installations: return False
-        if not loader or not version:
-             idx = getattr(self, 'current_installation_index', 0)
-             if idx < len(self.installations):
-                 inst = self.installations[idx]
-                 loader = inst.get("loader", "Vanilla")
-                 version = inst.get("version", "")
-        
-        if not version: return False
-        return bool(self._matching_mod_filename(loader, version))
 
     def on_loader_change(self, event):
         pass
@@ -2295,52 +2477,39 @@ class MinecraftLauncher:
 
     def update_skin_indicator(self):
         if not hasattr(self, 'skin_indicator') or not self.skin_indicator.winfo_exists(): return
-
-        # Get stats from current installation
-        idx = getattr(self, 'current_installation_index', 0)
-        loader = "Vanilla"
-        version = ""
-        if self.installations and 0 <= idx < len(self.installations):
-            inst = self.installations[idx]
-            loader = inst.get("loader", "Vanilla")
-            version = inst.get("version", "")
-
-        mod_exists = bool(version and self.check_mod_present(loader, version))
         
-        if not self.skin_path:
-            self.skin_indicator.config(text="No Skin Selected", fg=COLORS['text_secondary'])
-        elif loader == "Vanilla":
-            self.skin_indicator.config(text="Vanilla: Local skin not supported", fg=COLORS['accent_blue'])
-        elif mod_exists:
-            self.skin_indicator.config(text="Ready: Skin & Mod found", fg=COLORS['success_green'])
-        elif self.mod_available_online:
-            self.skin_indicator.config(text="Mod will be downloaded", fg=COLORS['accent_blue'])
+        # Determine current account type
+        current_profile = self.profiles[self.current_profile_index] if (self.profiles and 0 <= self.current_profile_index < len(self.profiles)) else {}
+        acct_type = current_profile.get("type", "offline")
+
+        if acct_type == "ely.by":
+            self.skin_indicator.config(text="Skin via Ely.by", fg=COLORS['success_green'])
+            return
+
+        # Offline
+        if self.auto_download_mod:
+             if self.skin_path:
+                 self.skin_indicator.config(text="Ready: Local Skin Injection", fg=COLORS['success_green'])
+             else:
+                 self.skin_indicator.config(text="Injection enabled (No Skin)", fg=COLORS['accent_blue'])
         else:
-            self.skin_indicator.config(text="Incompatible: Mod not found", fg=COLORS['error_red'])
+            self.skin_indicator.config(text="Skin Injection Disabled", fg=COLORS['text_secondary'])
 
     def check_mod_online(self, mc_version, loader):
-        self.mod_available_online = False
-        self.root.after(0, self.update_skin_indicator)
-        if loader not in MOD_COMPATIBLE_LOADERS: return
-        api_url = "https://api.github.com/repos/zlainsama/OfflineSkins/releases"
-        try:
-            r = requests.get(api_url, timeout=5)
-            if r.status_code == 200:
-                releases = r.json()
-                if isinstance(releases, list):
-                    search_loader = loader.lower()
-                    for release in releases:
-                        for asset in release.get("assets", []):
-                            if search_loader in asset["name"].lower() and mc_version in asset["name"]:
-                                self.mod_available_online = True
-                                self.root.after(0, self.update_skin_indicator)
-                                return
-        except: pass
-        self.root.after(0, self.update_skin_indicator)
+        pass # Deprecated
+
 
     def render_preview(self):
         try:
-            if not self.skin_path or not os.path.exists(self.skin_path): return
+            if not self.skin_path:
+                print("[DEBUG] No skin path provided for preview")
+                return
+
+            print(f"[DEBUG] Rendering preview for: {self.skin_path}")
+            if not os.path.exists(self.skin_path):
+                 print(f"[DEBUG] Skin file does not exist: {self.skin_path}")
+                 return
+
             img = Image.open(self.skin_path)
             head = img.crop((8, 8, 16, 16))
             body = img.crop((20, 20, 28, 32))
@@ -2359,9 +2528,117 @@ class MinecraftLauncher:
             self.preview_canvas.create_image(80, 160, image=self.tk_preview)
         except Exception as e: self.log(f"Preview Error: {e}")
 
+    def refresh_skin(self):
+        p = self.profiles[self.current_profile_index] if self.profiles else {}
+        p_type = p.get("type", "offline")
+        name = p.get("name", "")
+        uuid_ = p.get("uuid", "")
+        
+        if p_type == "ely.by":
+            self.skin_indicator.config(text="Refreshing...", fg=COLORS['text_primary'])
+            self.root.update()
+            
+            def _refresh():
+                path = self.fetch_elyby_skin(name, uuid_)
+                
+                def _update_ui():
+                    if path:
+                        self.profiles[self.current_profile_index]["skin_path"] = path
+                        self.update_active_profile()
+                        self.save_config()
+                        messagebox.showinfo("Skin Refreshed", "Skin updated from Ely.by successfully.")
+                    else:
+                        self.skin_indicator.config(text="Refresh Failed", fg="red")
+                        messagebox.showwarning("Refresh Failed", "Could not fetch skin from Ely.by.")
+                
+                self.root.after(0, _update_ui)
+            
+            threading.Thread(target=_refresh, daemon=True).start()
+        else:
+             self.update_active_profile()
+
+    def fetch_elyby_skin(self, username, uuid_, properties=None):
+        skin_url = f"http://skinsystem.ely.by/skins/{username}.png"
+        props = properties if properties else []
+
+        try:
+            # If properties are missing, fetch them from the Session Server
+            if not props and uuid_:
+                print(f"[DEBUG] Properties missing, fetching from Session Server for {uuid_}")
+                try:
+                    # Ely.by Session Server endpoint
+                    session_url = f"https://authserver.ely.by/api/authlib-injector/sessionserver/session/minecraft/profile/{uuid_}?unsigned=false"
+                    r_sess = requests.get(session_url, timeout=5)
+                    if r_sess.status_code == 200:
+                        session_profile = r_sess.json()
+                        props = session_profile.get("properties", [])
+                        print(f"[DEBUG] Session Server returned {len(props)} properties")
+                except Exception as ex:
+                    print(f"[ERROR] Session Server fetch failed: {ex}")
+
+            # If still no properties/textures, try the /textures/ endpoint on skinsystem
+            if not props:
+                 print(f"[DEBUG] Session server produced no props, trying skinsystem/textures/{username}")
+                 try:
+                     r_tex = requests.get(f"http://skinsystem.ely.by/textures/{username}", timeout=5)
+                     if r_tex.status_code == 200:
+                         tex_data_direct = r_tex.json()
+                         if "SKIN" in tex_data_direct and "url" in tex_data_direct["SKIN"]:
+                             skin_url = tex_data_direct["SKIN"]["url"]
+                             print(f"[DEBUG] Resolved skin URL from skinsystem/textures: {skin_url}")
+                             props = [] 
+                 except Exception as e_tex:
+                     print(f"[DEBUG] Skinsystem texture fetch failed: {e_tex}")
+
+            for prop in props:
+                if prop.get("name") == "textures":
+                    val = prop.get("value")
+                    # value is base64 encoded json
+                    decoded = base64.b64decode(val).decode('utf-8')
+                    tex_data = json.loads(decoded)
+                    if "textures" in tex_data and "SKIN" in tex_data["textures"]:
+                        extracted_url = tex_data["textures"]["SKIN"].get("url")
+                        if extracted_url:
+                            skin_url = extracted_url
+                            print(f"[DEBUG] Resolved skin URL: {skin_url}")
+        except Exception as e:
+            print(f"[ERROR] Failed to extract skin data: {e}")
+
+        # Download
+        target_path = os.path.join(self.config_dir, "skins", f"{username}.png")
+        if not os.path.exists(os.path.dirname(target_path)):
+             os.makedirs(os.path.dirname(target_path))
+             
+        try:
+            print(f"[DEBUG] Fetching skin from {skin_url}")
+            r_skin = requests.get(skin_url, timeout=5)
+            if r_skin.status_code == 200:
+                with open(target_path, "wb") as f:
+                    f.write(r_skin.content)
+                print(f"[DEBUG] Saved skin to {target_path}")
+                return target_path
+            else:
+                 print(f"Ely.by skin not found (Status {r_skin.status_code})")
+        except Exception as e:
+            print(f"Skin fetch exception: {e}")
+            if os.path.exists(target_path):
+                return target_path 
+        
+        return ""
+
     def select_skin(self):
+        # Check profile type
+        p = self.profiles[self.current_profile_index] if self.profiles else {}
+        p_type = p.get("type", "offline")
+        
+        if p_type == "ely.by":
+            if messagebox.askyesno("Ely.by Skin", "Ely.by requires skins to be managed via their website.\n\nOpen Ely.by skin catalog for your user?"):
+                name = p.get("name", "")
+                webbrowser.open(f"https://ely.by/skins?uploader={name}")
+            return
+
         if not self.auto_download_mod:
-            if messagebox.askyesno("Mod Requirement", "Allow launcher to manage OfflineSkins mod?"):
+            if messagebox.askyesno("Skin Injection", "Enable Skin Injection to use this skin in-game?"):
                 self.auto_download_mod = True
                 self.auto_download_var.set(True)
         path = filedialog.askopenfilename(filetypes=[("Image files", "*.png")])
@@ -2372,27 +2649,30 @@ class MinecraftLauncher:
             self.update_active_profile()
             self.save_config()
 
-    def download_offlineskins(self, mc_version, loader):
-        repo = "zlainsama/OfflineSkins"
-        api_url = f"https://api.github.com/repos/{repo}/releases"
-        self._cleanup_conflicting_mods(loader, mc_version)
+    def ensure_authlib_injector(self):
+        """ Ensures authlib-injector is present. Code adapted to fetch latest release from GitHub. """
+        jar_path = os.path.join(self.minecraft_dir, "authlib-injector.jar")
+        if os.path.exists(jar_path) and os.path.getsize(jar_path) > 0:
+             return jar_path
+             
+        repo = "yushijinhun/authlib-injector"
+        api_url = f"https://api.github.com/repos/{repo}/releases/latest"
         try:
+            self.log("Checking for authlib-injector...")
             r = requests.get(api_url, timeout=10)
             if r.status_code == 200:
-                releases = r.json()
-                if not isinstance(releases, list): return False
-                search_loader = loader.lower()
-                for release in releases:
-                    for asset in release.get("assets", []):
-                        if search_loader in asset["name"].lower() and mc_version in asset["name"]:
-                            dest = os.path.join(self.minecraft_dir, "mods", asset["name"])
-                            self.log(f"Downloading mod: {asset['name']}...")
-                            r_mod = requests.get(asset["browser_download_url"], stream=True)
-                            with open(dest, "wb") as f:
-                                for chunk in r_mod.iter_content(8192): f.write(chunk)
-                            return True
-        except Exception as e: self.log(f"Download Error: {e}")
-        return False
+                release = r.json()
+                for asset in release.get("assets", []):
+                    if asset["name"].endswith(".jar"):
+                        self.log(f"Downloading authlib-injector: {asset['name']}...")
+                        r_file = requests.get(asset["browser_download_url"], stream=True)
+                        with open(jar_path, "wb") as f:
+                            for chunk in r_file.iter_content(8192): f.write(chunk)
+                        return jar_path
+        except Exception as e:
+            self.log(f"Error downloading authlib-injector: {e}")
+            
+        return None
 
     def start_launch(self, force_update=False):
         if not self.installations: return
@@ -2436,6 +2716,7 @@ class MinecraftLauncher:
             "setProgress": lambda v: self.root.after(0, lambda: self.progress_bar.config(value=v)),
             "setMax": lambda m: self.root.after(0, lambda: self.progress_bar.config(maximum=m))
         })
+        local_skin_server = None
         try:
             launch_id = version
             
@@ -2446,8 +2727,6 @@ class MinecraftLauncher:
                 self.log("Force Update enabled: Verifying and re-installing versions...")
             
             if loader == "Fabric":
-                # Look for existing fabric version matching this MC version
-                # Expected format: fabric-loader-<loader>-<mc_version>
                 found_fabric = None
                 if not force_update:
                     for vid in installed_versions:
@@ -2485,29 +2764,67 @@ class MinecraftLauncher:
                         launch_id = forge_v
             
             else:
-                # Vanilla: Check if version exists, if not install
-                # Note: get_minecraft_command expects the version to be present for assets
                 if force_update or (version not in installed_versions and launch_id not in installed_versions):
                      self.log(f"Installing/Updating Vanilla version {version}...")
                      minecraft_launcher_lib.install.install_minecraft_version(version, self.minecraft_dir, callback=callback)
 
-            if self.auto_download_mod and loader in ["Forge", "Fabric"] and (force_update or not self.check_mod_present()):
-                self.download_offlineskins(version, loader)
+            # Determine Account & Injection Settings
+            current_profile = self.profiles[self.current_profile_index] if (self.profiles and 0 <= self.current_profile_index < len(self.profiles)) else {"type": "offline", "skin_path": "", "uuid": ""}
+            acct_type = current_profile.get("type", "offline")
+            
+            launch_uuid = ""
+            launch_token = ""
+            
+            injector_path = None
+            # Only use authlib-injector if requested (Ely.by or Offline+Injection)
+            use_injection = False
+            skin_server_url = ""
 
-            if self.skin_path and os.path.exists(self.skin_path):
-                try:
-                    shutil.copy(self.skin_path, os.path.join(self.minecraft_dir, "launcher_skin.png"))
-                except: pass
+            if acct_type == "ely.by":
+                # Ely.by Logic
+                use_injection = True
+                injector_path = self.ensure_authlib_injector()
+                # Use the explicit API URL to avoid redirects/ambiguity
+                skin_server_url = "https://authserver.ely.by/api/authlib-injector"
+                launch_uuid = current_profile.get("uuid", "")
+                launch_token = current_profile.get("token", "")
+                self.log("Launching with Ely.by account...")
+
+            elif acct_type == "offline":
+                # Offline Logic
+                launch_uuid = str(uuid.uuid3(uuid.NAMESPACE_DNS, f"OfflinePlayer:{username}"))
+                self.log(f"Offline UUID: {launch_uuid}")
+                
+                if self.auto_download_mod: # This toggle now means "Enable Skin Injection"
+                     use_injection = True
+                     injector_path = self.ensure_authlib_injector()
+                     
+                     # Start Local Skin Server
+                     try:
+                         local_skin_server = LocalSkinServer(port=0)
+                         skin_path = current_profile.get("skin_path") or self.skin_path
+                         skin_server_url = local_skin_server.start(skin_path, username, launch_uuid)
+                         self.log(f"Local Skin Server active at {skin_server_url}")
+                     except Exception as e:
+                         self.log(f"Failed to start local skin server: {e}")
+                         use_injection = False
 
             # Build Options
             jvm_args = [f"-Xmx{self.ram_allocation}M"]
             if self.java_args:
                 jvm_args.extend(self.java_args.split())
+            
+            if use_injection and injector_path and skin_server_url:
+                self.log(f"Applying authlib-injector: {injector_path}={skin_server_url}")
+                jvm_args.append(f"-javaagent:{injector_path}={skin_server_url}")
+                # Ensure we pass the prefab UUID/Token so authlib trusts it if we can
+                # For offline local server, token can be anything usually, but validation might fail if not careful.
+                # Authlib Injector usually disables signature checks.
 
             options = {
                 "username": username, 
-                "uuid": "", 
-                "token": "",
+                "uuid": launch_uuid, 
+                "token": launch_token,
                 "jvmArguments": jvm_args,
                 "launcherName": "MinecraftLauncher",
                 "gameDirectory": self.minecraft_dir
@@ -2516,9 +2833,6 @@ class MinecraftLauncher:
             self.log(f"Generating command for: {launch_id}")
             command = minecraft_launcher_lib.command.get_minecraft_command(launch_id, self.minecraft_dir, options) # type: ignore
             
-            # Log command for debugging
-            # self.log(f"Command: {command}") 
-
             self.root.after(0, self.root.withdraw)
             
             # RPC Logic
@@ -2545,12 +2859,9 @@ class MinecraftLauncher:
                     line_stripped = line.strip()
                     self.root.after(0, lambda l=line_stripped: self.log(f"[GAME] {l}"))
                     
-                    # Check for server connection in logs
-                    # Example: [12:34:56] [Render thread/INFO]: Connecting to mc.hypixel.net, 25565
                     if "Connecting to" in line_stripped and "," in line_stripped:
                          if getattr(self, 'rpc_show_server', True):
                             try:
-                                # Extract server
                                 parts = line_stripped.split("Connecting to")[-1].strip()
                                 server_addr = parts.split(",")[0].strip()
                                 if server_addr:
@@ -2565,6 +2876,11 @@ class MinecraftLauncher:
             self.root.after(0, lambda: messagebox.showerror("Launch Error", str(e)))
             self.root.after(0, lambda: self.update_rpc("Idle", "In Launcher"))
         finally:
+            if local_skin_server:
+                self.log("Stopping local skin server...")
+                try: local_skin_server.stop()
+                except: pass
+                
             def reset_ui():
                 self.launch_btn.config(state="normal", text="PLAY")
                 self.launch_opts_btn.config(state="normal")

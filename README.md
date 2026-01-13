@@ -30,5 +30,9 @@ Need more memory for mods?
 2.  Drag the **Java Memory** slider to the right.
 3.  That's it!
 
+## 📜 Credits
+Huge thanks to the creators of the libraries used in this project: `minecraft-launcher-lib`, `requests`, `Pillow`, and `pypresence`.
+See the full [CREDITS.md](CREDITS.md) file for details.
+
 ---
 *This is an open-source project and is not affiliated with Mojang Studios or Microsoft.*

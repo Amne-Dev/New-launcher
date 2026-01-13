@@ -272,3 +272,49 @@ footer {
     font-size: 0.9rem;
     border-top: 1px solid #333;
 }
+
+/* Terms of Service Page */
+.terms-container {
+    max-width: 800px;
+    margin: 40px auto;
+    padding: 0 20px;
+    min-height: 60vh;
+}
+
+.terms-container h1 {
+    font-size: 2.5rem;
+    margin-bottom: 10px;
+    color: var(--text-main);
+}
+
+.terms-container .last-updated {
+    color: var(--text-sec);
+    margin-bottom: 40px;
+    font-size: 0.9rem;
+}
+
+.terms-container section {
+    margin-bottom: 30px;
+}
+
+.terms-container h2 {
+    color: var(--accent);
+    margin-bottom: 15px;
+    font-size: 1.5rem;
+}
+
+.terms-container p {
+    color: var(--text-sec);
+    line-height: 1.7;
+    margin-bottom: 15px;
+}
+
+footer a {
+    color: #888;
+    text-decoration: none;
+    transition: color 0.2s;
+}
+
+footer a:hover {
+    color: var(--accent);
+}
