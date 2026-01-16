@@ -2,3 +2,4 @@ minecraft-launcher-lib
 requests
 Pillow
 pypresence
+git+https://github.com/t-mart/skinpy.git
