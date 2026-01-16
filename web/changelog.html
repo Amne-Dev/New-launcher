@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Changelog — New-launcher</title>
+  <link rel="icon" type="image/png" href="https://raw.githubusercontent.com/Amne-Dev/New-launcher/main/logo.png">
+  <link rel="stylesheet" href="style.css">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
+</head>
+<body>
+    <nav>
+        <div class="logo">
+            <img src="https://raw.githubusercontent.com/Amne-Dev/New-launcher/main/logo.png" alt="Logo" class="logo-icon-img">
+            <span>New Launcher</span>
+        </div>
+        <div class="links">
+            <a href="index.html">Home</a>
+            <a href="https://github.com/Amne-Dev/New-launcher" target="_blank">GitHub</a>
+            <a href="https://github.com/Amne-Dev/New-launcher/releases" target="_blank" class="btn-nav">Releases</a>
+        </div>
+    </nav>
+
+    <header class="hero" style="padding:36px 20px; text-align:left;">
+        <div class="hero-content" style="align-items:flex-start;">
+            <h1 style="font-size:1.6rem; margin:0 0 6px;">Changelog</h1>
+            <div class="sub-text" style="margin-bottom:14px; color:var(--text-sec);">Official releases and notes from the GitHub repository</div>
+            <div style="margin-bottom:12px;">
+                <button id="refreshBtn" class="btn-primary" style="padding:8px 12px; font-size:0.95rem;">Refresh</button>
+            </div>
+        </div>
+    </header>
+
+    <main class="terms-container" style="max-width:980px;">
+        <div id="status"></div>
+        <div id="list"></div>
+    </main>
+
+    <footer>
+        <p>&copy; 2026 New Launcher Project. Not affiliated with Mojang Studios. | <a href="terms.html">Terms</a> | <a href="privacy.html">Privacy</a></p>
+    </footer>
+
+  <script src="changelog.js"></script>
+</body>
+</html>
