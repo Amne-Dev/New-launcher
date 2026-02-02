@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - 'WIKI.md'
+      - '.github/workflows/sync-wiki.yml'
 
 jobs:
   sync-wiki:
