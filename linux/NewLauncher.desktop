@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=New Launcher
+Comment=A lightweight Minecraft Launcher
+Exec=NewLauncher
+Icon=logo
+Categories=Game;
+Terminal=false

@@ -10,7 +10,10 @@ Simple. Fast. Customizable.
 *   **Discord Status**: Shows your friends exactly what you're playing with built-in Rich Presence.
 *   **Offline Support**: Create offline ("Developer") accounts easily.
 
-## 📥 How to Install
+## � Documentation
+For detailed guides, troubleshooting, and developer docs, check out our [**Project Wiki**](WIKI.md).
+
+## �📥 How to Install
 1.  Download the installer (e.g., `NLCSetup.exe`) from the Releases page.
 2.  Run the installer and follow the simple steps.
 3.  Open **New Launcher** from your desktop icon.

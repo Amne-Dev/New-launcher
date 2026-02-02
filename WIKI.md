@@ -62,11 +62,36 @@ For those looking to contribute or understand the codebase, the project has rece
 *   **`utils.py`**: Shared utility functions, file path management (resource_path), and image helpers.
 *   **`config.py`**: Global constants (Version, Client IDs, Defaults).
 
-### Building from Source
+### Building from Source (Windows)
 To build the executable, use PyInstaller with the provided spec file:
 ```bash
 pyinstaller alt.spec
 ```
+
+### Building for Linux (AppImage)
+Since the project relies on system-level libraries (like Tkinter) that vary by distro, we recommend packaging as an **AppImage**.
+
+**Prerequisites**:
+*   Linux Environment (e.g., Ubuntu 20.04 LTS) or **WSL**.
+*   Python 3.8+.
+*   **Debian/Ubuntu**: `sudo apt install python3-tk python3-venv`
+*   **Fedora**: `sudo dnf install python3-tkinter`
+
+**Steps**:
+1.  Open a terminal in the repository root.
+2.  Make the build script executable:
+    ```bash
+    chmod +x linux/build_appimage.sh
+    ```
+3.  Run the script:
+    ```bash
+    ./linux/build_appimage.sh
+    ```
+4.  This will:
+    *   Install pip requirements.
+    *   Run PyInstaller to create a portable binary.
+    *   Download `appimagetool`.
+    *   Package everything into `NewLauncher-1.4-x86_64.AppImage`.
 
 ### Skin System Architecture
 
