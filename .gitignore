@@ -20,3 +20,4 @@ NewLauncher-1.4-x86_64.AppImage
 /AppDir
 /build_linux
 /dist_linux
+/venv_build

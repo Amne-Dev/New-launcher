@@ -971,7 +971,12 @@ class MinecraftLauncher:
                 # Launch new executable
                 # If we are valid exe
                 if path.endswith(".exe"):
-                    subprocess.Popen([path])
+                    # Detached process to avoid locking parent directory
+                    if os.name == 'nt':
+                        subprocess.Popen([path], close_fds=True, creationflags=0x00000008) # DETACHED_PROCESS
+                    else:
+                        subprocess.Popen([path], close_fds=True)
+                        
                     self.root.quit()
                 else:
                     # If this is script based update, it's harder.
@@ -1066,11 +1071,118 @@ class MinecraftLauncher:
                                    command=cmd)
                     btn.pack()
 
-                make_choice_btn("Microsoft", "#00A4EF", "⊞", lambda: custom_showinfo("Coming Soon", "Microsoft Login is currently being updated.\nPlease use Offline or Ely.by."))
+                make_choice_btn("Microsoft", "#00A4EF", "⊞", show_step_1_microsoft)
                 make_choice_btn("Ely.by", "#3498DB", "☁", show_step_1_elyby)
                 make_choice_btn("Offline", "#454545", "👤", show_step_1_offline)
 
             # --- Step 1: Login Details ---
+            def show_step_1_microsoft():
+                clear_page()
+                tk.Label(content_frame, text="Microsoft Login", font=("Segoe UI", 18, "bold"), fg="white", bg=COLORS['card_bg']).pack(pady=(20, 10))
+                
+                status_lbl = tk.Label(content_frame, text="Initializing...", font=("Segoe UI", 10), 
+                                     bg=COLORS['card_bg'], fg=COLORS['text_secondary'], wraplength=450)
+                status_lbl.pack(pady=10)
+                
+                code_lbl = tk.Label(content_frame, text="", font=("Segoe UI", 24, "bold"), 
+                                   bg=COLORS['card_bg'], fg=COLORS['success_green'])
+                code_lbl.pack(pady=10)
+                
+                url_lbl = tk.Label(content_frame, text="", font=("Segoe UI", 11, "underline"), 
+                                  bg=COLORS['card_bg'], fg="#3498DB", cursor="hand2")
+                url_lbl.pack(pady=5)
+                
+                copy_btn = tk.Button(content_frame, text="Copy Code", font=("Segoe UI", 10),
+                         bg=COLORS['input_bg'], fg=COLORS['text_primary'], relief="flat", state="disabled")
+                copy_btn.pack(pady=10)
+                
+                tk.Button(content_frame, text="Cancel", font=("Segoe UI", 10),
+                         bg=COLORS['card_bg'], fg=COLORS['text_secondary'], relief="flat", cursor="hand2",
+                         command=show_step_0_account_type).pack(pady=20)
+                         
+                def open_url(e):
+                    url = url_lbl.cget("text")
+                    if url: webbrowser.open(url)
+                url_lbl.bind("<Button-1>", open_url)
+
+                # Threaded Login Logic
+                def run_flow():
+                    try:
+                        client_id = MSA_CLIENT_ID
+                        scope = "XboxLive.signin offline_access"
+                        if not wizard.winfo_exists(): return
+                        status_lbl.config(text="Contacting Microsoft...")
+                        
+                        r = requests.post("https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode",
+                                          data={"client_id": client_id, "scope": scope})
+                        if r.status_code != 200:
+                            if wizard.winfo_exists(): status_lbl.config(text=f"Error: {r.text}", fg=COLORS['error_red'])
+                            return
+                        
+                        data = r.json()
+                        user_code = data.get("user_code")
+                        verification_uri = data.get("verification_uri")
+                        device_code = data.get("device_code")
+                        interval = data.get("interval", 5)
+                        
+                        if wizard.winfo_exists():
+                            code_lbl.config(text=user_code)
+                            url_lbl.config(text=verification_uri)
+                            status_lbl.config(text=f"1. Click link above\n2. Enter code\n3. Login to Microsoft")
+                            copy_btn.config(state="normal", command=lambda: self.root.clipboard_clear() or self.root.clipboard_append(user_code) or self.root.update())
+                            
+                        # Poll
+                        while wizard.winfo_exists():
+                            time.sleep(interval)
+                            r_poll = requests.post("https://login.microsoftonline.com/consumers/oauth2/v2.0/token",
+                                                  data={"grant_type": "device_code", "client_id": client_id, "device_code": device_code})
+                            
+                            if r_poll.status_code == 200:
+                                # Success
+                                token_data = r_poll.json()
+                                # Authenticate MC
+                                status_lbl.config(text="Authenticating with Xbox Live...")
+                                access_token = token_data["access_token"]
+                                refresh_token = token_data["refresh_token"]
+                                
+                                xbl = minecraft_launcher_lib.microsoft_account.authenticate_with_xbl(access_token)
+                                status_lbl.config(text="Authenticating with XSTS...")
+                                xsts = minecraft_launcher_lib.microsoft_account.authenticate_with_xsts(xbl["Token"])
+                                
+                                status_lbl.config(text="Authenticating with Minecraft...")
+                                mc_auth = minecraft_launcher_lib.microsoft_account.authenticate_with_minecraft(xbl["DisplayClaims"]["xui"][0]["uhs"], xsts["Token"])
+                                
+                                status_lbl.config(text="Fetching Profile...")
+                                profile = minecraft_launcher_lib.microsoft_account.get_profile(mc_auth["access_token"])
+                                
+                                # Save
+                                self.wizard_account_data = {
+                                    "name": profile["name"],
+                                    "uuid": profile["id"],
+                                    "type": "microsoft",
+                                    "skin_path": "",
+                                    "access_token": mc_auth["access_token"],
+                                    "refresh_token": refresh_token
+                                }
+                                save_account_and_continue()
+                                break
+                            
+                            err = r_poll.json()
+                            err_code = err.get("error")
+                            if err_code == "authorization_pending": continue
+                            elif err_code == "slow_down": interval += 2
+                            elif err_code == "expired_token":
+                                if wizard.winfo_exists(): status_lbl.config(text="Code expired.", fg=COLORS['error_red'])
+                                break
+                            else:
+                                if wizard.winfo_exists(): status_lbl.config(text=f"Error: {err.get('error_description')}", fg=COLORS['error_red'])
+                                break
+                    except Exception as e:
+                        print(f"Wizard Login Error: {e}")
+                        if wizard.winfo_exists(): status_lbl.config(text=f"Error: {e}", fg=COLORS['error_red'])
+
+                threading.Thread(target=run_flow, daemon=True).start()
+
             def show_step_1_offline():
                 clear_page()
                 tk.Label(content_frame, text="Offline Setup", font=("Segoe UI", 18, "bold"), fg="white", bg=COLORS['card_bg']).pack(pady=(40, 20))
@@ -4022,6 +4134,9 @@ class MinecraftLauncher:
             try:
                 with open(self.config_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
+
+                    # First Run Check (Must be done before any save_config triggers)
+                    self.first_run = not data.get("first_run_completed", False)
                     
                     # Profiles (Accounts)
                     self.profiles = data.get("profiles", [])
@@ -4121,9 +4236,6 @@ class MinecraftLauncher:
                              print(f"Failed to load saved wallpaper: {e}")
                     else:
                          self.current_wallpaper = None
-
-                    # First Run Check
-                    self.first_run = not data.get("first_run_completed", False)
                          
             except Exception as e: 
                 print(f"Error loading config: {e}")

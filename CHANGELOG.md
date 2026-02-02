@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.6] - 2026-02-02
+
+### Added
+- **Onboarding**: Integrated full Microsoft Device Code Flow login into the initial setup wizard (replacing the "Coming Soon" placeholder).
+
+### Fixed
+- **Onboarding Loop**: Fixed a bug where the Onboarding Wizard would reappear on every launch due to configuration saving race conditions.
+- **Auto-Update**: Fixed a `[WinError 32]` (Failed to remove temporary directory) warning during auto-updates by properly detaching the new process on Windows.
+
 ## [1.5] - 2026-02-02
 
 ### Added
