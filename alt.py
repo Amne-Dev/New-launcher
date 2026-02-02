@@ -797,10 +797,13 @@ class MinecraftLauncher:
         
         # Progressbar
         style.configure("Launcher.Horizontal.TProgressbar",
-                       troughcolor=COLORS['bottom_bar_bg'],
+                       troughcolor="#212121",
                        background=COLORS['success_green'],
-                       bordercolor=COLORS['bottom_bar_bg'],
-                       thickness=4)
+                       bordercolor="#212121",
+                       lightcolor="#212121",
+                       darkcolor="#212121",
+                       borderwidth=0,
+                       thickness=15)
 
     def create_layout(self):
         # 1. Sidebar (Left) - width 250px for proper menu
@@ -937,39 +940,115 @@ class MinecraftLauncher:
     def perform_auto_update(self, asset_url, version):
         # 1. Download
         self.update_status_lbl.config(text=f"Downloading update {version}...", fg=COLORS['accent_blue'])
+        
+        # Show Progress Bar
+        self.root.after(0, self.show_update_progress)
+        
         threading.Thread(target=self._download_update_thread, args=(asset_url,), daemon=True).start()
+
+    def show_progress_overlay(self, task_name="Loading..."):
+        # Update Container (Hides bottom bar/content behind it)
+        if not hasattr(self, 'update_frame'):
+            self.update_frame = tk.Frame(self.root, bg=COLORS['bottom_bar_bg'])
+            
+            # Label
+            self.update_progress_label = tk.Label(self.update_frame, text=task_name, 
+                                                 font=("Segoe UI", 10, "bold"), 
+                                                 bg=COLORS['bottom_bar_bg'], fg="white")
+            self.update_progress_label.pack(side="top", pady=(15, 10))
+
+            # Counter Label (Top Right of Bar area)
+            self.update_counter_label = tk.Label(self.update_frame, text="", 
+                                                font=("Segoe UI", 9), 
+                                                bg=COLORS['bottom_bar_bg'], fg=COLORS['text_secondary'])
+            self.update_counter_label.place(relx=0.98, rely=0.75, anchor="e")
+            
+            # Progress Bar
+            self.update_progress_bar = ttk.Progressbar(self.update_frame, orient='horizontal', mode='determinate', 
+                                                      style="Launcher.Horizontal.TProgressbar")
+            self.update_progress_bar.pack(side="bottom", fill="x", ipady=10) # Thicker bar inside frame
+            
+        else:
+            self.update_progress_label.config(text=task_name)
+            self.update_progress_bar['value'] = 0
+            if hasattr(self, 'update_counter_label'): self.update_counter_label.config(text="")
+
+        # Show Frame
+        # Height 100 to match bottom_bar height
+        # x=200 to start after Sidebar, width=-200 + relwidth=1 to fill remaining space
+        self.update_frame.place(x=200, rely=1.0, anchor="sw", relwidth=1, width=-200, height=100) 
+        self.update_frame.lift()
+
+    def hide_progress_overlay(self):
+        if hasattr(self, 'update_frame'):
+            self.update_frame.place_forget()
+
+    def update_download_progress(self, current, total):
+        if hasattr(self, 'update_progress_bar'):
+            if total > 0:
+                pct = (current / total) * 100
+                self.update_progress_bar['value'] = pct
+                
+                # Update text (Status)
+                if hasattr(self, 'update_progress_label'):
+                    self.update_progress_label.config(text=f"Downloading Update... {int(pct)}%")
+                
+                # Clear/Hide Counter (User requested to remove it for updates)
+                if hasattr(self, 'update_counter_label'):
+                    self.update_counter_label.config(text="")
+    
+    # Alias for backward compat / shared usage if needed
+    show_update_progress = lambda self: self.show_progress_overlay("Preparing Update...")
+    hide_update_progress = hide_progress_overlay
 
     def _download_update_thread(self, url):
         try:
-            import tempfile
-            # Create temp file
+            # Save to a persistent directory (avoid Temp/MEI issues)
+            updates_dir = os.path.join(self.config_dir, "updates")
+            if not os.path.exists(updates_dir):
+                os.makedirs(updates_dir)
+            
+            # Determine filename
+            filename = "NewLauncher_Update.exe"
+            path = os.path.join(updates_dir, filename)
+            
+            # Download
             r = requests.get(url, stream=True)
             total_size = int(r.headers.get('content-length', 0))
-            block_size = 1024
+            block_size = 1024 * 64 # Larger chunks
             wrote = 0
             
-            ext = ".exe" if url.endswith(".exe") else ".tmp"
-            fd, path = tempfile.mkstemp(suffix=ext)
-            
-            with os.fdopen(fd, 'wb') as f:
+            with open(path, 'wb') as f:
                 for data in r.iter_content(block_size):
                     wrote += len(data)
                     f.write(data)
-                    # Update Progress in main thread?
-                    # Simplified: just showing "Downloading..."
+                    self.root.after(0, lambda c=wrote, t=total_size: self.update_download_progress(c, t))
             
             # On Finish
+            self.root.after(0, self.hide_update_progress)
             self.root.after(0, lambda: self._on_download_complete(path))
             
         except Exception as e:
             print(f"Update download failed: {e}")
+            self.root.after(0, self.hide_update_progress)
             self.root.after(0, lambda: self.update_status_lbl.config(text="Update failed.", fg=COLORS['error_red']))
 
     def _on_download_complete(self, path):
-        if custom_askyesno("Update Ready", "Update downloaded successfully.\nInstall now? (The launcher will restart)"):
+         # Define custom buttons for the dialog
+        btns = [
+            ("Yes, Install", True, "primary"), 
+            ("I'll do it myself", "manual", "secondary"), 
+            ("No", False, "secondary")
+        ]
+        
+        # Use underlying message box class directly for custom buttons since askyesno only supports yes/no
+        mbox = CustomMessagebox("Update Available (v1.6.1)", "Update downloaded successfully.\nInstall now? (The launcher will restart)", 
+                                type="yesno", buttons=btns, parent=self.root)
+        result = mbox.result
+
+        if result is True:
             try:
                 # Launch new executable
-                # If we are valid exe
                 if path.endswith(".exe"):
                     # Detached process to avoid locking parent directory
                     if os.name == 'nt':
@@ -979,10 +1058,11 @@ class MinecraftLauncher:
                         
                     self.root.quit()
                 else:
-                    # If this is script based update, it's harder.
                     custom_showinfo("Manual Install", f"Update saved to:\n{path}\nPlease run it manually.")
             except Exception as e:
                 custom_showerror("Error", f"Could not launch update: {e}")
+        elif result == "manual":
+             webbrowser.open("https://github.com/Amne-Dev/New-launcher/releases/latest")
 
     def show_onboarding_wizard(self):
         """Shows the First Run Wizard"""
@@ -3828,37 +3908,36 @@ class MinecraftLauncher:
             try:
                 # Reset Config
                 if os.path.exists(self.config_file):
-                    os.remove(self.config_file)
+                    try: os.remove(self.config_file)
+                    except: pass
                 
                 # Reset Custom Wallpapers
                 wp_dir = os.path.join(self.config_dir, "wallpapers")
                 if os.path.exists(wp_dir):
-                    shutil.rmtree(wp_dir)
+                    try: shutil.rmtree(wp_dir, ignore_errors=True)
+                    except: pass
 
                 # Restart Logic
                 cmd = [sys.executable]
-                
+                cwd = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.getcwd()
+
                 # Handle script vs frozen exe
                 if not getattr(sys, 'frozen', False):
                     # We are running as a script (e.g. python alt.py)
-                    # Use absolute path for script to avoid CWD issues (Errno 2)
                     script = sys.argv[0]
                     if not os.path.isabs(script):
                         script = os.path.abspath(script)
-                    cmd.append(script)
-                    cmd.extend(sys.argv[1:])
-                else:
-                    # Frozen exe: sys.executable is the exe itself
-                    pass
+                        cwd = os.path.dirname(script)
+                    cmd = [sys.executable, script] + sys.argv[1:]
                 
-                # Launch new instance detached
+                # Launch new instance detached with explicit CWD
                 if os.name == 'nt':
-                     subprocess.Popen(cmd, close_fds=True, creationflags=0x00000008) # DETACHED_PROCESS
+                     subprocess.Popen(cmd, cwd=cwd, close_fds=True, creationflags=0x00000008) # DETACHED_PROCESS
                 else:
-                     subprocess.Popen(cmd, close_fds=True)
+                     subprocess.Popen(cmd, cwd=cwd, close_fds=True)
 
-                # Exit current instance gracefully
-                self.root.quit()
+                # Exit current instance gracefully after a short delay
+                self.root.after(500, self.root.quit)
                 
             except Exception as e:
                 custom_showerror("Error", f"Failed to reset: {e}")
@@ -3919,22 +3998,31 @@ class MinecraftLauncher:
     def _on_update_found(self, version, html_url, asset_url):
         self.update_status_lbl.config(text=f"New version available: {version}", fg=COLORS['accent_blue'])
         
-        # Choice: Yes -> Auto Update, No -> Visit Page
-        choice = custom_askyesno(
+        # Choice: Yes -> Auto Update, Manual -> Visit Page, No -> Dismiss
+        btns = [
+            ("Yes, Update", True, "primary"), 
+            ("I'll do it myself", "manual", "secondary"), 
+            ("No", False, "secondary")
+        ]
+        
+        mbox = CustomMessagebox(
             "Update Available", 
             f"A new version ({version}) is available.\n\n"
-            "Would you like to auto-update now?\n"
-            "(Click 'No' to visit the download page manually)"
+            "Would you like to auto-update now?", 
+            type="yesno", 
+            buttons=btns, 
+            parent=self.root
         )
+        choice = mbox.result
         
-        if choice:
+        if choice is True:
             if asset_url:
                 self.perform_auto_update(asset_url, version)
             else:
                 custom_showerror("Error", "No executable found for auto-update.\nOpening release page instead.")
                 if html_url:
                     webbrowser.open(html_url)
-        else:
+        elif choice == "manual":
              if html_url:
                 webbrowser.open(html_url)
 
@@ -4857,21 +4945,46 @@ class MinecraftLauncher:
 
         self.save_config()
         
-        # Show Progress Bar
-        self.progress_bar.place(relx=0, rely=0.96, relwidth=1, height=4)
+        # Show Progress Overlay
+        self.show_progress_overlay("Launching Minecraft...")
         
         self.update_rpc("Launching...", f"Version: {version_id} ({loader})")
 
         self.launch_btn.config(state="disabled", text="LAUNCHING...")
         self.launch_opts_btn.config(state="disabled")
-        self.set_status("Launching Minecraft...")
+        # self.set_status("Launching Minecraft...") # Redundant with overlay
         threading.Thread(target=self.launch_logic, args=(version_id, username, loader, force_update), daemon=True).start()
 
     def launch_logic(self, version, username, loader, force_update=False):
+        # Callback wrapper to update overlay
+        def update_status(t):
+            self.log(f"Status: {t}")
+            self.root.after(0, lambda: self.update_progress_label.config(text=t) if hasattr(self, 'update_progress_label') else None)
+
+        def update_progress(v):
+            if hasattr(self, 'update_progress_bar'):
+                self.update_progress_bar.config(value=v)
+                # Update counter label (Current / Max)
+                try:
+                    m = self.update_progress_bar['maximum']
+                    if hasattr(self, 'update_counter_label') and m > 0:
+                        self.update_counter_label.config(text=f"{int(v)} / {int(m)}")
+                except: pass
+
+        def set_max(m):
+             if hasattr(self, 'update_progress_bar'):
+                self.update_progress_bar.config(maximum=m)
+                # Force update counter immediately if max changes
+                try:
+                    v = self.update_progress_bar['value']
+                    if hasattr(self, 'update_counter_label') and m > 0:
+                         self.update_counter_label.config(text=f"{int(v)} / {int(m)}")
+                except: pass
+
         callback = cast(Any, {
-            "setStatus": lambda t: self.log(f"Status: {t}"),
-            "setProgress": lambda v: self.root.after(0, lambda: self.progress_bar.config(value=v)),
-            "setMax": lambda m: self.root.after(0, lambda: self.progress_bar.config(maximum=m))
+            "setStatus": update_status,
+            "setProgress": lambda v: self.root.after(0, lambda: update_progress(v)),
+            "setMax": lambda m: self.root.after(0, lambda: set_max(m))
         })
         local_skin_server = None
         try:
@@ -5124,7 +5237,7 @@ class MinecraftLauncher:
                 self.launch_btn.config(state="normal", text="PLAY")
                 self.launch_opts_btn.config(state="normal")
                 self.update_skin_indicator()
-                self.progress_bar.place_forget()
+                self.hide_progress_overlay()
                 
             self.root.after(0, reset_ui)
 

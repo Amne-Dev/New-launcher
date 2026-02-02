@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.6.2] - 2026-02-02
+
+### Added
+- **Progress Overlay**: A unified, persistent progress bar overlay now covers the bottom action bar during long tasks (Game Launch, Auto-Updates). This replaces inconsistent floating popups.
+- **Custom Update Options**: The startup "Update Available" prompt now features 3 custom buttons: "Yes, Update", "I'll do it myself" (opens GitHub), and "No".
+
+### Changed
+- **Update Logic**: Updates are now downloaded to a persistent `config/updates` folder instead of the system Temp folder, resolving "Failed to load Python DLL" errors during self-updates.
+- **Restart Mechanism**: Hardened the restart process for updates and factory resets to fully detach from the parent process, preventing file locking issues and `[WinError 32]`.
+
 ## [1.6.1] - 2026-02-02
 
 ### Fixed
