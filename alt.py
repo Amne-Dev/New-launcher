@@ -2848,21 +2848,44 @@ class MinecraftLauncher:
         scrollbar.pack(side="right", fill="y")
 
         # Defaults
-        defaults = ["background.png", "image1.png"]
+        defaults = ["background.png", "image1.png", "Island.png", "River.png"]
         
-        # Gather all images
+        # Helper: Get Hash
+        def get_img_hash(p):
+            try:
+                h = hashlib.sha1()
+                with open(p, 'rb') as f:
+                    while True:
+                        b = f.read(65536)
+                        if not b: break
+                        h.update(b)
+                return h.hexdigest()
+            except: return None
+
+        current_wp_hash = None
+        if hasattr(self, 'current_wallpaper') and self.current_wallpaper and os.path.exists(self.current_wallpaper):
+            current_wp_hash = get_img_hash(self.current_wallpaper)
+
+        # Gather all images: (name, path, hash)
         all_images = []
+        default_hashes = set()
         
         # 1. Resources
         for fname in defaults:
             path = resource_path(fname)
+            final_path = None
             if os.path.exists(path):
-                all_images.append((fname, path))
+                final_path = path
             else:
-                # Fallback to wallpapers/ folder (Dev env)
+                # Fallback
                 path2 = resource_path(os.path.join("wallpapers", fname))
                 if os.path.exists(path2):
-                    all_images.append((fname, path2))
+                    final_path = path2
+            
+            if final_path:
+                h = get_img_hash(final_path)
+                if h: default_hashes.add(h)
+                all_images.append((fname, final_path, h))
                 
         # 2. Custom Wallpapers
         try:
@@ -2870,7 +2893,12 @@ class MinecraftLauncher:
             if os.path.exists(wp_dir):
                 for f in os.listdir(wp_dir):
                     if f.lower().endswith(('.png', '.jpg', '.jpeg')):
-                        all_images.append((f, os.path.join(wp_dir, f)))
+                        full_path = os.path.join(wp_dir, f)
+                        h = get_img_hash(full_path)
+                        # Filter duplicates of defaults
+                        if h and h in default_hashes:
+                            continue
+                        all_images.append((f, full_path, h))
         except Exception as e:
             print(f"Error listing wallpapers: {e}")
 
@@ -2878,7 +2906,7 @@ class MinecraftLauncher:
         self.wp_widgets = []
 
         # Render Images
-        for name, path in all_images:
+        for name, path, img_hash in all_images:
             p_frame = tk.Frame(self.wp_grid_frame, bg=COLORS['card_bg'], padx=5, pady=5)
             
             # Thumb
@@ -2892,7 +2920,16 @@ class MinecraftLauncher:
                 btn.pack()
                 
                 # Check if selected
-                if hasattr(self, 'current_wallpaper') and self.current_wallpaper and os.path.normpath(self.current_wallpaper) == os.path.normpath(path):
+                is_selected = False
+                if hasattr(self, 'current_wallpaper') and self.current_wallpaper:
+                    # Check path match
+                    if os.path.normpath(self.current_wallpaper) == os.path.normpath(path):
+                        is_selected = True
+                    # Check hash match (if default changed location or copied)
+                    elif current_wp_hash and img_hash and img_hash == current_wp_hash:
+                        is_selected = True
+                        
+                if is_selected:
                      tk.Label(p_frame, text="SELECTED", bg=COLORS['success_green'], fg="white", font=("Segoe UI", 8, "bold")).pack(fill="x")
                 
                 tk.Label(p_frame, text=name[:20], bg=COLORS['card_bg'], fg="white").pack()
@@ -3789,11 +3826,40 @@ class MinecraftLauncher:
     def reset_to_defaults(self):
         if custom_askyesno("Confirm Reset", "Are you sure you want to reset all settings?\nThis will delete your profiles and configurations.\nThe launcher will restart."):
             try:
+                # Reset Config
                 if os.path.exists(self.config_file):
                     os.remove(self.config_file)
-                # Restart
-                self.root.destroy()
-                os.execl(sys.executable, sys.executable, *sys.argv)
+                
+                # Reset Custom Wallpapers
+                wp_dir = os.path.join(self.config_dir, "wallpapers")
+                if os.path.exists(wp_dir):
+                    shutil.rmtree(wp_dir)
+
+                # Restart Logic
+                cmd = [sys.executable]
+                
+                # Handle script vs frozen exe
+                if not getattr(sys, 'frozen', False):
+                    # We are running as a script (e.g. python alt.py)
+                    # Use absolute path for script to avoid CWD issues (Errno 2)
+                    script = sys.argv[0]
+                    if not os.path.isabs(script):
+                        script = os.path.abspath(script)
+                    cmd.append(script)
+                    cmd.extend(sys.argv[1:])
+                else:
+                    # Frozen exe: sys.executable is the exe itself
+                    pass
+                
+                # Launch new instance detached
+                if os.name == 'nt':
+                     subprocess.Popen(cmd, close_fds=True, creationflags=0x00000008) # DETACHED_PROCESS
+                else:
+                     subprocess.Popen(cmd, close_fds=True)
+
+                # Exit current instance gracefully
+                self.root.quit()
+                
             except Exception as e:
                 custom_showerror("Error", f"Failed to reset: {e}")
 

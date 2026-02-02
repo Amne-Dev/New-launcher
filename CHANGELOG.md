@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.6.1] - 2026-02-02
+
+### Fixed
+- **Reset Crash**: Fixed a critical `[Errno 2]` crash when using "Reset to Defaults". The restart mechanism now uses absolute paths and detached processes to guarantee a clean reboot.
+- **Wallpaper Duplication**: Fixed a visual bug where default wallpapers (like "Island") would appear twice in the list if selected.
+- **Factory Reset**: "Reset to Defaults" now correctly wipes the `config/wallpapers` directory, removing all custom user assets.
+
 ## [1.6] - 2026-02-02
 
 ### Added

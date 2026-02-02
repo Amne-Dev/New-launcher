@@ -23,22 +23,23 @@ rm -rf "$BUILD_DIR" "$DIST_DIR" "$APP_DIR" *.AppImage
 
 # 3. Dependencies
 echo "[*] Setting up Virtual Environment..."
-if [ -d "venv_build" ]; then
-    rm -rf venv_build
+
+if [ ! -d "venv_build" ]; then
+    echo "Creating new virtual environment..."
+    if ! python3 -m venv venv_build; then
+        echo "Error: Failed to create virtual environment."
+        echo "Please install the venv package:"
+        echo "  Debian/Ubuntu: sudo apt install python3-venv"
+        echo "  Fedora: dnf install python3"
+        exit 1
+    fi
+    source venv_build/bin/activate
+    echo "[*] Installing Python dependencies..."
+    pip install -r requirements.txt pyinstaller --quiet
+else
+    echo "Using existing virtual environment."
+    source venv_build/bin/activate
 fi
-
-if ! python3 -m venv venv_build; then
-    echo "Error: Failed to create virtual environment."
-    echo "Please install the venv package:"
-    echo "  Debian/Ubuntu: sudo apt install python3-venv"
-    echo "  Fedora: dnf install python3"
-    exit 1
-fi
-
-source venv_build/bin/activate
-
-echo "[*] Installing Python dependencies..."
-pip install -r requirements.txt pyinstaller --quiet
 
 # 4. Build Binary (PyInstaller)
 echo "[*] Running PyInstaller..."
@@ -48,7 +49,6 @@ pyinstaller alt.spec --distpath "$DIST_DIR" --workpath "$BUILD_DIR" --noconfirm 
 
 # Deactivate venv
 deactivate
-rm -rf venv_build
 
 # 5. Prepare AppDir
 echo "[*] Creating AppDir..."
@@ -97,7 +97,7 @@ fi
 echo "[*] Packaging AppImage..."
 # ARCH=x86_64 covers most desktop linux users
 export ARCH=x86_64
-./appimagetool-x86_64.AppImage "$APP_DIR" "$APP_NAME-1.6-x86_64.AppImage"
+./appimagetool-x86_64.AppImage "$APP_DIR" "$APP_NAME-1.6.1-x86_64.AppImage"
 
 echo "=== Build Complete ==="
-echo "Generated: $APP_NAME-1.6-x86_64.AppImage"
+echo "Generated: $APP_NAME-1.6.1-x86_64.AppImage"
