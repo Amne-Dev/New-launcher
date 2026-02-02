@@ -97,7 +97,7 @@ fi
 echo "[*] Packaging AppImage..."
 # ARCH=x86_64 covers most desktop linux users
 export ARCH=x86_64
-./appimagetool-x86_64.AppImage "$APP_DIR" "$APP_NAME-1.6.1-x86_64.AppImage"
+./appimagetool-x86_64.AppImage "$APP_DIR" "$APP_NAME-1.6.2-x86_64.AppImage"
 
 echo "=== Build Complete ==="
-echo "Generated: $APP_NAME-1.6.1-x86_64.AppImage"
+echo "Generated: $APP_NAME-1.6.2-x86_64.AppImage"
