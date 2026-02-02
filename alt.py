@@ -4398,7 +4398,22 @@ class MinecraftLauncher:
         else: 
             print("Config file not found, creating default")
             self.first_run = True # Explicitly true for no config
-            self.create_default_profile()
+
+        # --- Default Wallpaper Fallback ---
+        if not self.hero_img_raw:
+             try:
+                 # Check for 'Island.png' or 'background.png' in wallpapers dir
+                 possible_defaults = ["Island.png", "background.png"]
+                 for name in possible_defaults:
+                     path = resource_path(os.path.join("wallpapers", name))
+                     if os.path.exists(path):
+                         self.current_wallpaper = path
+                         self.hero_img_raw = Image.open(path)
+                         print(f"Loaded default wallpaper: {name}")
+                         break
+             except Exception as e:
+                 print(f"Failed to load default wallpaper: {e}")
+        self.create_default_profile()
             
         # Trigger background check for MS skin model to ensure radio button matches server
         if self.profiles and 0 <= self.current_profile_index < len(self.profiles):
