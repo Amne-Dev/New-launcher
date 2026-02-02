@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5] - 2026-02-02
+
+### Added
+- **Skin Model Sync**: Implemented automatic synchronization of the skin model (Classic/Slim) with Minecraft servers on startup to ensure local state matches the server API.
+- **Background Checks**: Added `_startup_ms_skin_check` to validate and update the skin configuration silently in the background.
+- **Verbose Logging**: Enhanced debug logging for the `upload_ms_skin` function to print full request/response headers and bodies for easier troubleshooting.
+
+### Changed
+- **UI Overhaul**: Replaced all native Windows message boxes (`messagebox`) with a unified **Custom Message Box** (`CustomMessagebox`) system.
+    - Dialogs now use the launcher's dark theme/color palette (`#3A3B3C`).
+    - Standardized error, warning, and confirmation popups.
+- **Error Handling**: 
+    - Improved "Sync Error" feedback with specific guidance for users (e.g., prompt to re-upload if skin path is missing).
+    - Fixed issues where the UI would desync from the actual server state.
+
+### Fixed
+- **Startup Crash**: Resolved `NameError: name 'root' is not defined` and `AttributeError` for `_default_root` in the new custom popup class.
+- **Indentation**: Fixed logic formatting in the main `MinecraftLauncher` initialization.
+
 ## [1.4] - 2026-02-02
 
 ### Added

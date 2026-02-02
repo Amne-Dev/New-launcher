@@ -45,9 +45,73 @@
         </section>
 
         <section>
-            <h2>Getting Started</h2>
-            <p>Download a release from GitHub and run the installer (Windows). See the Downloads page for checksums and verification instructions (coming soon).</p>
+            <h2>User Guide</h2>
+            <div class="wiki-content">
+                <h3>1. Managing Accounts</h3>
+                <p>The launcher supports three types of accounts:</p>
+                <ul>
+                    <li><strong>Microsoft Account</strong>: Authenticate via browser. Skins/username sync automatically.</li>
+                    <li><strong>Ely.by</strong>: Enter credentials. Supports automatic skin injection.</li>
+                    <li><strong>Offline</strong>: Enter username. Supports local skin files via settings.</li>
+                </ul>
+
+                <h3>2. Creating Installations</h3>
+                <p>Navigate to the <strong>Installations</strong> tab to manage versions.</p>
+                <ul>
+                    <li><strong>Create New</strong>: Click "+" button.</li>
+                    <li><strong>Loader</strong>: Choose Vanilla, Fabric, or Forge (auto-installed).</li>
+                    <li><strong>Icon</strong>: Select a Minecraft block or custom image.</li>
+                </ul>
+
+                <h3>3. Settings & Customization</h3>
+                <ul>
+                    <li><strong>RAM</strong>: Adjust slider for memory allocation.</li>
+                    <li><strong>Wallpapers</strong>: Choose pre-loaded or custom images from <code>wallpapers/</code>.</li>
+                    <li><strong>Rich Presence</strong>: Discord status integration.</li>
+                </ul>
+            </div>
         </section>
+
+        <section>
+            <h2>Developer Documentation</h2>
+            <div class="wiki-content">
+                <p>Refactored (v1.4) structure:</p>
+                <ul>
+                    <li><code>alt.py</code>: Main entry point and UI.</li>
+                    <li><code>auth.py</code>: Ely.by authentication logic.</li>
+                    <li><code>handlers.py</code>: HTTP handlers (Skin Server, Microsoft Auth).</li>
+                    <li><code>utils.py</code>: Helper functions.</li>
+                </ul>
+                
+                <h3>Building from Source</h3>
+                <pre><code>pyinstaller alt.spec</code></pre>
+
+                <h3>Building for Linux (AppImage)</h3>
+                <pre><code>chmod +x linux/build_appimage.sh
+./linux/build_appimage.sh</code></pre>
+            </div>
+        </section>
+
+        <section>
+            <h2>Skin System Architecture</h2>
+            <div class="wiki-content">
+                <h3>1. Microsoft/Mojang</h3>
+                <p>Standard OAuth2 flow. Game client contacts Mojang servers directly.</p>
+
+                <h3>2. Ely.by</h3>
+                <p>Uses <code>authlib-injector</code> to redirect auth requests to Ely.by servers.</p>
+
+                <h3>3. Offline (Local Injection)</h3>
+                <p>Allows offline skins without modifying the game JAR:</p>
+                <ol>
+                    <li>Launcher starts a local HTTP server on a random port.</li>
+                    <li>Game is launched with <code>authlib-injector</code> pointing to <code>localhost</code>.</li>
+                    <li>Local server intercepts profile requests and serves a JSON profile pointing to the local skin file.</li>
+                    <li>Game client downloads the texture from the local server.</li>
+                </ol>
+            </div>
+        </section>
+
 
         <section>
             <h2>Contributing</h2>

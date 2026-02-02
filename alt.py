@@ -543,6 +543,128 @@ class SkinRenderer3D:
             traceback.print_exc()
             return None
 
+# --- Custom Popups ---
+class CustomMessagebox(tk.Toplevel):
+    def __init__(self, title, message, type="info", buttons=None, parent=None):
+        super().__init__(parent)
+        self.title(title)
+        self.configure(bg=COLORS['card_bg'])
+        try: self.attributes('-topmost', True) 
+        except: pass
+        
+        # Remove standard window decorations if we wanted strictly custom, 
+        # but standard title bar is safer for cross-platform/dragging.
+        # self.overrideredirect(True) 
+        
+        self.result = None
+        target_parent = parent
+        
+        # Styles
+        bg_col = COLORS['card_bg']
+        fg_col = COLORS['text_primary']
+        accent_col = COLORS.get('play_btn_green', '#2D8F36')
+        
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+        
+        # Main Frame
+        frame = tk.Frame(self, bg=bg_col, padx=25, pady=25)
+        frame.pack(fill="both", expand=True)
+        
+        # Icon (Optional, simplistic text icon for now)
+        icon_char = "ℹ"
+        icon_col = accent_col
+        if type == "error": 
+            icon_char = "✖"
+            icon_col = COLORS.get('red', '#E74C3C')
+        elif type == "warning": 
+            icon_char = "⚠"
+            icon_col = COLORS.get('orange', '#E67E22')
+        elif type == "yesno":
+            icon_char = "?"
+            icon_col = COLORS.get('blue', '#3498DB')
+            
+        # Title/Icon Row
+        # tk.Label(frame, text=icon_char, bg=bg_col, fg=icon_col, font=("Segoe UI", 20)).pack()
+        
+        # Message
+        msg_lbl = tk.Label(frame, text=message, bg=bg_col, fg=fg_col, 
+                          font=("Segoe UI", 10), wraplength=380, justify="center")
+        msg_lbl.pack(pady=(5, 20))
+        
+        # Buttons Setup
+        btn_frame = tk.Frame(frame, bg=bg_col)
+        btn_frame.pack(fill="x", pady=(10, 0))
+        btn_inner = tk.Frame(btn_frame, bg=bg_col)
+        btn_inner.pack(anchor="center")
+        
+        if buttons is None:
+            if type == "yesno":
+                buttons = [("Yes", True, "primary"), ("No", False, "secondary")]
+            elif type == "error":
+                buttons = [("Close", False, "secondary")]
+            else:
+                buttons = [("OK", True, "primary")]
+                
+        for text, val, style in buttons:
+            b_bg = accent_col if style == "primary" else "#555555"
+            b_fg = "white"
+            
+            btn = tk.Button(btn_inner, text=text, bg=b_bg, fg=b_fg, 
+                           font=("Segoe UI", 9, "bold"), relief="flat",
+                           activebackground=b_bg, activeforeground=b_fg,
+                           bd=0, padx=20, pady=6,
+                           command=lambda v=val: self.on_click(v))
+            btn.pack(side="left", padx=10)
+            
+        # Centering Logic
+        self.update_idletasks()
+        w = 440
+        h = max(160, self.winfo_reqheight())
+        
+        # Safe Centering
+        screen_w = self.winfo_screenwidth()
+        screen_h = self.winfo_screenheight()
+        x = (screen_w // 2) - (w // 2)
+        y = (screen_h // 2) - (h // 2)
+        
+        if target_parent and target_parent.winfo_exists():
+            try:
+                px = target_parent.winfo_rootx()
+                py = target_parent.winfo_rooty()
+                pw = target_parent.winfo_width()
+                ph = target_parent.winfo_height()
+                # Center on parent
+                if pw > 100 and ph > 100:
+                    x = px + (pw // 2) - (w // 2)
+                    y = py + (ph // 2) - (h // 2)
+            except: pass
+            
+        self.geometry(f"{w}x{h}+{int(x)}+{int(y)}")
+        self.transient(target_parent)
+        self.grab_set()
+        self.wait_window()
+        
+    def on_click(self, val):
+        self.result = val
+        self.destroy()
+        
+    def on_close(self):
+        self.result = None
+        self.destroy()
+
+def custom_showinfo(title, message, parent=None):
+    CustomMessagebox(title, message, type="info", parent=parent)
+
+def custom_showwarning(title, message, parent=None):
+    CustomMessagebox(title, message, type="warning", parent=parent)
+
+def custom_showerror(title, message, parent=None):
+    CustomMessagebox(title, message, type="error", parent=parent)
+
+def custom_askyesno(title, message, parent=None):
+    mbox = CustomMessagebox(title, message, type="yesno", parent=parent)
+    return mbox.result
+
 # --- Main App ---
 class MinecraftLauncher:
     def __init__(self, root):
@@ -629,6 +751,7 @@ class MinecraftLauncher:
         self.rpc_connected = False
         self.auto_update_check = True # Default True
         self.icon_cache = {}
+        self.hero_img_raw = None
         self.first_run = True # Default for new installs
 
         self.start_time = None
@@ -843,7 +966,7 @@ class MinecraftLauncher:
             self.root.after(0, lambda: self.update_status_lbl.config(text="Update failed.", fg=COLORS['error_red']))
 
     def _on_download_complete(self, path):
-        if messagebox.askyesno("Update Ready", "Update downloaded successfully.\nInstall now? (The launcher will restart)"):
+        if custom_askyesno("Update Ready", "Update downloaded successfully.\nInstall now? (The launcher will restart)"):
             try:
                 # Launch new executable
                 # If we are valid exe
@@ -852,9 +975,9 @@ class MinecraftLauncher:
                     self.root.quit()
                 else:
                     # If this is script based update, it's harder.
-                    messagebox.showinfo("Manual Install", f"Update saved to:\n{path}\nPlease run it manually.")
+                    custom_showinfo("Manual Install", f"Update saved to:\n{path}\nPlease run it manually.")
             except Exception as e:
-                messagebox.showerror("Error", f"Could not launch update: {e}")
+                custom_showerror("Error", f"Could not launch update: {e}")
 
     def show_onboarding_wizard(self):
         """Shows the First Run Wizard"""
@@ -943,7 +1066,7 @@ class MinecraftLauncher:
                                    command=cmd)
                     btn.pack()
 
-                make_choice_btn("Microsoft", "#00A4EF", "⊞", lambda: messagebox.showinfo("Coming Soon", "Microsoft Login is currently being updated.\nPlease use Offline or Ely.by."))
+                make_choice_btn("Microsoft", "#00A4EF", "⊞", lambda: custom_showinfo("Coming Soon", "Microsoft Login is currently being updated.\nPlease use Offline or Ely.by."))
                 make_choice_btn("Ely.by", "#3498DB", "☁", show_step_1_elyby)
                 make_choice_btn("Offline", "#454545", "👤", show_step_1_offline)
 
@@ -989,7 +1112,7 @@ class MinecraftLauncher:
                     user_input = ue.get()
                     res = ElyByAuth.authenticate(user_input.strip(), pe.get().strip())
                     if "error" in res:
-                        messagebox.showerror("Error", res['error'], parent=wizard)
+                        custom_showerror("Error", res['error'], parent=wizard)
                     else:
                         prof = cast(dict, res.get("selectedProfile", {}))
                         name = prof.get("name", user_input)
@@ -1164,7 +1287,7 @@ class MinecraftLauncher:
 
         except Exception as e:
             print(f"Error showing wizard: {e}")
-            messagebox.showerror("Error", f"Wizard crashed: {e}")
+            custom_showerror("Error", f"Wizard crashed: {e}")
             if 'wizard' in locals(): wizard.destroy() # type: ignore
 
     def start_locker_tour(self):
@@ -1206,9 +1329,9 @@ class MinecraftLauncher:
         
         if target:
             self.show_coach_mark(target, "Finally, configure advanced options\nand account management here.",
-                                 next_action=lambda: messagebox.showinfo("All Set!", "You are ready to play!\nHave fun with the New Launcher."))
+                                 next_action=lambda: custom_showinfo("All Set!", "You are ready to play!\nHave fun with the New Launcher."))
         else:
-             messagebox.showinfo("All Set!", "You are ready to play!\nHave fun with the New Launcher.")
+             custom_showinfo("All Set!", "You are ready to play!\nHave fun with the New Launcher.")
 
     def show_coach_mark(self, widget, text, next_action=None):
         try:
@@ -1587,7 +1710,10 @@ class MinecraftLauncher:
         self.refresh_installations_list()
 
     def refresh_installations_list(self):
+        if not hasattr(self, 'inst_list_frame'): return # Safety check
         for w in self.inst_list_frame.winfo_children(): w.destroy()
+        
+        self.inst_list_frame.update_idletasks()
         
         for idx, inst in enumerate(self.installations):
             # Check Filters
@@ -1680,15 +1806,15 @@ class MinecraftLauncher:
         # Play
         tk.Button(actions, text="Play", bg=COLORS['success_green'], fg="white", font=("Segoe UI", 9, "bold"),
                  relief="flat", padx=15, cursor="hand2",
-                 command=lambda: self.launch_installation(idx)).pack(side="left", padx=5)
+                 command=lambda i=idx: self.launch_installation(i)).pack(side="left", padx=5)
                  
         # Folder
         tk.Button(actions, text="📁", bg=COLORS['input_bg'], fg=COLORS['text_primary'], relief="flat", cursor="hand2",
-                 command=lambda: self.open_installation_folder(idx)).pack(side="left", padx=5)
+                 command=lambda i=idx: self.open_installation_folder(i)).pack(side="left", padx=5)
                  
         # Edit/Menu
         menu_btn = tk.Button(actions, text="...", bg=COLORS['input_bg'], fg=COLORS['text_primary'], relief="flat", cursor="hand2")
-        menu_btn.config(command=lambda b=menu_btn: self.open_installation_menu(idx, b))
+        menu_btn.config(command=lambda b=menu_btn, i=idx: self.open_installation_menu(i, b))
         menu_btn.pack(side="left", padx=5)
 
     def open_installation_folder(self, idx):
@@ -2265,15 +2391,20 @@ class MinecraftLauncher:
                  "created": existing_data.get("created", "2024-01-01")
              }
              
-             if edit_mode and index is not None:
-                 self.installations[index] = new_profile
-             else:
-                 self.installations.append(new_profile)
+             try:
+                 if edit_mode and index is not None:
+                     self.installations[index] = new_profile
+                 else:
+                     self.installations.append(new_profile)
                  
-             self.save_config()
-             self.refresh_installations_list()
-             self.update_installation_dropdown()
-             win.destroy()
+                 self.save_config()
+                 self.refresh_installations_list()
+                 self.update_installation_dropdown()
+             except Exception as e:
+                 print(f"Error saving profile: {e}")
+                 custom_showerror("Error", f"Failed to save profile: {e}")
+             finally:
+                 if win.winfo_exists(): win.destroy()
 
         # --- Footer Actions ---
         btn_row = tk.Frame(win, bg="#1e1e1e")
@@ -2350,7 +2481,7 @@ class MinecraftLauncher:
         # Delete
         def do_delete():
             menu.destroy()
-            if messagebox.askyesno("Delete", "Are you sure you want to delete this installation?"):
+            if custom_askyesno("Delete", "Are you sure you want to delete this installation?"):
                 self.installations.pop(idx)
                 self.save_config()
                 self.refresh_installations_list()
@@ -2551,8 +2682,35 @@ class MinecraftLauncher:
     def update_skin_model(self):
         val = self.skin_model_var.get()
         if self.profiles:
-            self.profiles[self.current_profile_index]["skin_model"] = val
+            p = self.profiles[self.current_profile_index]
+            old_val = p.get("skin_model", "classic")
+            if old_val == val: return # No change
+            
+            p["skin_model"] = val
             self.save_config()
+            
+            # If Microsoft, sync change to server
+            if p.get("type", "offline") == "microsoft":
+                path = p.get("skin_path")
+                
+                if path and os.path.exists(path):
+                    token = p.get("access_token")
+                    
+                    def _sync_model():
+                        # We re-upload the same skin with new model
+                        if self.upload_ms_skin(path, val, token):
+                            # self.log(f"Synced model change ({val}) to Microsoft")
+                            pass
+                        else:
+                            # Revert on failure? Or just warn?
+                            # Warning is better.
+                            custom_showwarning("Sync Error", "Failed to update skin model on Minecraft servers.")
+                            
+                    threading.Thread(target=_sync_model, daemon=True).start()
+                else:
+                    self.log(f"DEBUG: Skipping model sync. Path: {path}")
+                    custom_showinfo("Skin Update", "Skin model changed locally.\n\nTo update on Minecraft servers, please re-upload your skin file.")
+
         # Force re-render of skin
         self.update_active_profile()
 
@@ -2769,50 +2927,88 @@ class MinecraftLauncher:
              tk.Label(self.history_frame, text="No history", bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(pady=10, padx=10)
              return
 
-        for idx, path in enumerate(history):
-             if not os.path.exists(path): continue
+        for idx, item in enumerate(history):
+             # Handle Legacy (String) vs New (Dict)
+             if isinstance(item, str):
+                 path = item
+                 model = "classic"
+             else:
+                 path = item.get("path")
+                 model = item.get("model", "classic")
+                 
+             if not path or not os.path.exists(path): continue
              
-             item = tk.Frame(self.history_frame, bg=COLORS['card_bg'], pady=5, padx=5, cursor="hand2")
-             item.pack(fill="x", pady=2, padx=5)
+             row = tk.Frame(self.history_frame, bg=COLORS['card_bg'], pady=5, padx=5, cursor="hand2")
+             row.pack(fill="x", pady=2, padx=5)
              
              # Tiny Head Preview
              head = self.get_head_from_skin(path, size=32)
              if head:
-                 icon = tk.Label(item, image=head, bg=COLORS['card_bg'])
+                 icon = tk.Label(row, image=head, bg=COLORS['card_bg'])
                  icon.image = head # type: ignore
                  icon.pack(side="left", padx=5)
              
              name = os.path.basename(path)
-             if len(name) > 20: name = name[:17] + "..."
+             if len(name) > 15: name = name[:12] + "..."
              
-             tk.Label(item, text=name, bg=COLORS['card_bg'], fg=COLORS['text_primary'], font=("Segoe UI", 9)).pack(side="left")
+             info_frame = tk.Frame(row, bg=COLORS['card_bg'])
+             info_frame.pack(side="left", fill="x", expand=True)
              
-             def _apply(p=path):
-                 self.apply_history_skin(p)
+             tk.Label(info_frame, text=name, bg=COLORS['card_bg'], fg=COLORS['text_primary'], font=("Segoe UI", 9), anchor="w").pack(fill="x")
+             tk.Label(info_frame, text=model.title(), bg=COLORS['card_bg'], fg=COLORS['text_secondary'], font=("Segoe UI", 7), anchor="w").pack(fill="x")
+             
+             def _apply(p=path, m=model):
+                 self.apply_history_skin(p, m)
                  
-             item.bind("<Button-1>", lambda e, p=path: _apply(p))
-             for child in item.winfo_children():
-                 child.bind("<Button-1>", lambda e, p=path: _apply(p))
+             row.bind("<Button-1>", lambda e, p=path, m=model: _apply(p, m))
+             for child in row.winfo_children():
+                 child.bind("<Button-1>", lambda e, p=path, m=model: _apply(p, m))
+                 for grand in child.winfo_children():
+                      grand.bind("<Button-1>", lambda e, p=path, m=model: _apply(p, m))
 
-    def apply_history_skin(self, path):
+    def apply_history_skin(self, path, model="classic"):
         if not os.path.exists(path): return
-        self.skin_path = path
-        if self.profiles:
-             self.profiles[self.current_profile_index]["skin_path"] = path
+        
+        p = self.profiles[self.current_profile_index]
+        p_type = p.get("type", "offline")
+        
+        # Auto Sync for Microsoft
+        if p_type == "microsoft":
+             token = p.get("access_token")
+             if self.upload_ms_skin(path, model, token):
+                 # Silent success or log
+                 pass
+             else:
+                 custom_showerror("Error", "Failed to upload skin to Minecraft servers.")
+        
+        self.skin_path = path   
+        p["skin_path"] = path
+        p["skin_model"] = model
         self.update_active_profile()
         self.save_config()
         # Move to top of history
-        self.add_skin_to_history(path)
+        self.add_skin_to_history(path, model)
 
-    def add_skin_to_history(self, path):
+    def add_skin_to_history(self, path, model="classic"):
         if not self.profiles or not path: return
         p = self.profiles[self.current_profile_index]
         history = cast(list, p.get("skin_history", []))
         
-        # Avoid duplicates or invalid
-        if path in history:
-            history.remove(path)
-        history.insert(0, path)
+        # New Entry
+        entry = {"path": path, "model": model}
+        
+        # Remove Existing (check path equality)
+        to_remove = None
+        for item in history:
+            existing_path = item if isinstance(item, str) else item.get("path")
+            if existing_path == path:
+                to_remove = item
+                break
+        
+        if to_remove:
+            history.remove(to_remove)
+            
+        history.insert(0, entry)
         if len(history) > 20: history = history[:20]
         
         p["skin_history"] = history # type: ignore
@@ -2867,7 +3063,7 @@ class MinecraftLauncher:
         if not self.profiles or idx < 0 or idx >= len(self.profiles): return
         
         p_name = self.profiles[idx].get("name", "Account")
-        if messagebox.askyesno("Remove Account", f"Are you sure you want to remove account '{p_name}'?"):
+        if custom_askyesno("Remove Account", f"Are you sure you want to remove account '{p_name}'?"):
             del self.profiles[idx]
             
             # Reset index if needed
@@ -2955,22 +3151,161 @@ class MinecraftLauncher:
         for widget in parent.winfo_children():
             widget.destroy()
             
-        parent.title("Microsoft Login - Placeholder")
-        parent.geometry("500x300")
+        parent.title("Microsoft Login - Device Flow")
+        parent.geometry("500x450")
         
         tk.Label(parent, text="Microsoft Login", font=("Segoe UI", 16, "bold"), 
                 bg=COLORS['main_bg'], fg=COLORS['text_primary']).pack(pady=(20, 10))
         
-        tk.Label(parent, text="Microsoft Login is currently being updated.\nPlease use Offline Login for now.", 
-                font=("Segoe UI", 10), bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(pady=20)
+        # Status Label
+        status_lbl = tk.Label(parent, text="Initializing...", font=("Segoe UI", 10), 
+                             bg=COLORS['main_bg'], fg=COLORS['text_secondary'], wraplength=450)
+        status_lbl.pack(pady=10)
         
-        tk.Button(parent, text="Close", font=("Segoe UI", 10),
-                 bg=COLORS['input_bg'], fg=COLORS['text_primary'], relief="flat",
+        # Code Display
+        code_lbl = tk.Label(parent, text="", font=("Segoe UI", 24, "bold"), 
+                           bg=COLORS['main_bg'], fg=COLORS['success_green'])
+        code_lbl.pack(pady=10)
+        
+        # URL Display
+        url_lbl = tk.Label(parent, text="", font=("Segoe UI", 11, "underline"), 
+                          bg=COLORS['main_bg'], fg="#3498DB", cursor="hand2")
+        url_lbl.pack(pady=5)
+        
+        # Copy Button
+        copy_btn = tk.Button(parent, text="Copy Code", font=("Segoe UI", 10),
+                 bg=COLORS['input_bg'], fg=COLORS['text_primary'], relief="flat", state="disabled")
+        copy_btn.pack(pady=10)
+        
+        tk.Button(parent, text="Cancel", font=("Segoe UI", 10),
+                 bg="#1e1e1e", fg="white", relief="flat",
                  command=parent.destroy).pack(pady=20)
+
+        # Helper to open URL
+        def open_url(e):
+            url = url_lbl.cget("text")
+            if url: webbrowser.open(url)
+        url_lbl.bind("<Button-1>", open_url)
+
+        # Start Thread
+        threading.Thread(target=self._start_microsoft_device_flow, args=(parent, status_lbl, code_lbl, url_lbl, copy_btn), daemon=True).start()
     
-    def _process_microsoft_login(self, url, state, code_verifier, win, status_lbl):
-        # Deprecated manual flow
-        pass
+    def _start_microsoft_device_flow(self, win, status, code_display, url_display, copy_btn):
+        # 1. Request Device Code
+        try:
+             client_id = MSA_CLIENT_ID
+             scope = "XboxLive.signin offline_access"
+             
+             if not win.winfo_exists(): return
+             status.config(text="Contacting Microsoft...")
+             
+             # Request Device Code
+             r = requests.post("https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode",
+                               data={"client_id": client_id, "scope": scope})
+             
+             if r.status_code != 200:
+                 if win.winfo_exists(): status.config(text=f"Error initiating login: {r.text}", fg=COLORS['error_red'])
+                 return
+                 
+             data = r.json()
+             user_code = data.get("user_code")
+             verification_uri = data.get("verification_uri")
+             device_code = data.get("device_code")
+             interval = data.get("interval", 5)
+             
+             # Update UI
+             if win.winfo_exists():
+                 code_display.config(text=user_code)
+                 url_display.config(text=verification_uri)
+                 status.config(text=f"1. Click the link above\n2. Enter the code\n3. Login to your Microsoft Account")
+                 
+                 copy_btn.config(state="normal", command=lambda: self.root.clipboard_clear() or self.root.clipboard_append(user_code) or self.root.update())
+             
+             # 2. Poll
+             while win.winfo_exists():
+                 time.sleep(interval)
+                 
+                 r_poll = requests.post("https://login.microsoftonline.com/consumers/oauth2/v2.0/token",
+                                       data={"grant_type": "device_code", "client_id": client_id, "device_code": device_code})
+                 
+                 if r_poll.status_code == 200:
+                     # Success
+                     token_data = r_poll.json()
+                     self._finalize_microsoft_login(token_data, win, status)
+                     break
+                 
+                 err = r_poll.json()
+                 err_code = err.get("error")
+                 
+                 if err_code == "authorization_pending":
+                     continue # Keep waiting
+                 elif err_code == "slow_down":
+                     interval += 2
+                 elif err_code == "expired_token":
+                     if win.winfo_exists(): status.config(text="Code expired. Please try again.", fg=COLORS['error_red'])
+                     break
+                 else:
+                     if win.winfo_exists(): status.config(text=f"Error: {err.get('error_description')}", fg=COLORS['error_red'])
+                     break
+                     
+        except Exception as e:
+            print(f"Device Flow Error: {e}")
+            if win.winfo_exists(): status.config(text=f"Exception: {e}", fg=COLORS['error_red'])
+
+    def _finalize_microsoft_login(self, token_data, win, status):
+        try:
+            if not win.winfo_exists(): return
+            status.config(text="Authenticating with Xbox Live...")
+            access_token = token_data["access_token"]
+            refresh_token = token_data["refresh_token"]
+            
+            # Xbox Live
+            xbl = minecraft_launcher_lib.microsoft_account.authenticate_with_xbl(access_token)
+            
+            # XSTS
+            if not win.winfo_exists(): return
+            status.config(text="Authenticating with XSTS...")
+            xsts = minecraft_launcher_lib.microsoft_account.authenticate_with_xsts(xbl["Token"])
+            
+            # Minecraft
+            if not win.winfo_exists(): return
+            status.config(text="Authenticating with Minecraft...")
+            mc_auth = minecraft_launcher_lib.microsoft_account.authenticate_with_minecraft(xbl["DisplayClaims"]["xui"][0]["uhs"], xsts["Token"])
+            
+            # Profile
+            if not win.winfo_exists(): return
+            status.config(text="Fetching Profile...")
+            profile = minecraft_launcher_lib.microsoft_account.get_profile(mc_auth["access_token"])
+            
+            # Success - Save
+            new_profile = {
+                "name": profile["name"],
+                "uuid": profile["id"],
+                "type": "microsoft",
+                "skin_path": "", # Will fetch later
+                "access_token": mc_auth["access_token"],
+                "refresh_token": refresh_token,
+                "created": datetime.now().strftime("%Y-%m-%d")
+            }
+            
+            self.profiles.append(new_profile)
+            self.current_profile_index = len(self.profiles) - 1
+            self.save_config()
+            
+            # Done
+            if win.winfo_exists():
+                status.config(text="Login Successful!", fg=COLORS['success_green'])
+                win.after(1000, win.destroy)
+                
+                def on_finish():
+                    self.update_active_profile()
+                    self.refresh_skin()
+                    
+                self.root.after(100, on_finish)
+                
+        except Exception as e:
+            print(f"Auth Trace: {traceback.format_exc()}")
+            if win.winfo_exists(): status.config(text=f"Finalization Error: {e}", fg=COLORS['error_red'])
 
     def show_elyby_login(self, parent):
         for widget in parent.winfo_children(): widget.destroy()
@@ -2993,12 +3328,12 @@ class MinecraftLauncher:
             u = user_entry.get().strip()
             p = pass_entry.get().strip()
             if not u or not p:
-                messagebox.showerror("Error", "Please fill all fields")
+                custom_showerror("Error", "Please fill all fields")
                 return
             
             res = ElyByAuth.authenticate(u, p)
             if "error" in res:
-                messagebox.showerror("Login Failed", f"Could not login to Ely.by details: {res['error']}")
+                custom_showerror("Login Failed", f"Could not login to Ely.by details: {res['error']}")
             else:
                 # Success
                 profile = cast(dict, res.get("selectedProfile", {}))
@@ -3022,7 +3357,7 @@ class MinecraftLauncher:
                 self.add_skin_to_history(skin_cache_path)
                 self.save_config()
                 parent.destroy()
-                messagebox.showinfo("Success", f"Logged in as {name_}")
+                custom_showinfo("Success", f"Logged in as {name_}")
 
         tk.Button(parent, text="Login", font=("Segoe UI", 11, "bold"),
                  bg=COLORS['play_btn_green'], fg="white", width=25, pady=8, relief="flat", cursor="hand2",
@@ -3340,7 +3675,7 @@ class MinecraftLauncher:
         create_nav_btn("Reset", lbl_danger)
 
     def reset_to_defaults(self):
-        if messagebox.askyesno("Confirm Reset", "Are you sure you want to reset all settings?\nThis will delete your profiles and configurations.\nThe launcher will restart."):
+        if custom_askyesno("Confirm Reset", "Are you sure you want to reset all settings?\nThis will delete your profiles and configurations.\nThe launcher will restart."):
             try:
                 if os.path.exists(self.config_file):
                     os.remove(self.config_file)
@@ -3348,7 +3683,7 @@ class MinecraftLauncher:
                 self.root.destroy()
                 os.execl(sys.executable, sys.executable, *sys.argv)
             except Exception as e:
-                messagebox.showerror("Error", f"Failed to reset: {e}")
+                custom_showerror("Error", f"Failed to reset: {e}")
 
     def change_minecraft_dir(self):
         path = filedialog.askdirectory(initialdir=self.minecraft_dir)
@@ -3407,7 +3742,7 @@ class MinecraftLauncher:
         self.update_status_lbl.config(text=f"New version available: {version}", fg=COLORS['accent_blue'])
         
         # Choice: Yes -> Auto Update, No -> Visit Page
-        choice = messagebox.askyesno(
+        choice = custom_askyesno(
             "Update Available", 
             f"A new version ({version}) is available.\n\n"
             "Would you like to auto-update now?\n"
@@ -3418,7 +3753,7 @@ class MinecraftLauncher:
             if asset_url:
                 self.perform_auto_update(asset_url, version)
             else:
-                messagebox.showerror("Error", "No executable found for auto-update.\nOpening release page instead.")
+                custom_showerror("Error", "No executable found for auto-update.\nOpening release page instead.")
                 if html_url:
                     webbrowser.open(html_url)
         else:
@@ -3633,6 +3968,13 @@ class MinecraftLauncher:
         p = self.profiles[self.current_profile_index]
         self.skin_path = p.get("skin_path", "")
         
+        # Enforce settings based on account type
+        p_type = p.get("type", "offline")
+        if p_type == "microsoft":
+            self.auto_download_mod = False
+            if hasattr(self, 'auto_download_var'):
+                 self.auto_download_var.set(False)
+        
         if hasattr(self, 'user_entry'):
             self.user_entry.delete(0, tk.END)
             self.user_entry.insert(0, p.get("name", "Steve"))
@@ -3791,7 +4133,14 @@ class MinecraftLauncher:
             print("Config file not found, creating default")
             self.first_run = True # Explicitly true for no config
             self.create_default_profile()
-            self.create_default_profile()
+            
+        # Trigger background check for MS skin model to ensure radio button matches server
+        if self.profiles and 0 <= self.current_profile_index < len(self.profiles):
+            try:
+                p = self.profiles[self.current_profile_index]
+                if p.get("type") == "microsoft":
+                     threading.Thread(target=self._startup_ms_skin_check, daemon=True).start()
+            except: pass
 
     def save_config(self, *args, sync_ui=True):
         print(f"Saving config to: {self.config_file}")
@@ -3899,6 +4248,101 @@ class MinecraftLauncher:
         else:
             self.skin_indicator.config(text="Skin Injection Disabled", fg=COLORS['text_secondary'])
 
+    def custom_skin_model_popup(self, parent=None):
+        # Returns "classic" or "slim" or None if cancelled
+        result = {"model": None}
+        
+        # Check current profile for default preference
+        current_model = "classic"
+        if self.profiles and 0 <= self.current_profile_index < len(self.profiles):
+            current_model = self.profiles[self.current_profile_index].get("skin_model", "classic")
+            
+        dialog = tk.Toplevel(parent if parent else self.root)
+        dialog.title("Skin Model")
+        dialog.geometry("350x250")
+        dialog.config(bg=COLORS['main_bg'])
+        try: # Center it
+            x = self.root.winfo_x() + (self.root.winfo_width() // 2) - 175
+            y = self.root.winfo_y() + (self.root.winfo_height() // 2) - 125
+            dialog.geometry(f"+{x}+{y}")
+        except: pass
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+        dialog.grab_set()
+        
+        tk.Label(dialog, text="Select Skin Model", font=("Segoe UI", 12, "bold"), 
+                bg=COLORS['main_bg'], fg=COLORS['text_primary']).pack(pady=15)
+        
+        tk.Label(dialog, text="Does your skin have 3px (Slim) or 4px (Classic) arms?", 
+                 font=("Segoe UI", 9), bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(pady=(0, 20))
+        
+        btn_frame = tk.Frame(dialog, bg=COLORS['main_bg'])
+        btn_frame.pack(fill="x", padx=30)
+        
+        def set_classic():
+            result['model'] = "classic" # type: ignore
+            dialog.destroy()
+            
+        def set_slim():
+            result['model'] = "slim" # type: ignore
+            dialog.destroy()
+            
+        # Helper for active style
+        active_bd = 2
+        active_relief = "solid"
+        
+        # Classic (Steve)
+        b1_bg = COLORS['success_green'] if current_model == "classic" else COLORS['card_bg']
+        b1 = tk.Button(btn_frame, text="Classic (Steve)\n4px Arms", font=("Segoe UI", 10),
+                      bg=b1_bg, fg=COLORS['text_primary'], relief="flat", padx=10, pady=10,
+                      command=set_classic, width=15)
+        if current_model == "classic": b1.config(fg="white") # Highlight text too
+        b1.pack(side="left", padx=5)
+        
+        # Slim (Alex)
+        b2_bg = COLORS['success_green'] if current_model == "slim" else COLORS['card_bg']
+        b2 = tk.Button(btn_frame, text="Slim (Alex)\n3px Arms", font=("Segoe UI", 10),
+                      bg=b2_bg, fg=COLORS['text_primary'], relief="flat", padx=10, pady=10,
+                      command=set_slim, width=15)
+        if current_model == "slim": b2.config(fg="white")
+        b2.pack(side="right", padx=5)
+        
+        self.root.wait_window(dialog)
+        return result['model']
+
+    def upload_ms_skin(self, path, variant, token):
+        self.log(f"DEBUG: Uploading skin to Minecraft... Path: {path}, Variant: {variant}")
+        try:
+             url = "https://api.minecraftservices.com/minecraft/profile/skins"
+             # Mask token in logs for security, only show first few chars
+             masked_token = token[:8] + "..." if len(token) > 8 else "***"
+             self.log(f"DEBUG: Request URL: {url}")
+             self.log(f"DEBUG: Auth Token: {masked_token}")
+             
+             headers = {"Authorization": f"Bearer {token}"}
+             files = {
+                 "variant": (None, variant),
+                 "file": ("skin.png", open(path, "rb"), "image/png")
+             }
+             
+             r = requests.post(url, headers=headers, files=files)
+             
+             self.log(f"DEBUG: Response Status: {r.status_code}")
+             self.log(f"DEBUG: Response Headers: {r.headers}")
+             self.log(f"DEBUG: Response Body: {r.text}")
+             
+             if r.status_code == 200:
+                 self.log(f"Skin uploaded successfully ({variant})")
+                 return True
+             else:
+                 self.log(f"Skin upload failed: {r.status_code} {r.text}")
+                 return False
+        except Exception as e:
+            self.log(f"Upload exception: {e}")
+            import traceback
+            self.log(traceback.format_exc())
+            return False
+
     def check_mod_online(self, mc_version, loader):
         pass # Deprecated
 
@@ -3946,11 +4390,11 @@ class MinecraftLauncher:
                     if path:
                         self.profiles[self.current_profile_index]["skin_path"] = path
                         self.update_active_profile()
-                        self.add_skin_to_history(path)
-                        messagebox.showinfo("Skin Refreshed", "Skin updated from Ely.by successfully.")
+                        self.add_skin_to_history(path, "classic")
+                        custom_showinfo("Skin Refreshed", "Skin updated from Ely.by successfully.")
                     else:
                         self.skin_indicator.config(text="Refresh Failed", fg="red")
-                        messagebox.showwarning("Refresh Failed", "Could not fetch skin from Ely.by.")
+                        custom_showwarning("Refresh Failed", "Could not fetch skin from Ely.by.")
                 
                 self.root.after(0, _update_ui)
             
@@ -3967,12 +4411,17 @@ class MinecraftLauncher:
                 def _update_ui():
                     if path:
                         self.profiles[self.current_profile_index]["skin_path"] = path
+                        # Model is updated in profile by fetch_microsoft_skin side-effect
+                        model = self.profiles[self.current_profile_index].get("skin_model", "classic")
                         self.update_active_profile()
-                        self.add_skin_to_history(path)
-                        messagebox.showinfo("Skin Refreshed", "Skin updated from Microsoft successfully.")
+                        self.add_skin_to_history(path, model)
+                        # Don't show success box if auto-called (check if called by user?) or just show small toast?
+                        # For now, let's keep it but maybe it's annoying if auto-called.
+                        # Actually, better to just log it if successful, only warn on fail.
+                        pass # self.log("Skin updated")
                     else:
                         self.skin_indicator.config(text="Refresh Failed", fg="red")
-                        messagebox.showwarning("Refresh Failed", "Could not fetch skin. Session might be expired.")
+                        # messagebox.showwarning("Refresh Failed", "Could not fetch skin. Session might be expired.")
                 
                 self.root.after(0, _update_ui)
                 
@@ -3980,6 +4429,33 @@ class MinecraftLauncher:
             
         else:
              self.update_active_profile()
+
+    def _startup_ms_skin_check(self):
+        try:
+            if not self.profiles: return
+            p = self.profiles[self.current_profile_index]
+            token = p.get("access_token")
+            if not token: return
+
+            headers = {"Authorization": f"Bearer {token}"}
+            # Silent check
+            r = requests.get("https://api.minecraftservices.com/minecraft/profile", headers=headers, timeout=5)
+            if r.status_code == 200:
+                data = r.json()
+                skins = data.get("skins", [])
+                active_skin = next((s for s in skins if s["state"] == "ACTIVE"), None)
+                if active_skin:
+                    variant = active_skin.get("variant", "CLASSIC").lower()
+                    # Check against local
+                    local_model = p.get("skin_model", "classic")
+                    
+                    if variant != local_model:
+                         self.log(f"Syncing skin model to match server ({variant})")
+                         p["skin_model"] = variant
+                         if hasattr(self, 'skin_model_var'):
+                             self.root.after(0, lambda: self.skin_model_var.set(variant))
+                         self.save_config(sync_ui=False)
+        except: pass
 
     def fetch_microsoft_skin(self, username, uuid_, token):
         try:
@@ -4093,22 +4569,63 @@ class MinecraftLauncher:
         p_type = p.get("type", "offline")
         
         if p_type == "ely.by":
-            if messagebox.askyesno("Ely.by Skin", "Ely.by requires skins to be managed via their website.\n\nOpen Ely.by skin catalog for your user?"):
+            if custom_askyesno("Ely.by Skin", "Ely.by requires skins to be managed via their website.\n\nOpen Ely.by skin catalog for your user?"):
                 name = p.get("name", "")
                 webbrowser.open(f"https://ely.by/skins?uploader={name}")
             return
+            
+        elif p_type == "microsoft":
+             # Upload Logic directly
+             path = filedialog.askopenfilename(filetypes=[("Image files", "*.png")])
+             if not path: return
+             
+             # Verify size
+             try:
+                 im = Image.open(path)
+                 w, h = im.size
+                 if w != 64 or (h != 64 and h != 32):
+                     if not custom_askyesno("Warning", f"Skin dimensions {w}x{h} might not work perfectly. Standard is 64x64. Continue?"):
+                         return
+                 
+                 token = p.get("access_token")
+                 
+                 # Ask model
+                 variant = self.custom_skin_model_popup()
+                 if not variant: return # Cancelled
+                     
+                 # Upload
+                 if self.upload_ms_skin(path, variant, token):
+                     custom_showinfo("Success", "Skin uploaded successfully!")
+                     self.profiles[self.current_profile_index]["skin_path"] = path
+                     self.profiles[self.current_profile_index]["skin_model"] = variant
+                     self.update_active_profile()
+                     self.add_skin_to_history(path, variant)
+                     self.save_config()
+                 else:
+                     custom_showerror("Error", f"Failed to upload skin.")
+                     
+             except Exception as e:
+                 custom_showerror("Error", f"Upload failed: {e}")
+             return
 
+        # Offline / Standard
         if not self.auto_download_mod:
-            if messagebox.askyesno("Skin Injection", "Enable Skin Injection to use this skin in-game?"):
+            if custom_askyesno("Skin Injection", "Enable Skin Injection to use this skin in-game?"):
                 self.auto_download_mod = True
                 self.auto_download_var.set(True)
         path = filedialog.askopenfilename(filetypes=[("Image files", "*.png")])
         if path:
             self.skin_path = path
+            
+            # Ask model for offline usage too (for correct injections/rendering)
+            variant = self.custom_skin_model_popup() or "classic"
+            
             if self.profiles and 0 <= self.current_profile_index < len(self.profiles):
                 self.profiles[self.current_profile_index]["skin_path"] = path
+                self.profiles[self.current_profile_index]["skin_model"] = variant
+                
             self.update_active_profile()
-            self.add_skin_to_history(path)
+            self.add_skin_to_history(path, variant)
             self.save_config()
 
     def ensure_authlib_injector(self):
@@ -4417,7 +4934,7 @@ class MinecraftLauncher:
             if "launchermeta.mojang.com" in err_msg or "getaddrinfo failed" in err_msg:
                  err_msg = "Network Error: Could not connect to Mojang servers.\nPlease check your internet connection."
             
-            self.root.after(0, lambda: messagebox.showerror("Launch Error", err_msg))
+            self.root.after(0, lambda: custom_showerror("Launch Error", err_msg))
             self.root.after(0, lambda: self.update_rpc("Idle", "In Launcher"))
         finally:
             if local_skin_server:

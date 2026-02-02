@@ -1,10 +1,11 @@
 # Config and Constants for New Launcher
 
-CURRENT_VERSION = "1.4"
+CURRENT_VERSION = "1.5"
 
 # MICROSOFT AUTH CONFIGURATION
-MSA_CLIENT_ID = "00000000402b5328" # Using the Official Minecraft Launcher Client ID
-MSA_REDIRECT_URI = "https://login.live.com/oauth20_desktop.srf"
+# MSA_CLIENT_ID = "00000000402b5328" # Official Launcher - Does not support Device Code Flow
+MSA_CLIENT_ID = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb" # Prism Launcher ID (Third Party, Supports Device Code Flow + Xbox Scopes)
+MSA_REDIRECT_URI = "https://login.microsoftonline.com/common/oauth2/nativeclient"
 
 DEFAULT_RAM = 4096
 DEFAULT_USERNAME = "Steve"
