@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Download & Verification — New-launcher</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <nav>
+        <div class="logo">
+            <img src="https://raw.githubusercontent.com/Amne-Dev/New-launcher/main/logo.png" alt="Logo" class="logo-icon-img">
+            <span>New Launcher</span>
+        </div>
+        <div class="links">
+            <a href="index.html">Home</a>
+            <a href="changelog.html">Changelog</a>
+            <a href="wiki.html">Wiki</a>
+            <a href="https://github.com/Amne-Dev/New-launcher" target="_blank">GitHub</a>
+            <a href="https://github.com/Amne-Dev/New-launcher/releases" class="btn-nav" target="_blank">Download</a>
+        </div>
+    </nav>
+
+    <main class="terms-container">
+        <h1>Download & Verification</h1>
+        <p class="last-updated">Last Updated: 2026-01-20</p>
+
+        <section>
+            <h2>Where to download</h2>
+            <p>Official builds and installers are published on the GitHub Releases page: <a href="https://github.com/Amne-Dev/New-launcher/releases" target="_blank">Releases</a>.</p>
+        </section>
+
+        <section>
+            <h2>Checksums</h2>
+            <p>We provide SHA256 checksums for installers on each release. After downloading, verify with:</p>
+            <pre>certutil -hashfile NLCSetup.exe SHA256</pre>
+            <p>Compare the output with the checksum listed on the release.</p>
+        </section>
+
+        <section>
+            <h2>GPG Signatures</h2>
+            <p>If provided, release artifacts may be GPG-signed. Verify with `gpg --verify` when signatures are available.</p>
+        </section>
+
+    </main>
+
+    <footer>
+        <p>&copy; 2026 New Launcher Project. | <a href="terms.html">Terms</a> | <a href="privacy.html">Privacy</a></p>
+        <p><strong>Docs:</strong> <a href="wiki.html">Wiki</a> · <a href="getting-started.html">Getting Started</a> · <a href="faq.html">FAQ</a> · <a href="support.html">Support</a></p>
+    </footer>
+</body>
+</html>

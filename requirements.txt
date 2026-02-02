@@ -3,3 +3,4 @@ requests
 Pillow
 pypresence
 git+https://github.com/t-mart/skinpy.git
+pystray
