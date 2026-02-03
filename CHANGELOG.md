@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.6.4] - 2026-02-03
+
+### Added
+- **Wallpaper Injection**: Creating a seamless experience, the launcher now automatically injects your active wallpaper into the Minecraft Main Menu as a static background (replacing the spinning panorama).
+- **Discord RPC Upgrade**: Rich Presence now displays the actual player's head (fetched via UUID) instead of the default "Steve" icon, falling back gracefully if offline.
+- **Resource Pack Generation**: Implemented a dynamic `LauncherTheme.zip` generator that creates a valid resource pack for modern Minecraft versions (1.21+), handling icon resizing and format compatibility automatically.
+
+### Fixed
+- **Profile Persistence**: Fixed a critical bug where restarting the launcher would reset the active profile to "Steve". Valid Microsoft/Ely.by sessions now persist correctly.
+- **Resource Reload Errors**: Solved "Resource Reload Failed" errors in Minecraft 1.21 by enforcing strict image dimensions (1024x1024) for panorama injection and removing invalid metadata ranges.
+- **Config Race Condition**: Fixed a logic error where UI updates during profile switching would accidentally overwrite the saved configuration with default values.
+
 ## [1.6.2] - 2026-02-02
 
 ### Added

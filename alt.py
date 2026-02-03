@@ -11,7 +11,9 @@ import glob
 import json
 import shutil
 import requests
+import io
 import webbrowser
+import zipfile
 try:
     from skinpy import Skin, Perspective, BodyPart
 except ImportError:
@@ -2167,6 +2169,90 @@ class MinecraftLauncher:
                     grand.bind("<Button-1>", do_select)
 
 
+    def create_background_resource_pack(self):
+        """Generates a resource pack that replaces the menu panorama with the current launcher wallpaper"""
+        if not self.current_wallpaper or not os.path.exists(self.current_wallpaper):
+            return "LauncherTheme" # Return just valid name if creation fails
+            
+        try:
+            self.log("Generating Launcher Theme Resource Pack...")
+            
+            # Paths
+            rp_dir = os.path.join(self.minecraft_dir, "resourcepacks")
+            if not os.path.exists(rp_dir): os.makedirs(rp_dir)
+            
+            pack_name = "LauncherTheme"
+            zip_path = os.path.join(rp_dir, f"{pack_name}.zip")
+            
+            # Prepare Image
+            # Panoramas are usually 6 images (north, south, east, west, up, down)
+            # We will use the same image for all to create a 'box' effect, or crop.
+            # Vanilla uses assets/minecraft/textures/gui/title/background/panorama_X.png (0-5)
+            # Note: Newer versions rely heavily on panorama_overlay.png too.
+            
+            # Prepare Image
+            # Ensure RGB and Resize to standard power-of-two square (1024x1024)
+            # This fixes potential reload failures due to massive resolutions or alpha channels
+            img_src = Image.open(self.current_wallpaper).convert("RGB")
+            img_src = img_src.resize((1024, 1024), Image.Resampling.LANCZOS)
+            
+            with zipfile.ZipFile(zip_path, 'w') as zf:
+                # 1. pack.mcmeta 
+                # Removing 'supported_formats' to avoid metadata errors with high values (99).
+                # Format 34 targets 1.21.x.
+                meta = {
+                   "pack": {
+                      "pack_format": 34,
+                      "description": "Launcher Background Sync"
+                   }
+                }
+                zf.writestr('pack.mcmeta', json.dumps(meta, indent=2))
+                
+                # 2. Icon - Use Launcher Logo (logo.png)
+                try:
+                    logo_path = resource_path("logo.png")
+                    if os.path.exists(logo_path):
+                        # Verify logo is small enough, or resize it too
+                        with Image.open(logo_path) as l_img:
+                             l_ico = l_img.resize((64, 64))
+                             with io.BytesIO() as bio:
+                                 l_ico.save(bio, format="PNG")
+                                 zf.writestr('pack.png', bio.getvalue())
+                    else:
+                        # Fallback to scaled wallpaper
+                        icon = img_src.resize((64, 64))
+                        with io.BytesIO() as bio:
+                            icon.save(bio, format="PNG")
+                            zf.writestr('pack.png', bio.getvalue())
+                except: pass
+                
+                # 3. Panorama Files
+                # Strategy: Make the rotating cube invisible (Black) and put the wallpaper on the Overlay.
+                # This achieves a "Static Image" effect as the overlay does not rotate.
+                
+                # A. Write Black Faces (16x16 is enough)
+                black_img = Image.new("RGB", (16, 16), (0, 0, 0))
+                with io.BytesIO() as b_bio:
+                    black_img.save(b_bio, format="PNG")
+                    black_bytes = b_bio.getvalue()
+                    
+                    base_path = "assets/minecraft/textures/gui/title/background/"
+                    for i in range(6):
+                        zf.writestr(f"{base_path}panorama_{i}.png", black_bytes)
+                
+                # B. Write Wallpaper as Overlay
+                # Ensure it's opaque and good quality
+                with io.BytesIO() as ov_bio:
+                    img_src.save(ov_bio, format="PNG")
+                    zf.writestr(f"{base_path}panorama_overlay.png", ov_bio.getvalue())
+
+            self.log(f"Generated {pack_name}.zip successfully.")
+            return f"file/{pack_name}.zip"
+            
+        except Exception as e:
+            self.log(f"Failed to generate resource pack: {e}")
+            return None
+
     def open_new_installation_modal(self, edit_mode=False, index=None):
         # Modal for Name, Version, etc.
         win = tk.Toplevel(self.root)
@@ -4171,11 +4257,24 @@ class MinecraftLauncher:
     def update_rpc(self, state, details=None, start=None):
         if not self.rpc_connected or not self.rpc: return
         try:
+            # User Info for formatted Rich Presence
+            user_text = "Steve"
+            small_key = "steve" # Fallback asset key
+            
+            if self.profiles and hasattr(self, 'current_profile_index') and 0 <= self.current_profile_index < len(self.profiles):
+                p = self.profiles[self.current_profile_index]
+                user_text = p.get("name", "Steve")
+                # Use MC-Heads for dynamic avatar if UUID exists (Microsoft/Ely.by)
+                if p.get("uuid"):
+                    small_key = f"https://mc-heads.net/avatar/{p.get('uuid')}"
+            
             kwargs = {
                 "state": state,
                 "details": details,
-                "large_image": "logo", # Make sure you upload an art asset named 'logo' to your Discord App
-                "large_text": "Minecraft Launcher"
+                "large_image": "logo", 
+                "large_text": "New Launcher",
+                "small_image": small_key,
+                "small_text": user_text
             }
             if start: kwargs["start"] = start
             self.rpc.update(**kwargs)
@@ -4255,8 +4354,7 @@ class MinecraftLauncher:
         self.update_skin_indicator()
         self.update_profile_btn()
         if hasattr(self, 'update_bottom_gamertag'): self.update_bottom_gamertag()
-        self.save_config()
-
+        
     def update_profile_btn(self):
         # Update text labels
         if not self.profiles: return
@@ -4959,6 +5057,10 @@ class MinecraftLauncher:
 
         self.save_config()
         
+        # Generate Background Resource Pack if wallpaper exists
+        if self.current_wallpaper:
+            self.create_background_resource_pack()
+
         # Show Progress Overlay
         self.show_progress_overlay("Launching Minecraft...")
         
