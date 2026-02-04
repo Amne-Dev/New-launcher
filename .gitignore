@@ -21,3 +21,5 @@ NewLauncher-1.4-x86_64.AppImage
 /build_linux
 /dist_linux
 /venv_build
+/addons/p3_menu/.gradle
+/addons/p3_menu/build_manual

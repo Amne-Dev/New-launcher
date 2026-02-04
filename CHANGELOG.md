@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.8] - 2026-02-04
+
+### Added
+- **Background Agent**: Introduced a separate `agent.exe` process to handle heavy tasks (Modrinth searches, skin syncing) without freezing the main UI.
+- **GitHub Skin Sync**: New feature in the "Addons" tab allowing users to link a GitHub repository to upload their skin and automatically download skins from friends/others in the repo.
+- **Installer Improvements**: The installer now intelligently detects if it's a fresh install or an update, hiding the "Create Desktop Shortcut" checkbox for updates.
+- **Data Persistence**: Ensured all local data (like cached skins) is saved to the `%AppData%\.nlc` directory, even when installed in restricted folders.
+
+### Fixed
+- **Scroll Glitch**: Fixed an issue where the Mods and Addons tabs would scroll infinitely upwards when using the mouse wheel.
+- **Updater Launch**: Fixed a bug where the launcher wouldn't restart automatically after an update; switched to `os.startfile` for better UAC handling.
+- **Installer Permissions**: The "Launch New Launcher" checkbox in the installer now starts the app with standard user privileges instead of inheriting Admin rights, preventing permission issues with configuration files.
+
+## [1.7] - 2026-02-03
+
+### Added
+- **Addons System**: New "Addons" tab in the main sidebar for experimental features.
+- **Persona 3 Reload Menu**: A new "Addons" option to replace the standard main menu with a stylized, animated interface inspired by Persona 3 Reload.
+- **Download Manager**: A centralized system to handle all downloads with configurable concurrency limits (defaults to 1 Modpack, 3 Mods at a time) and speed throttling options in Settings.
+- **Modrinth Toggle**: Mod support is now optional and disabled by default to improve startup performance. Users are prompted to enable it via the sidebar, with warnings about resource usage.
+- **Downloads Settings**: A new section in the Settings tab to control download speeds and parallel limits.
+- **Global Crash Handler**: A robust exception catcher that logs full tracebacks to file and displays a user-friendly error dialog instead of silently closing.
+- **Lazy Loading**: The Modrinth/Mods tab is now initialized only upon first access, reducing initial memory footprint and load time.
+
+### Changed
+- **Logging System**: Completely rewrote logging to use Python's standard `logging` module. Logs are now saved to the configuration directory (`.nlc/logs` or local `logs/`) for better accessibility and diagnostics.
+- **Modpack UX**: The "Create Modpack" button's "+" action now intelligently falls back to a local file picker if Modrinth integration is disabled.
+- **Sidebar Navigation**: Reordered buttons for better flow; disabled features trigger helpful dialogs instead of being hidden.
+
+### Fixed
+- **Dialog Crashes**: Fixed a `TclError` caused by an invalid cursor property in the Modrinth enabling dialog.
+- **Modpack Installation**: Refactored the "Create Matching Installation" logic to use the internal profile list directly, preventing sync issues with `launcher_config.json`.
+
 ## [1.6.4] - 2026-02-03
 
 ### Added

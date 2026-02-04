@@ -1,5 +1,9 @@
 import socket
 import tkinter as tk
+from tkinter import font 
+import logging
+import platform
+
 print("Starting launcher...")
 from tkinter import ttk, messagebox, filedialog, scrolledtext
 import minecraft_launcher_lib
@@ -668,10 +672,95 @@ def custom_askyesno(title, message, parent=None):
     return mbox.result
 
 # --- Main App ---
+class DownloadManager:
+    def __init__(self, app):
+        self.app = app
+        self.mod_queue = []     # List of (func, task_id)
+        self.pack_queue = []    # List of (func, task_id)
+        self.active_mods = 0
+        self.active_packs = 0
+        self.MAX_MODS = 3
+        self.MAX_PACKS = 1
+        
+    def queue_mod(self, func, task_id):
+        self.mod_queue.append((func, task_id))
+        self.app.root.after(0, lambda: self.app.update_download_task(task_id, detail="Queued..."))
+        self.process_queues()
+
+    def queue_modpack(self, func, task_id):
+        self.pack_queue.append((func, task_id))
+        self.app.root.after(0, lambda: self.app.update_download_task(task_id, detail="Queued..."))
+        self.process_queues()
+
+    def process_queues(self):
+        max_p = getattr(self.app, 'max_concurrent_packs', 1)
+        max_m = getattr(self.app, 'max_concurrent_mods', 3)
+        
+        # Process Packs
+        while self.active_packs < max_p and self.pack_queue:
+            self.active_packs += 1
+            func, task_id = self.pack_queue.pop(0)
+            self.start_task(func, task_id, is_pack=True)
+            
+        # Process Mods
+        while self.active_mods < max_m and self.mod_queue:
+            self.active_mods += 1
+            func, task_id = self.mod_queue.pop(0)
+            self.start_task(func, task_id, is_pack=False)
+
+    def start_task(self, func, task_id, is_pack):
+        self.app.root.after(0, lambda: self.app.update_download_task(task_id, status="Downloading", detail="Starting..."))
+        
+        def wrapper():
+            try:
+                func() 
+            finally:
+                self.app.root.after(0, lambda: self.task_finished(is_pack))
+
+        threading.Thread(target=wrapper, daemon=True).start()
+
+    def task_finished(self, is_pack):
+        if is_pack: self.active_packs -= 1
+        else: self.active_mods -= 1
+        self.process_queues()
+
 class MinecraftLauncher:
     def __init__(self, root):
         self.root = root
+        self.download_manager = DownloadManager(self)
         self.root.title("NLC | New launcher")
+        
+        # Determine config path early for logging
+        app_data = os.getenv('APPDATA')
+        if os.path.exists("launcher_config.json"):
+             self.config_dir = os.path.abspath(os.path.dirname("launcher_config.json"))
+        elif app_data:
+             self.config_dir = os.path.join(app_data, ".nlc")
+        else:
+             self.config_dir = os.path.join(os.path.expanduser("~"), ".nlc")
+
+        # Initialize Logging
+        self.setup_logging()
+
+        # Global Exception Hook
+        def handle_exception(exc_type, exc_value, exc_traceback):
+            if issubclass(exc_type, KeyboardInterrupt):
+                sys.__excepthook__(exc_type, exc_value, exc_traceback)
+                return
+            
+            logging.error("Uncaught exception", exc_info=(exc_type, exc_value, exc_traceback))
+            traceback.print_exception(exc_type, exc_value, exc_traceback)
+            
+            # Show error dialog if GUI is up
+            if self.root:
+                 # Truncate for message box
+                 tb_lines = traceback.format_exception(exc_type, exc_value, exc_traceback)
+                 start_idx = max(0, len(tb_lines) - 5)
+                 err_text = "".join(tb_lines[start_idx:])
+                 self.root.after(0, lambda: messagebox.showerror("Critical Error", f"An unexpected error occurred:\n{exc_value}\n\nSee logs for full details."))
+
+        sys.excepthook = handle_exception
+
         try:
             self.root.iconbitmap(resource_path("logo.ico"))
         except Exception:
@@ -687,6 +776,11 @@ class MinecraftLauncher:
         
         self.root.configure(bg=COLORS['main_bg'])
         self.minecraft_dir = get_minecraft_dir()
+        
+        # Download Queue State
+        self.download_tasks = {} # id -> {ui_elements, data}
+        self.addons_config: dict[str, Any] = {} # Addons configuration
+        self.download_queue_visible = False
         
         # Config Priority: 
         # 1. Local "launcher_config.json" (Portable / Dev mode)
@@ -756,12 +850,26 @@ class MinecraftLauncher:
         self.hero_img_raw = None
         self.first_run = True # Default for new installs
 
+        # Addons Config
+        self.addons_config = {
+            "p3_reload_menu": False
+        }
+        
+        # Agent / Background Process
+        self.agent_process = None
+        self.agent_callbacks = {}
+        self.agent_lock = threading.Lock()
+
         self.start_time = None
         self.current_tab = None
         self.log_file_path = None
 
         self.setup_logging()
         self.setup_tray()
+        
+        self.modpacks = []
+        self.load_modpacks()
+
         self.setup_styles()
         self.create_layout()
         self.load_from_config()
@@ -774,9 +882,37 @@ class MinecraftLauncher:
         if self.auto_update_check:
             self.check_for_updates()
             
+        # Start Background Agent
+        self.start_agent_process()
+            
         # Onboarding Trigger
         if self.first_run:
             self.root.after(500, self.show_onboarding_wizard)
+
+    def load_modpacks(self):
+        self.modpacks = []
+        try:
+            mp_file = os.path.join(self.config_dir, "modpacks.json")
+            if os.path.exists(mp_file):
+                with open(mp_file, "r") as f:
+                    self.modpacks = json.load(f)
+        except Exception as e:
+            self.log(f"Error loading modpacks: {e}")
+
+    def save_modpacks(self):
+        try:
+            mp_file = os.path.join(self.config_dir, "modpacks.json")
+            with open(mp_file, "w") as f:
+                json.dump(self.modpacks, f, indent=4)
+        except Exception as e:
+            self.log(f"Error saving modpacks: {e}")
+
+    def get_modpack_dir(self, pack_id):
+        # Base dir for modpacks
+        base = os.path.join(getattr(self, 'config_dir', os.getcwd()), "modpacks", pack_id)
+        if not os.path.exists(base):
+            os.makedirs(base, exist_ok=True)
+        return base
 
     def setup_styles(self):
         style = ttk.Style()
@@ -806,6 +942,31 @@ class MinecraftLauncher:
                        darkcolor="#212121",
                        borderwidth=0,
                        thickness=15)
+        
+        # Scrollbar (Custom Dark)
+        # Note: 'clam' theme Scrollbars are tricky. 
+        # We need to use 'Vertical.TScrollbar' and define the layout or element options clearly.
+        # Alternatively, using standard Tk Scrollbar with colors if ttk fails, but let's try to fix style map.
+        
+        style.layout("Launcher.Vertical.TScrollbar", 
+                    [('Vertical.Scrollbar.trough',
+                      {'children': [('Vertical.Scrollbar.thumb', 
+                                    {'expand': '1', 'sticky': 'nswe'})],
+                       'sticky': 'ns'})]) # type: ignore
+                       
+        style.configure("Launcher.Vertical.TScrollbar",
+                       background="#3A3B3C",
+                       troughcolor=COLORS['main_bg'],
+                       bordercolor=COLORS['main_bg'],
+                       arrowcolor=COLORS['text_secondary'],
+                       lightcolor="#3A3B3C",
+                       darkcolor="#3A3B3C",
+                       relief="flat",
+                       borderwidth=0)
+        
+        style.map("Launcher.Vertical.TScrollbar",
+                 background=[('pressed', '#505050'), ('active', '#4a4a4a')],
+                 arrowcolor=[('pressed', COLORS['text_primary']), ('active', COLORS['text_primary'])])
 
     def create_layout(self):
         # 1. Sidebar (Left) - width 250px for proper menu
@@ -841,25 +1002,52 @@ class MinecraftLauncher:
         tk.Frame(self.sidebar, bg="#454545", height=1).pack(fill="x", padx=10, pady=(0, 20)) # Separator
 
         # --- Sidebar Menu Items ---
+        self.sidebar_items = []
+
         # Minecraft: Java Edition (Highlighted)
         java_btn_frame = tk.Frame(self.sidebar, bg="#3A3B3C", cursor="hand2", padx=10, pady=10) # Lighter grey highlight
         java_btn_frame.pack(fill="x", padx=5)
+        self.sidebar_items.append(java_btn_frame)
+        self.minecraft_btn_frame = java_btn_frame # Store ref
+        java_btn_frame.is_active = True # type: ignore # Default active
         
+        def on_minecraft_click(e):
+            self.set_active_sidebar(java_btn_frame)
+            self.show_tab("Play")
+
+        java_btn_frame.bind("<Button-1>", on_minecraft_click)
+
         # Small icon (simple square for now or reused logo)
         try:
              # Just a small colored block or simple emoji
-            tk.Label(java_btn_frame, text="Java", bg="#2D8F36", fg="white", font=("Segoe UI", 8, "bold"), width=4).pack(side="left", padx=(0,10))
+            l1 = tk.Label(java_btn_frame, text="Java", bg="#2D8F36", fg="white", font=("Segoe UI", 8, "bold"), width=4)
+            l1.pack(side="left", padx=(0,10))
+            l1.bind("<Button-1>", on_minecraft_click)
         except: pass
 
-        tk.Label(java_btn_frame, text="Minecraft", font=("Segoe UI", 10, "bold"),
-                bg="#3A3B3C", fg="white").pack(side="left")
+        l2 = tk.Label(java_btn_frame, text="Minecraft", font=("Segoe UI", 10, "bold"),
+                bg="#3A3B3C", fg="white")
+        l2.pack(side="left")
+        l2.bind("<Button-1>", on_minecraft_click)
+        
+        # Add hover effect
+        self._attach_sidebar_hover(java_btn_frame)
 
         # --- Sidebar Links ---
         # Spacer
         tk.Frame(self.sidebar, bg=COLORS['sidebar_bg'], height=10).pack()
 
         # Modrinth Link
-        self._create_sidebar_link("Modrinth", "https://modrinth.com/", indicator_text="Mods")
+        def on_modrinth_click():
+             if getattr(self, 'enable_modrinth', False):
+                 self.show_tab("Mods")
+             else:
+                 self.show_modrinth_enable_dialog()
+
+        self._create_sidebar_link("Modrinth", on_modrinth_click, indicator_text="Mods", is_action=True)
+        
+        # Addons Link
+        self._create_sidebar_link("Addons", lambda: self.show_tab("Addons"), indicator_text="Agent", indicator_color="#E67E22", is_action=True)
 
         # Bottom spacer
         tk.Frame(self.sidebar, bg=COLORS['sidebar_bg'], height=10).pack(side="bottom")
@@ -869,6 +1057,9 @@ class MinecraftLauncher:
 
         # GitHub Link - Packed to bottom next to be above Settings
         self._create_sidebar_link("GitHub", "https://github.com/Amne-Dev/New-launcher", pack_side="bottom")
+
+        # Download Queue UI (Initially hidden or empty)
+        self.create_download_queue_ui()
 
         # 2. Main Content Area
         self.content_area = tk.Frame(self.root, bg=COLORS['main_bg'])
@@ -883,6 +1074,7 @@ class MinecraftLauncher:
         # Tabs: Play, Installations, Locker
         self.create_nav_btn("Play", lambda: self.show_tab("Play"))
         self.create_nav_btn("Installations", lambda: self.show_tab("Installations"))
+        self.create_nav_btn("Modpacks", lambda: self.show_tab("Modpacks"))
         self.create_nav_btn("Locker", lambda: self.show_tab("Locker"))
 
         # 4. Tab Container
@@ -894,9 +1086,134 @@ class MinecraftLauncher:
         self.create_play_tab()
         self.create_locker_tab()
         self.create_installations_tab()
+        # Modrinth Tabs Lazy Loading
+        # self.create_mods_tab()
+        self.create_modpacks_tab()
         self.create_settings_tab()
+        self.create_addons_tab()
         
         self.show_tab("Play")
+
+    def create_download_queue_ui(self):
+        # Container - packed at bottom of sidebar (stacking upwards above previous bottom items)
+        self.queue_container = tk.Frame(self.sidebar, bg=COLORS['sidebar_bg'])
+        # Hidden initially
+        # self.queue_container.pack(side="bottom", fill="x", padx=10, pady=10)
+        
+        # Header
+        self.queue_header = tk.Label(self.queue_container, text="Downloads", font=("Segoe UI", 9, "bold"), 
+                                     fg=COLORS['text_secondary'], bg=COLORS['sidebar_bg'], anchor="w")
+        self.queue_header.pack(fill="x", pady=(0, 5))
+        
+        # List Frame
+        self.queue_list_frame = tk.Frame(self.queue_container, bg=COLORS['sidebar_bg'])
+        self.queue_list_frame.pack(fill="x")
+
+    def add_download_task(self, name, type_str="file"):
+        # Show container if hidden
+        if not self.queue_container.winfo_viewable():
+             self.queue_container.pack(side="bottom", fill="x", padx=10, pady=10)
+
+        task_id = str(uuid.uuid4())
+        
+        # Card style
+        frame = tk.Frame(self.queue_list_frame, bg="#2b2b2b", pady=5, padx=8)
+        frame.pack(fill="x", pady=2)
+        
+        # Title Row
+        top = tk.Frame(frame, bg="#2b2b2b")
+        top.pack(fill="x")
+        
+        # Truncate name
+        disp_name = (name[:18] + '..') if len(name) > 18 else name
+        tk.Label(top, text=disp_name, font=("Segoe UI", 8, "bold"), fg="white", bg="#2b2b2b", anchor="w").pack(side="left")
+        
+        # Detail Frame (Container)
+        detail_frame = tk.Frame(frame, bg="#2b2b2b")
+        detail_lbl = tk.Label(detail_frame, text="Starting...", font=("Segoe UI", 7), fg="#cccccc", bg="#2b2b2b", anchor="w")
+        detail_lbl.pack(fill="x")
+        
+        # Dropdown/Expand capability
+        if type_str == "modpack":
+            def toggle():
+                if detail_frame.winfo_viewable():
+                    detail_frame.pack_forget()
+                    btn.config(text="▼")
+                else:
+                    detail_frame.pack(fill="x", pady=(2,0))
+                    btn.config(text="▲")
+            
+            btn = tk.Button(top, text="▼", font=("Segoe UI", 6), bg="#2b2b2b", fg="white", 
+                            bd=0, activebackground="#2b2b2b", activeforeground="white",
+                            command=toggle, width=2, cursor="hand2")
+            btn.pack(side="right")
+        else:
+             # Just show status inline or always hidden? 
+             # For single files, maybe no detail frame, or always visible?
+             # Let's keep it simpler: hidden by default.
+             pass
+
+        # Progress
+        pb = ttk.Progressbar(frame, orient="horizontal", mode="determinate", length=100)
+        pb.pack(fill="x", pady=3)
+        
+        self.download_tasks[task_id] = {
+            "frame": frame,
+            "pb": pb,
+            "detail_lbl": detail_lbl,
+            "detail_frame": detail_frame,
+            "type": type_str,
+            "cancel_event": threading.Event()
+        }
+        
+        # Context Menu for Cancellation
+        menu = tk.Menu(frame, tearoff=0, bg="#2b2b2b", fg="white")
+        menu.add_command(label="Cancel", command=lambda: self.cancel_download(task_id))
+        
+        def show_menu(e):
+            menu.post(e.x_root, e.y_root)
+            
+        # Bind to everything in the card
+        frame.bind("<Button-3>", show_menu)
+        top.bind("<Button-3>", show_menu)
+        detail_frame.bind("<Button-3>", show_menu)
+        detail_lbl.bind("<Button-3>", show_menu)
+        
+        return task_id
+
+    def cancel_download(self, task_id):
+        if task_id in self.download_tasks:
+            self.download_tasks[task_id]['cancel_event'].set()
+            self.update_download_task(task_id, detail="Cancelling...")
+
+    def update_download_task(self, task_id, progress=None, status=None, detail=None):
+        if task_id not in self.download_tasks: return
+        data = self.download_tasks[task_id]
+        
+        if progress is not None:
+            data['pb']['value'] = progress
+            
+        if detail is not None:
+             data['detail_lbl'].config(text=detail)
+
+    def complete_download_task(self, task_id):
+        if task_id not in self.download_tasks: return
+        
+        data = self.download_tasks[task_id]
+        data['pb']['value'] = 100
+        
+        # Fade out or remove
+        def remove():
+            if task_id in self.download_tasks:
+                data = self.download_tasks[task_id]
+                data['frame'].destroy()
+                del self.download_tasks[task_id]
+            
+            if not self.download_tasks:
+                 self.queue_container.pack_forget()
+        
+        # Wait 2 sec
+        self.root.after(2000, remove)
 
     def apply_accent_color(self, name):
         # Update Data
@@ -1038,13 +1355,13 @@ class MinecraftLauncher:
     def _on_download_complete(self, path):
          # Define custom buttons for the dialog
         btns = [
-            ("Yes, Install", True, "primary"), 
-            ("I'll do it myself", "manual", "secondary"), 
-            ("No", False, "secondary")
+             ("Yes, Install", True, "primary"), 
+             ("I'll do it myself", "manual", "secondary"), 
+             ("No", False, "secondary")
         ]
         
         # Use underlying message box class directly for custom buttons since askyesno only supports yes/no
-        mbox = CustomMessagebox("Update Available (v1.6.1)", "Update downloaded successfully.\nInstall now? (The launcher will restart)", 
+        mbox = CustomMessagebox("Update Available", "Update downloaded successfully.\nInstall now? (The launcher will restart)", 
                                 type="yesno", buttons=btns, parent=self.root)
         result = mbox.result
 
@@ -1054,7 +1371,8 @@ class MinecraftLauncher:
                 if path.endswith(".exe"):
                     # Detached process to avoid locking parent directory
                     if os.name == 'nt':
-                        subprocess.Popen([path], close_fds=True, creationflags=0x00000008) # DETACHED_PROCESS
+                        # Use shell execution to handle UAC better and potentially resolve context issues
+                        os.startfile(path)
                     else:
                         subprocess.Popen([path], close_fds=True)
                         
@@ -1593,14 +1911,153 @@ class MinecraftLauncher:
 
     def open_global_settings(self):
         self.show_tab("Settings")
+        
+    def show_modrinth_enable_dialog(self):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Enable Mod Support")
+        dialog.geometry("400x250")
+        dialog.config(bg=COLORS['main_bg'])
+        # Center
+        x = self.root.winfo_x() + (self.root.winfo_width()//2) - 200
+        y = self.root.winfo_y() + (self.root.winfo_height()//2) - 125
+        dialog.geometry(f"+{x}+{y}")
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+        
+        container = tk.Frame(dialog, bg=COLORS['main_bg'], padx=20, pady=20)
+        container.pack(fill="both", expand=True)
+        
+        tk.Label(container, text="Enable Mod Support?", font=("Segoe UI", 14, "bold"), 
+                 bg=COLORS['main_bg'], fg="white").pack(pady=(0, 15))
+                 
+        tk.Label(container, text="Would you like to enable mod support in the launcher?", 
+                 font=("Segoe UI", 10), bg=COLORS['main_bg'], fg="#dddddd", wraplength=350).pack(pady=(0, 10))
+        
+        # Resource Warning + Tooltip
+        warn_frame = tk.Frame(container, bg=COLORS['main_bg'])
+        warn_frame.pack(pady=(0, 10))
+        
+        tk.Label(warn_frame, text="(Uses additional resources)", font=("Segoe UI", 9, "italic"),
+                bg=COLORS['main_bg'], fg="#F1C40F").pack(side="left")
+                
+        # Info Icon
+        info_lbl = tk.Label(warn_frame, text="ⓘ", font=("Segoe UI", 10), 
+                           bg=COLORS['main_bg'], fg="#3498DB", cursor="hand2")
+        info_lbl.pack(side="left", padx=5)
+        
+        # Simple Tooltip
+        tooltip_win = None
+        def show_tip(e):
+             nonlocal tooltip_win
+             tooltip_win = tk.Toplevel(dialog)
+             tooltip_win.wm_overrideredirect(True)
+             tooltip_win.geometry(f"+{e.x_root+10}+{e.y_root+10}")
+             lbl = tk.Label(tooltip_win, text="While the impact is minimal it can still be\nnoticeable on low end PCs.",
+                           bg="#222", fg="white", font=("Segoe UI", 8), relief="solid", borderwidth=1, padx=5, pady=2)
+             lbl.pack()
+             
+        def hide_tip(e):
+             nonlocal tooltip_win
+             if tooltip_win: tooltip_win.destroy()
+             tooltip_win = None
+             
+        info_lbl.bind("<Enter>", show_tip)
+        info_lbl.bind("<Leave>", hide_tip)
+        
+        tk.Label(container, text="Note: You can disable it later in Settings > Downloads", 
+                 font=("Segoe UI", 8), bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(pady=(10, 20))
+                 
+        btn_frame = tk.Frame(container, bg=COLORS['main_bg'])
+        btn_frame.pack(fill="x")
+        
+        def enable():
+            self.enable_modrinth = True
+            self.save_config()
+            if hasattr(self, 'enable_modrinth_var'): self.enable_modrinth_var.set(True)
+            dialog.destroy()
+            
+            if messagebox.askyesno("Restart Required", "The launcher needs to restart to apply changes.\nRestart now?"):
+                 # Restart App
+                cmd = [sys.executable]
+                cwd = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.getcwd()
+                if not getattr(sys, 'frozen', False):
+                    script = sys.argv[0]
+                    if not os.path.isabs(script):
+                        script = os.path.abspath(script)
+                        cwd = os.path.dirname(script)
+                    cmd = [sys.executable, script] + sys.argv[1:]
+                
+                if os.name == 'nt':
+                     subprocess.Popen(cmd, cwd=cwd, close_fds=True, creationflags=0x00000008)
+                else:
+                     subprocess.Popen(cmd, cwd=cwd, close_fds=True)
+                self.root.quit()
+        
+        tk.Button(btn_frame, text="Yes, Enable", bg=COLORS['success_green'], fg="white", 
+                 font=("Segoe UI", 10, "bold"), relief="flat", padx=15, pady=5, 
+                 command=enable).pack(side="right", padx=5)
+                 
+        tk.Button(btn_frame, text="No", bg=COLORS['input_bg'], fg="white", 
+                 font=("Segoe UI", 10), relief="flat", padx=15, pady=5, 
+                 command=dialog.destroy).pack(side="right", padx=5)
 
-    def _create_sidebar_link(self, text, url_or_command, indicator_text=None, is_action=False, pack_side="top", icon=None):
+    def set_active_sidebar(self, active_frame):
+        for frame in getattr(self, 'sidebar_items', []):
+            if frame == active_frame:
+                frame.config(bg="#3A3B3C")
+                frame.is_active = True
+                for child in frame.winfo_children():
+                    if isinstance(child, tk.Label):
+                        txt = child.cget("text")
+                        if txt not in ["Mods", "Java", "Agent"]:
+                            child.config(bg="#3A3B3C", fg=COLORS['text_primary'])
+            else:
+                frame.config(bg=COLORS['sidebar_bg'])
+                frame.is_active = False
+                for child in frame.winfo_children():
+                    if isinstance(child, tk.Label):
+                        txt = child.cget("text")
+                        if txt not in ["Mods", "Java", "Agent"]:
+                            child.config(bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'])
+
+    def _attach_sidebar_hover(self, frame):
+        def on_enter(e):
+            frame.config(bg="#3A3B3C")
+            for child in frame.winfo_children():
+                if isinstance(child, tk.Label):
+                    txt = child.cget("text")
+                    if txt not in ["Mods", "Java", "Agent"]:
+                        child.config(bg="#3A3B3C", fg=COLORS['text_primary'])
+        
+        def on_leave(e):
+            if getattr(frame, "is_active", False):
+                 return
+            
+            frame.config(bg=COLORS['sidebar_bg'])
+            for child in frame.winfo_children():
+                if isinstance(child, tk.Label):
+                    txt = child.cget("text")
+                    if txt not in ["Mods", "Java", "Agent"]:
+                        child.config(bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'])
+            
+        frame.bind("<Enter>", on_enter)
+        frame.bind("<Leave>", on_leave)
+
+    def _create_sidebar_link(self, text, url_or_command, indicator_text=None, indicator_color=None, is_action=False, pack_side="top", icon=None):
         frame = tk.Frame(self.sidebar, bg=COLORS['sidebar_bg'], cursor="hand2", padx=15, pady=8)
         frame.pack(fill="x", side=cast(Any, pack_side))
         
+        # Register for active state tracking
+        if not hasattr(self, 'sidebar_items'): self.sidebar_items = []
+        self.sidebar_items.append(frame)
+        
         # Indicator (like "Java" or "Mods")
         if indicator_text:
-             bg_color = "#E74C3C" if indicator_text == "Mods" else "#2D8F36"
+             if indicator_color:
+                 bg_color = indicator_color
+             else:
+                 bg_color = "#E74C3C" if indicator_text == "Mods" else "#2D8F36"
+             
              tk.Label(frame, text=indicator_text, bg=bg_color, fg="white", 
                      font=("Segoe UI", 8, "bold"), width=4, cursor="hand2").pack(side="left", padx=(0,10))
         
@@ -1615,6 +2072,7 @@ class MinecraftLauncher:
         
         def handle_click(e):
             if is_action:
+                self.set_active_sidebar(frame)
                 url_or_command()
             else:
                 webbrowser.open(url_or_command)
@@ -1626,30 +2084,30 @@ class MinecraftLauncher:
             child.bind("<Button-1>", handle_click)
         
         # Hover effect
-        def on_enter(e):
-            frame.config(bg="#3A3B3C")
-            for child in frame.winfo_children():
-                if isinstance(child, tk.Label) and child.cget("text") != "Mods" and child.cget("text") != "Java": # Don't recolor badges
-                    child.config(bg="#3A3B3C", fg=COLORS['text_primary'])
-        
-        def on_leave(e):
-            frame.config(bg=COLORS['sidebar_bg'])
-            for child in frame.winfo_children():
-                if isinstance(child, tk.Label) and child.cget("text") != "Mods" and child.cget("text") != "Java":
-                    child.config(bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'])
-            
-        frame.bind("<Enter>", on_enter)
-        frame.bind("<Leave>", on_leave)
+        self._attach_sidebar_hover(frame)
 
     def create_nav_btn(self, text, command):
+        def wrapped_command():
+            # Automatically set Minecraft as active sidebar when top nav is clicked
+            if hasattr(self, 'minecraft_btn_frame'):
+                self.set_active_sidebar(self.minecraft_btn_frame)
+            command()
+
         btn = tk.Button(self.nav_bar, text=text.upper(), font=("Segoe UI", 11, "bold"),
                        bg=COLORS['tab_bar_bg'], fg=COLORS['text_secondary'],
                        activebackground=COLORS['tab_bar_bg'], activeforeground=COLORS['text_primary'],
-                       relief="flat", bd=0, cursor="hand2", command=command)
+                       relief="flat", bd=0, cursor="hand2", command=wrapped_command)
         btn.pack(side="left", padx=30, pady=15)
         self.nav_buttons[text] = btn
 
     def show_tab(self, tab_name):
+        # Lazy Init Mods Tab
+        if tab_name == "Mods" and "Mods" not in self.tabs:
+             if getattr(self, 'enable_modrinth', True):
+                 self.create_mods_tab()
+             else:
+                 return
+
         # Hide all tabs
         for t in self.tabs.values():
             t.pack_forget()
@@ -1658,7 +2116,6 @@ class MinecraftLauncher:
         for name, btn in self.nav_buttons.items():
             if name.upper() == tab_name.upper():
                 btn.config(fg=COLORS['text_primary'])
-                # Add underline effect (simplified)
             else:
                 btn.config(fg=COLORS['text_secondary'])
         
@@ -1666,12 +2123,21 @@ class MinecraftLauncher:
         if tab_name in self.tabs:
             self.tabs[tab_name].pack(fill="both", expand=True)
             self.current_tab = tab_name
+            
+            # Lazy Load triggers
+            if tab_name == "Mods":
+                if hasattr(self, 'mods_tab_initialized') and not self.mods_tab_initialized:
+                    self.mods_tab_initialized = True
+                    self.search_mods_thread(reset=True)
 
     # --- PLAY TAB ---
     def create_play_tab(self):
         frame = tk.Frame(self.tab_container, bg=COLORS['main_bg'])
         self.tabs["Play"] = frame
         
+        # P3 Menu is now a game injection, not a launcher UI replacement
+        # if self.addons_config.get("p3_menu", False): ... (Removed)
+
         # Hero Section (Background) - fills most of the space except bottom bar
         self.hero_canvas = tk.Canvas(frame, bg="#181818", highlightthickness=0)
         self.hero_canvas.pack(fill="both", expand=True) # Ensure it's packed!
@@ -1897,13 +2363,63 @@ class MinecraftLauncher:
                  command=self.open_new_installation_modal)
         self.new_inst_btn.pack(side="right") 
 
-        # 2. Profile List
-        self.inst_list_frame = tk.Frame(frame, bg=COLORS['main_bg'])
-        self.inst_list_frame.pack(fill="both", expand=True, padx=40)
+        # 2. Profile List (Scrollable)
+        list_container = tk.Frame(frame, bg=COLORS['main_bg'])
+        list_container.pack(fill="both", expand=True, padx=40)
         
-        self.refresh_installations_list()
+        canvas = tk.Canvas(list_container, bg=COLORS['main_bg'], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(list_container, orient="vertical", command=canvas.yview, style="Launcher.Vertical.TScrollbar")
+        
+        self.inst_list_frame = tk.Frame(canvas, bg=COLORS['main_bg'])
+        
+        self.inst_list_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(
+                scrollregion=canvas.bbox("all")
+            )
+        )
+        
+        canvas_window = canvas.create_window((0, 0), window=self.inst_list_frame, anchor="nw")
+        
+        # Auto-width
+        def configure_width(event):
+            canvas.itemconfig(canvas_window, width=event.width)
+        
+        canvas.bind("<Configure>", configure_width)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
 
-    def refresh_installations_list(self):
+        # Mousewheel
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            
+        def _bind_mousewheel(widget):
+            widget.bind("<MouseWheel>", _on_mousewheel)
+            for child in widget.winfo_children():
+                _bind_mousewheel(child)
+        
+        # Bind when entering the container area
+        list_container.bind("<Enter>", lambda e: _bind_mousewheel(self.inst_list_frame))
+        
+        # Update Scrollbar visibility
+        def update_scroll_state(e=None):
+            self.inst_list_frame.update_idletasks() # Ensure dimensions
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            bbox = canvas.bbox("all")
+            if bbox and (bbox[3] - bbox[1]) > canvas.winfo_height():
+                scrollbar.pack(side="right", fill="y")
+            else:
+                scrollbar.pack_forget()
+
+        # Also bind strictly to children on refresh
+        list_container.bind("<Configure>", update_scroll_state)
+        self.inst_list_frame.bind("<Configure>", update_scroll_state)
+        
+        self.refresh_installations_list(lambda: [_bind_mousewheel(self.inst_list_frame), update_scroll_state()])
+
+    def refresh_installations_list(self, callback=None):
         if not hasattr(self, 'inst_list_frame'): return # Safety check
         for w in self.inst_list_frame.winfo_children(): w.destroy()
         
@@ -1931,6 +2447,9 @@ class MinecraftLauncher:
                     if not self.show_releases.get(): continue
 
             self.create_installation_item(self.inst_list_frame, idx, inst)
+
+        if callback:
+            self.root.after(100, callback)
 
     def get_icon_image(self, icon_identifier, size=(40, 40)):
         # icon_identifier can be a path "icons/grass.png" or just "grass" or an emoji
@@ -2090,7 +2609,7 @@ class MinecraftLauncher:
         
         # Scrollable area
         canvas = tk.Canvas(menu_frame, bg=COLORS['card_bg'], highlightthickness=0)
-        scrollbar = tk.Scrollbar(menu_frame, orient="vertical", command=canvas.yview)
+        scrollbar = ttk.Scrollbar(menu_frame, orient="vertical", command=canvas.yview, style="Launcher.Vertical.TScrollbar")
         scroll_frame = tk.Frame(canvas, bg=COLORS['card_bg'])
         
         scroll_frame.bind(
@@ -2102,10 +2621,22 @@ class MinecraftLauncher:
         canvas.configure(yscrollcommand=scrollbar.set)
         
         canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
+        # Scrollbar visibility managed later
+        
+        # Mousewheel
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        
+        def _bind_mousewheel(widget):
+            widget.bind("<MouseWheel>", _on_mousewheel)
+            for child in widget.winfo_children():
+                _bind_mousewheel(child)
         
         # Close on click outside (Lose Focus)
         def on_focus_out(event):
+            # Check if focus moved to scrollbar or inner element
+            if menu.focus_get() and str(menu.focus_get()).startswith(str(menu)):
+                return
             self.root.after(150, lambda: menu.destroy() if menu.winfo_exists() else None)
             
         menu.bind("<FocusOut>", on_focus_out)
@@ -2168,6 +2699,16 @@ class MinecraftLauncher:
                 for grand in child.winfo_children():
                     grand.bind("<Button-1>", do_select)
 
+        scroll_frame.update_idletasks()
+        
+        # Check scrollbar need
+        bbox = canvas.bbox("all")
+        if bbox and (bbox[3] - bbox[1]) > h:
+            scrollbar.pack(side="right", fill="y")
+        else:
+            scrollbar.pack_forget()
+        
+        _bind_mousewheel(scroll_frame)
 
     def create_background_resource_pack(self):
         """Generates a resource pack that replaces the menu panorama with the current launcher wallpaper"""
@@ -3350,18 +3891,67 @@ class MinecraftLauncher:
         tk.Label(menu, text="ACCOUNTS", font=("Segoe UI", 10, "bold"), 
                 bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(anchor="w", padx=15, pady=10)
 
-        list_frame = tk.Frame(menu, bg=COLORS['card_bg'])
-        list_frame.pack(fill="both", expand=True)
+        # Create Footer FIRST (so we can pack it to bottom)
+        footer = tk.Frame(menu, bg=COLORS['bottom_bar_bg'], height=45)
+        # Use pack(side="bottom") for footer first to ensure it stays visible!
+        footer.pack(fill="x", side="bottom") 
+        footer.pack_propagate(False)
+
+        # Scrollable Area
+        container = tk.Frame(menu, bg=COLORS['card_bg'])
+        container.pack(fill="both", expand=True)
+
+        canvas = tk.Canvas(container, bg=COLORS['card_bg'], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview, style="Launcher.Vertical.TScrollbar")
+        list_frame = tk.Frame(canvas, bg=COLORS['card_bg'])
+
+        list_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(
+                scrollregion=canvas.bbox("all")
+            )
+        )
+
+        canvas.create_window((0, 0), window=list_frame, anchor="nw", width=230) # 250 - 20 padding/scrollbar
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        # Scrollbar packing handled in refresh/configure
+        
+        # Mousewheel
+        def _on_mousewheel(event):
+            # Prevent scrolling up past top
+            if event.delta > 0 and canvas.yview()[0] <= 0: return
+            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        
+        # Bind to canvas and list_frame and children
+        def _bind_mousewheel(widget):
+            widget.bind("<MouseWheel>", _on_mousewheel)
+            for child in widget.winfo_children():
+                _bind_mousewheel(child)
+        
+        # Initial bind
+        _bind_mousewheel(canvas)
+        
+        # Update Scrollbar visibility
+        def update_scroll_state(e=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            bbox = canvas.bbox("all")
+            if bbox and (bbox[3] - bbox[1]) > canvas.winfo_height():
+                scrollbar.pack(side="right", fill="y")
+            else:
+                scrollbar.pack_forget()
+            _bind_mousewheel(list_frame)
+
+        list_frame.bind("<Configure>", update_scroll_state)
+        
+        list_frame.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
 
         if not self.profiles:
              tk.Label(list_frame, text="No profiles", bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(pady=10)
         else:
             for idx, p in enumerate(self.profiles):
                 self.create_profile_item(list_frame, idx, p)
-
-        footer = tk.Frame(menu, bg=COLORS['bottom_bar_bg'], height=45)
-        footer.pack(fill="x", side="bottom")
-        footer.pack_propagate(False)
 
         tk.Button(footer, text="+ Add Account", font=("Segoe UI", 9), 
                  bg=COLORS['bottom_bar_bg'], fg=COLORS['text_primary'], relief="flat", bd=0, cursor="hand2",
@@ -3507,6 +4097,7 @@ class MinecraftLauncher:
     
     def _start_microsoft_device_flow(self, win, status, code_display, url_display, copy_btn):
         # 1. Request Device Code
+        self.log("Starting Microsoft Account device flow login...")
         try:
              client_id = MSA_CLIENT_ID
              scope = "XboxLive.signin offline_access"
@@ -3564,10 +4155,12 @@ class MinecraftLauncher:
                      break
                      
         except Exception as e:
-            print(f"Device Flow Error: {e}")
+            self.log(f"Device Flow Error: {e}")
+            logging.error("Device Flow Error", exc_info=True)
             if win.winfo_exists(): status.config(text=f"Exception: {e}", fg=COLORS['error_red'])
 
     def _finalize_microsoft_login(self, token_data, win, status):
+        self.log("Finalizing Microsoft Login...")
         try:
             if not win.winfo_exists(): return
             status.config(text="Authenticating with Xbox Live...")
@@ -3619,7 +4212,8 @@ class MinecraftLauncher:
                 self.root.after(100, on_finish)
                 
         except Exception as e:
-            print(f"Auth Trace: {traceback.format_exc()}")
+            self.log(f"Microsoft Auth Error: {e}")
+            logging.error("Microsoft Auth Trace", exc_info=True)
             if win.winfo_exists(): status.config(text=f"Finalization Error: {e}", fg=COLORS['error_red'])
 
     def show_elyby_login(self, parent):
@@ -3703,6 +4297,1081 @@ class MinecraftLauncher:
                  command=save).pack(pady=10)
 
     # --- SETTINGS TAB ---
+    # --- MODS TAB ---
+    def create_modpacks_tab(self):
+        container = tk.Frame(self.tab_container, bg=COLORS['main_bg'])
+        self.tabs["Modpacks"] = container
+        
+        # Top Bar
+        top_bar = tk.Frame(container, bg=COLORS['main_bg'], pady=15, padx=20)
+        top_bar.pack(fill="x")
+        
+        tk.Label(top_bar, text="My Modpacks", font=("Segoe UI", 16, "bold"), 
+                 bg=COLORS['main_bg'], fg="white").pack(side="left")
+                 
+        tk.Button(top_bar, text="+ Create New Modpack", font=("Segoe UI", 10, "bold"),
+                 bg=COLORS['play_btn_green'], fg="white", relief="flat", padx=15, pady=5, cursor="hand2",
+                 command=self.show_create_modpack_dialog).pack(side="right")
+
+        # Config Warning
+        if not self.modpacks:
+            tk.Label(container, text="Create a modpack to get started!", 
+                    font=("Segoe UI", 12), fg=COLORS['text_secondary'], bg=COLORS['main_bg']).pack(pady=40)
+        
+        # Scrollable Area
+        self.mp_canvas = tk.Canvas(container, bg=COLORS['main_bg'], highlightthickness=0)
+        self.mp_scrollbar = ttk.Scrollbar(container, orient="vertical", command=self.mp_canvas.yview, style="Launcher.Vertical.TScrollbar")
+        self.mp_scrollable_frame = tk.Frame(self.mp_canvas, bg=COLORS['main_bg'])
+        
+        self.mp_scrollable_frame.bind(
+            "<Configure>",
+            lambda e: self.mp_canvas.configure(scrollregion=self.mp_canvas.bbox("all"))
+        )
+        
+        self.mp_canvas_window = self.mp_canvas.create_window((0, 0), window=self.mp_scrollable_frame, anchor="nw")
+        
+        def on_canvas_configure(event):
+            self.mp_canvas.itemconfig(self.mp_canvas_window, width=event.width)
+            
+        self.mp_canvas.bind("<Configure>", on_canvas_configure)
+        self.mp_canvas.configure(yscrollcommand=self.mp_scrollbar.set)
+        
+        self.mp_canvas.pack(side="left", fill="both", expand=True)
+        # Scrollbar visibility managed in refresh
+        
+        # Mousewheel
+        def _on_mousewheel(event):
+            self.mp_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        
+        def _bind_mousewheel(widget):
+            widget.bind("<MouseWheel>", _on_mousewheel)
+            for child in widget.winfo_children():
+                _bind_mousewheel(child)
+
+        container.bind("<Enter>", lambda e: _bind_mousewheel(self.mp_scrollable_frame))
+        
+        self.refresh_modpacks_list()
+
+    def refresh_modpacks_list(self):
+        for w in self.mp_scrollable_frame.winfo_children(): w.destroy()
+        
+        # Show/Hide Scrollbar based on content
+        # Note: We need to let it pack first to know height, but for now we can just check count
+        # A simpler way is to always check bbox after update
+        
+        if not self.modpacks:
+            self.mp_scrollbar.pack_forget()
+            return
+
+        for i, pack in enumerate(self.modpacks):
+            self._create_modpack_item(pack, i)
+            
+        self.mp_scrollable_frame.update_idletasks()
+        try:
+            bbox = self.mp_canvas.bbox("all")
+            if bbox and (bbox[3] - bbox[1]) > self.mp_canvas.winfo_height():
+                self.mp_scrollbar.pack(side="right", fill="y")
+            else:
+                self.mp_scrollbar.pack_forget()
+        except: pass
+
+    def _create_modpack_item(self, pack, index):
+        card = tk.Frame(self.mp_scrollable_frame, bg=COLORS['card_bg'], pady=15, padx=15)
+        card.pack(fill="x", padx=20, pady=5)
+        
+        # Icon / Initial
+        initial = pack['name'][0].upper() if pack['name'] else "?"
+        icon = tk.Label(card, text=initial, font=("Segoe UI", 18, "bold"), 
+                       bg="#333333", fg="white", width=4, height=2)
+        icon.pack(side="left", padx=(0, 15))
+        
+        # Details
+        info = tk.Frame(card, bg=COLORS['card_bg'])
+        info.pack(side="left", fill="both", expand=True)
+        
+        tk.Label(info, text=pack['name'], font=("Segoe UI", 14, "bold"), fg="white", bg=COLORS['card_bg'], anchor="w").pack(fill="x")
+        
+        meta = f"Loader: {pack.get('loader', 'Unknown').capitalize()}  •  Version: {pack.get('mc_version', 'Unknown')}"
+        tk.Label(info, text=meta, font=("Segoe UI", 10), fg=COLORS['text_secondary'], bg=COLORS['card_bg'], anchor="w").pack(fill="x", pady=2)
+
+        # Linked Status
+        linked_inst_id = pack.get("linked_installation_id")
+        link_status = "Not linked"
+        link_color = COLORS['text_secondary']
+        
+        if linked_inst_id:
+            # Check if inst exists
+             curr_insts = self.get_installations()
+             # Finding name is hard without helper, let's just say "Linked"
+             link_status = "Linked to Installation"
+             link_color = COLORS['play_btn_green']
+
+        tk.Label(info, text=link_status, font=("Segoe UI", 9, "italic"), fg=link_color, bg=COLORS['card_bg'], anchor="w").pack(fill="x")
+
+        # Buttons
+        btns = tk.Frame(card, bg=COLORS['card_bg'])
+        btns.pack(side="right")
+        
+        btn_opts = {"font": ("Segoe UI", 10), "relief": "flat", "height": 1}
+
+        # Link
+        tk.Button(btns, text="Link", bg=COLORS['input_bg'], fg="white", padx=10, **btn_opts,
+                 command=lambda: self.show_link_modpack_dialog(pack)).pack(side="left", padx=2)
+
+        # Show Mods
+        tk.Button(btns, text="Show Mods", bg=COLORS['accent_blue'], fg="white", padx=10, **btn_opts,
+                 command=lambda: self.show_modpack_contents_dialog(pack)).pack(side="left", padx=2)
+
+        # Browse (+)
+        def browse_action():
+            if getattr(self, 'enable_modrinth', True):
+                self.select_modpack_and_browse(pack)
+            else:
+                self.install_local_mods(pack)
+
+        tk.Button(btns, text="+", bg=COLORS['success_green'], fg="white", width=3, **btn_opts,
+                 command=browse_action).pack(side="left", padx=2)
+        
+        # Menu (⋮) - Now on Right
+        menu_btn = tk.Button(btns, text="⋮", bg=COLORS['input_bg'], fg="white", width=3, **btn_opts)
+        menu_btn.pack(side="left", padx=2)
+        
+        menu = tk.Menu(menu_btn, tearoff=0, bg=COLORS['card_bg'], fg="white")
+        menu.add_command(label="Open Folder", command=lambda: os.startfile(self.get_modpack_dir(pack['id'])))
+        menu.add_separator()
+        menu.add_command(label="Delete Modpack", command=lambda: self.delete_modpack(pack))
+        
+        menu_btn.config(command=lambda: menu.post(menu_btn.winfo_rootx(), menu_btn.winfo_rooty() + menu_btn.winfo_height()))
+
+    def install_local_mods(self, pack):
+        paths = filedialog.askopenfilenames(filetypes=[("Jar Files", "*.jar")])
+        if not paths: return
+        
+        mods_dir = os.path.join(self.get_modpack_dir(pack['id']), "mods")
+        if not os.path.exists(mods_dir): os.makedirs(mods_dir)
+        
+        count = 0
+        for p in paths:
+             try:
+                 shutil.copy(p, mods_dir)
+                 count += 1
+             except: pass
+             
+        if count > 0:
+             messagebox.showinfo("Success", f"Installed {count} mods locally.")
+
+    def delete_modpack(self, pack):
+        if not messagebox.askyesno("Delete Modpack", f"Are you sure you want to delete '{pack['name']}'?"):
+            return
+        
+        try:
+            d = self.get_modpack_dir(pack['id'])
+            if os.path.exists(d):
+                shutil.rmtree(d)
+        except Exception as e:
+            print(f"Error deleting dir: {e}")
+        
+        self.modpacks = [p for p in self.modpacks if p['id'] != pack['id']]
+        self.save_modpacks()
+        self.refresh_modpacks_list()
+        self.update_active_modpack_dropdown()
+
+    def show_modpack_contents_dialog(self, pack):
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"Mods in {pack['name']}")
+        dialog.geometry("500x500")
+        dialog.config(bg=COLORS['main_bg'])
+        
+        mods_dir = os.path.join(self.get_modpack_dir(pack['id']), "mods")
+        if not os.path.exists(mods_dir): os.makedirs(mods_dir)
+        
+        files = [f for f in os.listdir(mods_dir) if f.endswith(".jar")]
+        
+        tk.Label(dialog, text=f"Installed Mods ({len(files)})", font=("Segoe UI", 12, "bold"),
+                 bg=COLORS['main_bg'], fg="white").pack(pady=10)
+        
+        scroll = tk.Scrollbar(dialog)
+        scroll.pack(side="right", fill="y")
+        
+        lb = tk.Listbox(dialog, bg=COLORS['input_bg'], fg="white", font=("Segoe UI", 9),
+                       yscrollcommand=scroll.set, activestyle="dotbox")
+        lb.pack(fill="both", expand=True, padx=10, pady=5)
+        scroll.config(command=lb.yview)
+        
+        for f in files:
+            lb.insert("end", f)
+            
+        def delete_sel():
+            sel = lb.curselection()
+            if not sel: return
+            fname = lb.get(sel[0])
+            try:
+                os.remove(os.path.join(mods_dir, fname))
+                lb.delete(sel[0])
+                # Remove from pack meta if tracked
+                rem_meta = next((m for m in pack['mods'] if m.get('filename') == fname), None)
+                if rem_meta:
+                    pack['mods'].remove(rem_meta)
+                    self.save_modpacks()
+            except Exception as e:
+                messagebox.showerror("Error", str(e))
+                
+        tk.Button(dialog, text="Delete Selected", bg=COLORS['error_red'], fg="white",
+                 command=delete_sel).pack(pady=10)
+
+    def show_create_modpack_dialog(self):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("New Modpack")
+        dialog.geometry("400x300")
+        dialog.config(bg=COLORS['main_bg'])
+        
+        # Name
+        tk.Label(dialog, text="Modpack Name", bg=COLORS['main_bg'], fg="white").pack(pady=(20,5))
+        name_var = tk.StringVar()
+        tk.Entry(dialog, textvariable=name_var).pack()
+        
+        # Loader
+        tk.Label(dialog, text="Mod Loader", bg=COLORS['main_bg'], fg="white").pack(pady=(15,5))
+        loader_var = tk.StringVar(value="fabric")
+        ttk.Combobox(dialog, textvariable=loader_var, values=["fabric", "forge"], state="readonly").pack()
+        
+        # Version
+        tk.Label(dialog, text="Minecraft Version", bg=COLORS['main_bg'], fg="white").pack(pady=(15,5))
+        ver_var = tk.StringVar(value="Fetching...")
+        ver_cb = ttk.Combobox(dialog, textvariable=ver_var, values=[], state="disabled")
+        ver_cb.pack()
+        
+        def fetch_vers():
+            try:
+                # Fetch only releases for stable modpack creation
+                vlist = minecraft_launcher_lib.utils.get_version_list()
+                releases = [v['id'] for v in vlist if v['type'] == 'release']
+                
+                def update():
+                    if not dialog.winfo_exists(): return
+                    ver_cb['values'] = releases
+                    if releases:
+                        ver_cb.current(0)
+                        ver_cb.config(state="readonly")
+                    else:
+                        ver_var.set("Error fetching")
+                        
+                self.root.after(0, update)
+            except Exception as e:
+                print(f"Version fetch error: {e}")
+                if dialog.winfo_exists():
+                    self.root.after(0, lambda: ver_var.set("Network Error"))
+
+        threading.Thread(target=fetch_vers, daemon=True).start()
+        
+        def create():
+             name = name_var.get().strip()
+             if not name: return
+             
+             new_pack = {
+                 "id": str(uuid.uuid4()),
+                 "name": name,
+                 "loader": loader_var.get(),
+                 "mc_version": ver_var.get(),
+                 "mods": [], # List of file paths or meta
+                 "linked_installation_id": None
+             }
+             self.modpacks.append(new_pack)
+             self.save_modpacks()
+             self.refresh_modpacks_list()
+             self.update_active_modpack_dropdown() # Update dropdown in Mods tab
+             self.get_modpack_dir(new_pack['id']) # Create dir
+             dialog.destroy()
+             
+        tk.Button(dialog, text="Create", command=create, bg=COLORS['play_btn_green'], fg="white").pack(pady=20)
+
+    def show_link_modpack_dialog(self, pack):
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"Link '{pack['name']}'")
+        dialog.geometry("400x400")
+        dialog.config(bg=COLORS['main_bg'])
+        
+        tk.Label(dialog, text="Select Installation to Link", font=("Segoe UI", 12),
+                 bg=COLORS['main_bg'], fg="white").pack(pady=15)
+                 
+        tk.Label(dialog, text=f"Requires: {pack['mc_version']} ({pack['loader']})", 
+                 bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(pady=(0, 15))
+                 
+        # List Compatible Installs
+        insts = self.get_installations().items()
+        
+        scroll = tk.Scrollbar(dialog)
+        scroll.pack(side="right", fill="y")
+        lb = tk.Listbox(dialog, bg=COLORS['input_bg'], fg="white", yscrollcommand=scroll.set, width=40)
+        lb.pack(pady=10, fill="both", expand=True)
+        scroll.config(command=lb.yview)
+        
+        map_insts = {} # index -> inst_id
+        
+        idx = 0
+        for inst_id, inst in insts:
+            # Check version match
+            # "version" holds e.g. "1.20.1"
+            # "loader" holds e.g. "Fabric"
+            
+            v_id = inst.get('version', '').lower()
+            l_id = inst.get('loader', '').lower()
+            
+            # Loose compatibility check
+            # Pack version should be in installation version string
+            # Pack loader should match installation loader (excluding Vanilla)
+            
+            is_compat = False
+            
+            if pack['loader'].lower() == "fabric":
+                 if "fabric" in l_id and pack['mc_version'] in v_id: is_compat = True
+            elif pack['loader'].lower() == "forge":
+                 if "forge" in l_id and pack['mc_version'] in v_id: is_compat = True
+            
+            # Also allow fuzzy match if user knows what they are doing
+            # or if installation is just "1.20.1" (Vanila) and we want to allow it (Wait, no, we need loader installed)
+            # Actually, the launcher installs the loader on launch if missing FOR THAT VERSION.
+            # But here we are linking to an EXISTING installation profile.
+            
+            # Simplified check:
+            if pack['mc_version'] in v_id:
+                 is_compat = True
+                 
+            if is_compat:
+                lb.insert("end", f"{inst.get('name', 'Unnamed')} ({v_id} - {l_id})")
+                map_insts[idx] = inst_id
+                idx += 1
+                
+        def link():
+            sel = lb.curselection()
+            if not sel: return
+            inst_id = map_insts[sel[0]]
+            
+            # Link it
+            pack['linked_installation_id'] = inst_id
+            self.save_modpacks()
+            self.refresh_modpacks_list()
+            dialog.destroy()
+        
+        def create_match():
+             threading.Thread(target=self._create_matching_installation_thread, args=(pack, dialog), daemon=True).start()
+
+        tk.Button(dialog, text="Create Matching Installation", command=create_match, bg=COLORS['accent_blue'], fg="white").pack(pady=(15, 5))
+        tk.Button(dialog, text="Link Selected", command=link, bg=COLORS['play_btn_green'], fg="white").pack(pady=(5, 15))
+
+    def _create_matching_installation_thread(self, pack, dialog):
+        try:
+            # 1. Prepare Profile Data
+            mc_ver = pack['mc_version']
+            loader = pack['loader'] # "Fabric" or "Forge"
+            
+            # Ensure title case for loader to match launch logic expectations
+            loader = loader.capitalize() if loader else "Vanilla"
+            
+            new_id = str(uuid.uuid4()).replace("-", "")
+            new_name = f"{pack['name']} ({loader})"
+            
+            # 2. Create Profile in self.installations (Launcher's own list)
+            new_profile = {
+                 "id": new_id,
+                 "name": new_name,
+                 "version": mc_ver,
+                 "loader": loader,
+                 "icon": "icons/crafting_table_front.png", 
+                 "last_played": "Never",
+                 "created": datetime.now().isoformat()
+            }
+            
+            # Try to use pack icon if available
+            if 'icon' in pack and pack['icon']:
+                 # Ensure it's a valid path we can use
+                 new_profile['icon'] = pack['icon']
+
+            self.installations.append(new_profile)
+            
+            # 3. Link and Refresh
+            pack['linked_installation_id'] = new_id
+            self.save_config() # Saves installations
+            self.save_modpacks() # Saves modpack link
+            
+            self.root.after(0, lambda: [
+                self.refresh_installations_list(),
+                self.update_installation_dropdown(),
+                self.refresh_modpacks_list(),
+                dialog.destroy(),
+                messagebox.showinfo("Success", f"Created installation '{new_name}' and linked it.")
+            ])
+            
+        except Exception as e:
+            print(e)
+            err_msg = str(e)
+            self.root.after(0, lambda m=err_msg: messagebox.showerror("Error", m))
+
+    def update_active_modpack_dropdown(self):
+        if hasattr(self, 'mods_active_pack_combobox'):
+            pack_names = ["None"] + [p['name'] for p in self.modpacks]
+            self.mods_active_pack_combobox['values'] = pack_names
+
+    def select_modpack_and_browse(self, pack):
+        # Set active modpack and switch tab
+        self.show_tab("Mods")
+        # Update dropdown var
+        if hasattr(self, 'active_modpack_var'):
+            self.active_modpack_var.set(pack['name'])
+            
+            # Manually trigger filter update since .set() doesn't fire event
+            if hasattr(self, 'mod_loader_filter'):
+                self.mod_loader_filter.set(pack['loader'])
+            
+            # Trigger search with new constraints
+            self.search_mods_thread(reset=True)
+
+    def create_mods_tab(self):
+        frame = tk.Frame(self.tab_container, bg=COLORS['main_bg'])
+        self.tabs["Mods"] = frame
+        
+        # Top Bar (Search & Filters)
+        top_bar = tk.Frame(frame, bg=COLORS['main_bg'], pady=10, padx=20)
+        top_bar.pack(fill="x")
+
+        # Modpack Selection
+        mp_frame = tk.Frame(top_bar, bg=COLORS['main_bg'])
+        mp_frame.pack(side="top", fill="x", pady=(0, 10))
+        
+        tk.Label(mp_frame, text="Active Modpack:", bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(side="left")
+        
+        pack_names = ["None"] + [p['name'] for p in self.modpacks]
+        self.active_modpack_var = tk.StringVar(value="None")
+        
+        self.mods_active_pack_combobox = ttk.Combobox(mp_frame, textvariable=self.active_modpack_var, 
+                            values=pack_names, 
+                            style="Launcher.TCombobox", width=25, state="readonly")
+        self.mods_active_pack_combobox.pack(side="left", padx=10)
+        
+        # When modpack changes, force filter update
+        def on_pack_change(e):
+             p_name = self.active_modpack_var.get()
+             if p_name != "None":
+                 # Find pack
+                 pack = next((p for p in self.modpacks if p['name'] == p_name), None)
+                 if pack:
+                     self.mod_loader_filter.set(pack['loader'])
+                     # We might want to lock it or show it's locked
+             self.search_mods_thread(reset=True)
+
+        self.mods_active_pack_combobox.bind("<<ComboboxSelected>>", on_pack_change)
+
+        # View Mode (Mods vs Modpacks)
+        self.browse_mode_var = tk.StringVar(value="mod")
+        
+        mode_frame = tk.Frame(top_bar, bg=COLORS['main_bg'])
+        mode_frame.pack(side="top", fill="x", pady=(0, 10))
+        
+        def switch_mode(m):
+            self.browse_mode_var.set(m)
+            self.search_mods_thread(reset=True)
+            # visual update
+            if m == "mod":
+                btn_mod.config(bg=COLORS['accent_blue'])
+                btn_pack.config(bg=COLORS['input_bg'])
+            else:
+                btn_mod.config(bg=COLORS['input_bg'])
+                btn_pack.config(bg=COLORS['accent_blue'])
+
+        btn_mod = tk.Button(mode_frame, text="Mods", command=lambda: switch_mode("mod"), 
+                           bg=COLORS['accent_blue'], fg="white", relief="flat", width=12)
+        btn_mod.pack(side="left", padx=(0, 5))
+        
+        btn_pack = tk.Button(mode_frame, text="Modpacks", command=lambda: switch_mode("modpack"), 
+                            bg=COLORS['input_bg'], fg="white", relief="flat", width=12)
+        btn_pack.pack(side="left", padx=5)
+        
+        # Search Entry
+        search_line = tk.Frame(top_bar, bg=COLORS['main_bg'])
+        search_line.pack(fill="x")
+        
+        self.mod_search_var = tk.StringVar()
+        self.mod_search_var.trace_add("write", lambda *args: self.schedule_mod_search())
+        
+        search_frame = tk.Frame(search_line, bg=COLORS['input_bg'], padx=10, pady=5)
+        search_frame.pack(side="left", fill="x", expand=True)
+        
+        tk.Label(search_frame, text="🔍", bg=COLORS['input_bg'], fg=COLORS['text_secondary']).pack(side="left")
+        
+        entry = tk.Entry(search_frame, textvariable=self.mod_search_var, font=("Segoe UI", 11),
+                        bg=COLORS['input_bg'], fg=COLORS['text_primary'], relief="flat", insertbackground="white")
+        entry.pack(side="left", fill="x", expand=True)
+
+        # Filters
+        self.mod_loader_filter = tk.StringVar(value="fabric") # Default
+        loader_cb = ttk.Combobox(search_line, textvariable=self.mod_loader_filter, 
+                                values=["fabric", "forge"], 
+                                style="Launcher.TCombobox", width=10, state="readonly")
+        loader_cb.pack(side="left", padx=10)
+        loader_cb.bind("<<ComboboxSelected>>", lambda e: self.search_mods_thread(reset=True))
+        
+        self.mods_loader_combobox = loader_cb # Store ref for updates
+
+        # Game Version Filter
+        self.mod_version_filter = tk.StringVar(value="All")
+        version_cb = ttk.Combobox(search_line, textvariable=self.mod_version_filter, 
+                                values=["All"], 
+                                style="Launcher.TCombobox", width=10, state="readonly")
+        version_cb.pack(side="left", padx=5)
+        version_cb.bind("<<ComboboxSelected>>", lambda e: self.search_mods_thread(reset=True))
+        
+        self.mods_version_combobox = version_cb
+
+        # Load Versions Async
+        def load_versions():
+            try:
+                vlist = minecraft_launcher_lib.utils.get_version_list()
+                releases = ["All"] + [v['id'] for v in vlist if v['type'] == 'release']
+                self.root.after(0, lambda: version_cb.config(values=releases))
+            except: pass
+        threading.Thread(target=load_versions, daemon=True).start()
+
+        # Update controls when pack changes
+        def update_filter_state(e=None):
+             p_name = self.active_modpack_var.get()
+             if p_name != "None":
+                 # Find pack
+                 pack = next((p for p in self.modpacks if p['name'] == p_name), None)
+                 if pack:
+                     # Set and Disable
+                     self.mod_loader_filter.set(pack['loader'])
+                     self.mod_version_filter.set(pack['mc_version'])
+                     
+                     loader_cb.config(state="disabled")
+                     version_cb.config(state="disabled")
+             else:
+                 # Enable
+                 loader_cb.config(state="readonly")
+                 version_cb.config(state="readonly")
+                 
+             self.search_mods_thread(reset=True)
+
+        # Rebind
+        self.mods_active_pack_combobox.bind("<<ComboboxSelected>>", update_filter_state)
+
+        # Content Area (Scrollable)
+        self.mods_canvas = tk.Canvas(frame, bg=COLORS['main_bg'], highlightthickness=0)
+        self.mods_scrollbar = ttk.Scrollbar(frame, orient="vertical", command=self.mods_canvas.yview, style="Launcher.Vertical.TScrollbar")
+        self.mods_scrollable_frame = tk.Frame(self.mods_canvas, bg=COLORS['main_bg'])
+        
+        self.mods_scrollable_frame.bind(
+            "<Configure>",
+            lambda e: self.mods_canvas.configure(scrollregion=self.mods_canvas.bbox("all"))
+        )
+        
+        self.mods_canvas_window = self.mods_canvas.create_window((0, 0), window=self.mods_scrollable_frame, anchor="nw")
+        
+        def on_canvas_configure(event):
+            self.mods_canvas.itemconfig(self.mods_canvas_window, width=event.width)
+        
+        self.mods_canvas.bind("<Configure>", on_canvas_configure)
+        self.mods_canvas.configure(yscrollcommand=self._on_scrollbar_update) # This method likely used for infinite scroll logic? need to check
+        
+        self.mods_canvas.pack(side="left", fill="both", expand=True)
+        self.mods_scrollbar.pack(side="right", fill="y")
+        
+        # Mousewheel for Mods Tab
+        self.last_scroll_check = 0
+        
+        def _on_mousewheel(event):
+            # Prevent scrolling up past top
+            if event.delta > 0 and self.mods_canvas.yview()[0] <= 0: return
+
+            self.mods_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            
+            # Simple throttle for scroll checking (Infinite Scroll / Pagination)
+            now = time.time()
+
+            if now - self.last_scroll_check > 0.2:
+                self.last_scroll_check = now
+                self._check_scroll_position()
+        
+        def _bind_mousewheel(widget):
+            # Only bind if not already bound to avoid duplicates stack
+            # But tk binds replace usually.
+            widget.bind("<MouseWheel>", _on_mousewheel)
+            for child in widget.winfo_children():
+                _bind_mousewheel(child)
+        
+        # Bind when entering the specific frame, unbind when leaving? 
+        # Actually proper way is key bindings only when focused, but for mousewheel 
+        # usually we just bind to the widget under mouse.
+        
+        frame.bind("<Enter>", lambda e: _bind_mousewheel(self.mods_scrollable_frame))
+        self.mods_scrollable_frame.bind("<Configure>", lambda e: _bind_mousewheel(self.mods_scrollable_frame))
+        self.mods_canvas.bind("<Enter>", lambda e: _bind_mousewheel(self.mods_canvas))
+
+        self.mod_search_timer = None
+        self.cached_mod_images = {}
+        
+        # Pagination State
+        self.mod_offset = 0
+        self.mod_loading = False
+        self.mod_end_reached = False
+        self.mods_tab_initialized = False # Flag for lazy load
+        
+        # We DO NOT auto-load here to prevent startup freeze.
+        # It is triggered by show_tab("Mods")
+        tk.Label(self.mods_scrollable_frame, text="Loading Mods...", 
+                font=("Segoe UI", 12), fg=COLORS['text_secondary'], bg=COLORS['main_bg']).pack(pady=40)
+
+    def _on_scrollbar_update(self, first, last):
+        self.mods_scrollbar.set(first, last)
+        self._check_scroll_position()
+
+    def _check_scroll_position(self):
+        if self.mod_loading or self.mod_end_reached: return
+        try:
+            if self.mods_canvas.yview()[1] > 0.85:
+                self.load_more_mods()
+        except: pass
+
+    def schedule_mod_search(self, *args):
+        if self.mod_search_timer:
+            self.root.after_cancel(self.mod_search_timer)
+        self.mod_search_timer = self.root.after(800, lambda: self.search_mods_thread(reset=True))
+
+    def load_more_mods(self):
+        if self.mod_loading or self.mod_end_reached: return
+        self.search_mods_thread(reset=False)
+
+    def search_mods_thread(self, reset=False):
+        if self.mod_loading and reset == False: return
+        self.mod_loading = True
+        
+        query = self.mod_search_var.get().strip()
+        loader = self.mod_loader_filter.get().lower()
+        if loader == "all": loader = "" # Though we default to fabric now
+        
+        # Check active modpack for version constraint
+        version_facet = ""
+        p_name = self.active_modpack_var.get()
+        if p_name != "None":
+             pack = next((p for p in self.modpacks if p['name'] == p_name), None)
+             if pack:
+                 loader = pack['loader'] # Force loader
+                 version_facet = pack['mc_version']
+        else:
+             # Use filters
+             if hasattr(self, 'mod_version_filter'):
+                 vf = self.mod_version_filter.get()
+                 if vf != "All": version_facet = vf
+
+        if reset:
+            self.mod_offset = 0
+            self.mod_end_reached = False
+            # Scroll to top
+            self.mods_canvas.yview_moveto(0)
+            
+            for w in self.mods_scrollable_frame.winfo_children(): w.destroy()
+            tk.Label(self.mods_scrollable_frame, text="Searching...", 
+                     font=("Segoe UI", 12), fg=COLORS['accent_blue'], bg=COLORS['main_bg']).pack(pady=20)
+        
+        threading.Thread(target=self._perform_mod_search, args=(query, loader, version_facet, reset), daemon=True).start()
+
+    def _perform_mod_search(self, query, loader, version_facet, reset):
+        payload = {
+            "query": query,
+            "limit": 20,
+            "offset": self.mod_offset,
+            "facets": []
+        }
+        
+        # Project Type
+        p_type = "mod"
+        if hasattr(self, 'browse_mode_var'):
+             p_type = self.browse_mode_var.get()
+        payload["facets"].append(f'project_type:{p_type}')
+
+        if loader:
+            payload["facets"].append(f'categories:{loader}')
+        if version_facet:
+            payload["facets"].append(f'versions:{version_facet}')
+            
+        # Use Agent
+        self.send_agent_request("search_mods", payload, lambda res: self._on_mod_search_result(res, reset))
+
+    def _on_mod_search_result(self, result, reset):
+        if not result or result.get("status") != "success":
+            self.mod_loading = False
+            msg = result.get("msg", "Unknown error") if result else "No response"
+            self._display_mod_error(msg)
+            return
+            
+        data = result.get("data", {})
+        hits = data.get("hits", [])
+        
+        if hits:
+            self.mod_offset += len(hits)
+        else:
+            self.mod_end_reached = True
+
+        self._display_mod_results(hits, reset)
+
+    def _display_mod_error(self, msg):
+        tk.Label(self.mods_scrollable_frame, text=f"Error: {msg}", 
+                 fg=COLORS['error_red'], bg=COLORS['main_bg']).pack(pady=20)
+
+    def _display_mod_results(self, hits, reset):
+        if reset:
+            for w in self.mods_scrollable_frame.winfo_children(): w.destroy()
+            if not hits:
+                tk.Label(self.mods_scrollable_frame, text="No results found", 
+                         fg=COLORS['text_secondary'], bg=COLORS['main_bg']).pack(pady=20)
+                self.mod_loading = False
+                return
+
+        for hit in hits:
+            self._create_mod_card(hit)
+            
+        # Update Scrollbar Region Explicitly
+        self.mods_scrollable_frame.update_idletasks()
+        self.mods_canvas.configure(scrollregion=self.mods_canvas.bbox("all"))
+
+        self.mod_loading = False
+
+    def _create_mod_card(self, mod):
+        card = tk.Frame(self.mods_scrollable_frame, bg=COLORS['card_bg'], pady=10, padx=10)
+        card.pack(fill="x", padx=20, pady=5)
+        
+        # Icon
+        icon_lbl = tk.Label(card, text="?", bg="#212121", fg="white", width=8, height=4)
+        icon_lbl.pack(side="left", padx=(0, 15))
+        
+        icon_url = mod.get("icon_url")
+        if icon_url:
+            self._load_mod_icon_async(icon_url, icon_lbl)
+
+        # Info
+        info_frame = tk.Frame(card, bg=COLORS['card_bg'])
+        info_frame.pack(side="left", fill="both", expand=True)
+        
+        tk.Label(info_frame, text=mod.get("title", "Unknown"), font=("Segoe UI", 12, "bold"), 
+                 fg="white", bg=COLORS['card_bg'], anchor="w").pack(fill="x")
+        
+        # Desc
+        desc = mod.get("description", "")
+        if len(desc) > 80: desc = desc[:77] + "..."
+        tk.Label(info_frame, text=desc, font=("Segoe UI", 9), 
+                 fg=COLORS['text_secondary'], bg=COLORS['card_bg'], anchor="w").pack(fill="x")
+        
+        # Meta
+        tk.Label(info_frame, text=f"By {mod.get('author', 'Unknown')}", font=("Segoe UI", 8), 
+                 fg="#808080", bg=COLORS['card_bg'], anchor="w").pack(fill="x", pady=(2, 0))
+
+        # Buttons
+        btn_frame = tk.Frame(card, bg=COLORS['card_bg'])
+        btn_frame.pack(side="right")
+        
+        # INSTALL BUTTON (If pack selected or Modpack Browse)
+        if mod.get('project_type') == 'modpack':
+             btn = tk.Button(btn_frame, text="Download", font=("Segoe UI", 9, "bold"), 
+                        bg=COLORS['play_btn_green'], fg="white", relief="flat", cursor="hand2")
+             btn.pack(side="right", padx=5)
+             # Logic to install Modpack from Modrinth
+             # We need a new method for this
+             btn.config(command=lambda m=mod, b=btn: self._install_mr_modpack(m, b))
+
+        else:
+            active_pack_name = self.active_modpack_var.get()
+            if active_pack_name != "None":
+                # Check if installed
+                pack = next((p for p in self.modpacks if p['name'] == active_pack_name), None)
+                is_installed = False
+                if pack:
+                    # Check meta
+                    mod_slug = mod.get('slug')
+                    # Also check filename if slug check fails or is not present? 
+                    # Meta structure: {slug: "sodium", filename: "sodium-..."}
+                    if any(m.get('slug') == mod_slug for m in pack['mods']):
+                        is_installed = True
+                
+                if is_installed:
+                    tk.Label(btn_frame, text="✔ Installed", font=("Segoe UI", 9, "bold"), 
+                            fg=COLORS['success_green'], bg=COLORS['card_bg']).pack(side="right", padx=10)
+                else:
+                    btn = tk.Button(btn_frame, text="Install", font=("Segoe UI", 9, "bold"), 
+                            bg=COLORS['play_btn_green'], fg="white", relief="flat", cursor="hand2")
+                    btn.pack(side="right", padx=5)
+                    btn.config(command=lambda b=btn, m=mod, p=active_pack_name: self._install_mod_to_pack(m, p, b))
+
+        tk.Button(btn_frame, text="Web", font=("Segoe UI", 9), bg=COLORS['input_bg'], fg="white",
+                 relief="flat", cursor="hand2", 
+                 command=lambda u=f"https://modrinth.com/{mod.get('project_type', 'mod')}/{mod['slug']}": webbrowser.open(u)).pack(side="right", padx=5)
+
+    def _install_mod_to_pack(self, mod_data, pack_name, btn_widget):
+        pack = next((p for p in self.modpacks if p['name'] == pack_name), None)
+        if not pack: return
+        
+        # Update button state
+        btn_widget.config(state="disabled", text="Queued...", bg=COLORS['text_secondary'])
+        
+        # Add to Queue
+        task_id = self.add_download_task(mod_data.get('title', 'Mod'), "mod")
+        
+        def run_install():
+            self.root.after(0, lambda: btn_widget.config(text="Installing..."))
+            success = False
+            try:
+                mod_id = mod_data['slug'] # or project_id or slug from search hit
+                
+                self.root.after(0, lambda: self.update_download_task(task_id, 0, detail="Fetching versions..."))
+                
+                # version request
+                v_url = f"https://api.modrinth.com/v2/project/{mod_id}/version?loaders=[%22{pack['loader']}%22]&game_versions=[%22{pack['mc_version']}%22]"
+                r = requests.get(v_url, timeout=10)
+                if r.status_code != 200:
+                    raise Exception(f"Failed to fetch versions: {r.status_code}")
+                
+                versions = r.json()
+                if not versions:
+                    raise Exception("No compatible version found for this modpack.")
+                
+                # Pick first (newest)
+                best_ver = versions[0]
+                files = best_ver.get('files', [])
+                if not files:
+                    raise Exception("No files in version.")
+                    
+                primary_file = next((f for f in files if f.get('primary', False)), files[0])
+                download_url = primary_file['url']
+                filename = primary_file['filename']
+                size = primary_file.get('size', 0)
+                
+                # Download
+                target_dir = os.path.join(self.get_modpack_dir(pack['id']), "mods")
+                if not os.path.exists(target_dir): os.makedirs(target_dir)
+                
+                target_path = os.path.join(target_dir, filename)
+                
+                self.root.after(0, lambda: self.update_download_task(task_id, 0, detail=f"Downloading {filename}..."))
+                
+                with requests.get(download_url, stream=True) as d_r:
+                    d_r.raise_for_status()
+                    total_downloaded = 0
+                    with open(target_path, 'wb') as f:
+                        for chunk in d_r.iter_content(chunk_size=8192):
+                            # Check Cancel
+                            if task_id in self.download_tasks and self.download_tasks[task_id]['cancel_event'].is_set():
+                                raise Exception("Cancelled by user")
+                                
+                            f.write(chunk)
+                            total_downloaded += len(chunk)
+                            
+                            # Speed Limit
+                            if getattr(self, 'limit_download_speed_enabled', False):
+                                limit_kb = getattr(self, 'max_download_speed', 2048)
+                                if limit_kb > 0:
+                                    try: time.sleep(len(chunk) / (limit_kb * 1024))
+                                    except: pass
+
+                            if size > 0:
+                                prog = (total_downloaded / size) * 100
+                                # Throttle UI updates? 100 updates per mod is fine.
+                                self.root.after(0, lambda p=prog: self.update_download_task(task_id, p))
+                            
+                success = True
+                
+                # Update Pack Meta
+                # Store full info to detect duplicates
+                meta = {
+                    "slug": mod_id,
+                    "filename": filename,
+                    "version_id": best_ver['id']
+                }
+                
+                # Remove old entry if same slug exists (updating?)
+                # For now just append, user can manage files manually if needed
+                pack['mods'].append(meta) 
+                
+                self.save_modpacks()
+                
+            except Exception as e:
+                err_msg = str(e)
+                self.root.after(0, lambda m=err_msg: messagebox.showerror("Error", m))
+            
+            # Post-Op UI Update
+            def finish():
+                self.complete_download_task(task_id)
+                if success:
+                    btn_widget.destroy() # Remove install button (or replace with checkmark)
+                    pass 
+                else:
+                    btn_widget.config(state="normal", text="Install", bg=COLORS['play_btn_green'])
+            
+            self.root.after(0, finish)
+        
+        self.download_manager.queue_mod(run_install, task_id)
+
+    def _install_mr_modpack(self, mod_data, btn_widget):
+        btn_widget.config(state="disabled", text="Queued...")
+        task_id = self.add_download_task(mod_data['title'], "modpack")
+        
+        def run():
+             self.root.after(0, lambda: btn_widget.config(text="Installing..."))
+             self._install_mr_modpack_thread(mod_data, btn_widget, task_id)
+             
+        self.download_manager.queue_modpack(run, task_id)
+
+    def _install_mr_modpack_thread(self, mod_data, btn_widget, task_id):
+        try:
+             mod_id = mod_data['slug']
+             
+             self.root.after(0, lambda: self.update_download_task(task_id, 0, detail="Fetching info..."))
+             
+             v_url = f"https://api.modrinth.com/v2/project/{mod_id}/version"
+             r = requests.get(v_url, headers={"User-Agent": "AmneDev/NewLauncher"}, timeout=10)
+             versions = r.json()
+             if not versions:
+                 raise Exception("No versions found")
+                 
+             best = versions[0]
+             
+             files = best.get('files', [])
+             mrpack_file = next((f for f in files if f['filename'].endswith('.mrpack')), None)
+             
+             if not mrpack_file:
+                 # Some packs might not distribute mrpack on all versions?
+                 raise Exception("No .mrpack file found in latest version")
+                 
+             # Create Pack Entry
+             pack_name = mod_data['title']
+             mc_ver = best['game_versions'][0]
+             loader = best['loaders'][0]
+             
+             new_id = str(uuid.uuid4())
+             new_pack = {
+                 "id": new_id,
+                 "name": pack_name,
+                 "loader": loader,
+                 "mc_version": mc_ver,
+                 "mods": [],
+                 "linked_installation_id": None
+             }
+             
+             # Download .mrpack to temp
+             self.root.after(0, lambda: self.update_download_task(task_id, 5, detail="Downloading mrpack..."))
+             import tempfile
+             with tempfile.TemporaryDirectory() as temp_dir:
+                 mr_path = os.path.join(temp_dir, "pack.mrpack")
+                 with requests.get(mrpack_file['url'], stream=True) as d_r:
+                     d_r.raise_for_status()
+                     with open(mr_path, 'wb') as f:
+                         for chunk in d_r.iter_content(chunk_size=8192):
+                             if task_id in self.download_tasks and self.download_tasks[task_id]['cancel_event'].is_set():
+                                 raise Exception("Cancelled")
+                             f.write(chunk)
+                         
+                 # Extract
+                 if task_id in self.download_tasks and self.download_tasks[task_id]['cancel_event'].is_set(): raise Exception("Cancelled")
+
+                 self.root.after(0, lambda: self.update_download_task(task_id, 10, detail="Extracting..."))
+                 with zipfile.ZipFile(mr_path, 'r') as zf:
+                     zf.extractall(temp_dir)
+                     
+                 # Read index.json
+                 index_path = os.path.join(temp_dir, "modrinth.index.json")
+                 if not os.path.exists(index_path):
+                     raise Exception("Invalid mrpack: No index.json")
+                     
+                 with open(index_path, 'r') as f:
+                     idx = json.load(f)
+                     
+                 # Download mods
+                 target_dir = os.path.join(self.get_modpack_dir(new_id), "mods")
+                 if not os.path.exists(target_dir): os.makedirs(target_dir)
+                 
+                 files_list = idx.get('files', [])
+                 total_files = len(files_list)
+                 completed_files = 0
+                 
+                 for file_def in files_list:
+                     if task_id in self.download_tasks and self.download_tasks[task_id]['cancel_event'].is_set():
+                         raise Exception("Cancelled")
+
+                     d_url = file_def['downloads'][0]
+                     f_path = file_def['path'] 
+                     f_name = os.path.basename(f_path)
+                     
+                     # Allow subdirectories 
+                     # Modrinth packs put mods in 'mods/...' usually.
+                     # We flatten? No, keep it in mods dir.
+                     # If path starts with 'mods/', it goes to target_dir.
+                     # If path is 'config/', we ignore for now as requested (simple implementation)
+                     if f_path.startswith("mods/"):
+                         dest = os.path.join(self.get_modpack_dir(new_id), f_path) # e.g. pack/mods/fabric-api.jar
+                         # Ensure dir exists
+                         os.makedirs(os.path.dirname(dest), exist_ok=True)
+                         
+                         self.root.after(0, lambda n=f_name: self.update_download_task(task_id, detail=f"Downloading {n}"))
+                         
+                         with requests.get(d_url, stream=True) as mf:
+                             mf.raise_for_status()
+                             with open(dest, 'wb') as out:
+                                 for chunk in mf.iter_content(chunk_size=8192):
+                                     if task_id in self.download_tasks and self.download_tasks[task_id]['cancel_event'].is_set():
+                                         raise Exception("Cancelled")
+                                     out.write(chunk)
+                                 
+                     completed_files += 1
+                     if total_files > 0:
+                         prog = 10 + (completed_files / total_files * 85)
+                         self.root.after(0, lambda p=prog: self.update_download_task(task_id, p))
+                                 
+                     # To support config overrides, we would need to copy from extracted 'overrides' folder too.
+                 
+                 # Add to modpacks list
+                 self.root.after(0, lambda: self.complete_download_task(task_id))
+                 
+                 self.modpacks.append(new_pack)
+                 self.save_modpacks()
+                 
+             self.root.after(0, lambda: [
+                 self.refresh_modpacks_list(),
+                 self.update_active_modpack_dropdown(),
+                 messagebox.showinfo("Success", f"Installed modpack '{pack_name}'"),
+                 btn_widget.destroy()
+             ])
+             
+        except Exception as e:
+            print(f"Modpack install error: {e}")
+            err_msg = f"Failed to install pack: {e}"
+            self.root.after(0, lambda m=err_msg: [
+                self.update_download_task(task_id, detail="Error"),
+                messagebox.showerror("Error", m),
+                btn_widget.config(state="normal", text="Download")
+            ])
+
+    def _load_mod_icon_async(self, url, label):
+        if url in self.cached_mod_images:
+            label.config(image=self.cached_mod_images[url], text="", width=64, height=64)
+            return
+
+        def fetch():
+            try:
+                r = requests.get(url, timeout=5)
+                if r.status_code == 200:
+                    data = r.content
+                    img = Image.open(io.BytesIO(data))
+                    img = img.resize((64, 64), Image.Resampling.LANCZOS)
+                    photo = ImageTk.PhotoImage(img)
+                    
+                    def update_ui():
+                        if label.winfo_exists():
+                            self.cached_mod_images[url] = photo 
+                            label.config(image=photo, text="", width=64, height=64)
+                            # label.image = photo # tk bug prevention # already doing it via dict? No need to set attr if we have dict ref
+                    
+                    self.root.after(0, update_ui)
+            except: pass
+        
+        threading.Thread(target=fetch, daemon=True).start()
+
     def create_settings_tab(self):
         container = tk.Frame(self.tab_container, bg=COLORS['main_bg'])
         self.tabs["Settings"] = container
@@ -3724,7 +5393,7 @@ class MinecraftLauncher:
 
         # Content Canvas
         canvas = tk.Canvas(content_frame, bg=COLORS['main_bg'], highlightthickness=0)
-        scrollbar = tk.Scrollbar(content_frame, orient="vertical", command=canvas.yview)
+        scrollbar = ttk.Scrollbar(content_frame, orient="vertical", command=canvas.yview, style="Launcher.Vertical.TScrollbar")
         
         scrollable_frame = tk.Frame(canvas, bg=COLORS['main_bg'])
         
@@ -3742,7 +5411,20 @@ class MinecraftLauncher:
         canvas.configure(yscrollcommand=scrollbar.set)
         
         canvas.pack(side="left", fill="both", expand=True)
+        # Scrollbar auto-hide logic could be added here, but Settings usually needs scrolling
         scrollbar.pack(side="right", fill="y")
+        
+        # Mousewheel
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        
+        def _bind_mousewheel(widget):
+            widget.bind("<MouseWheel>", _on_mousewheel)
+            for child in widget.winfo_children():
+                _bind_mousewheel(child)
+        
+        scrollable_frame.bind("<Configure>", lambda e: _bind_mousewheel(scrollable_frame))
+        content_frame.bind("<Enter>", lambda e: _bind_mousewheel(scrollable_frame))
 
         # Scroll helper
         def scroll_to_widget(widget):
@@ -3848,6 +5530,71 @@ class MinecraftLauncher:
         tk.Entry(ram_row, textvariable=self.ram_entry_var, width=8,
                 bg=COLORS['input_bg'], fg=COLORS['text_primary'], relief="flat",
                 insertbackground="white").pack(side="left", padx=(10, 0), ipady=4)
+
+        # --- DOWNLOADS ---
+        lbl_downloads = tk.Label(main_container, text="DOWNLOADS & FEATURES", font=("Segoe UI", 14, "bold"),
+                bg=COLORS['main_bg'], fg=COLORS['text_primary'])
+        lbl_downloads.pack(anchor="w", pady=(20, 15))
+
+        # Modrinth Toggle
+        self.enable_modrinth_var = tk.BooleanVar(value=getattr(self, 'enable_modrinth', True))
+        def on_modrinth_toggle():
+             val = self.enable_modrinth_var.get()
+             self.enable_modrinth = val
+             self.save_config()
+             custom_showinfo("Restart Required", "Please restart the launcher to apply changes to Modrinth integration.")
+        
+        tk.Checkbutton(main_container, text="Enable Modrinth Integration (Mods Tab)", variable=self.enable_modrinth_var,
+                      bg=COLORS['main_bg'], fg=COLORS['text_primary'],
+                      selectcolor=COLORS['main_bg'], activebackground=COLORS['main_bg'],
+                      command=on_modrinth_toggle).pack(anchor="w", pady=(0, 15))
+
+        # Concurrent Limits
+        tk.Label(main_container, text="Concurrent Limits", font=("Segoe UI", 10, "bold"), 
+                bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(anchor="w", pady=(0, 5))
+        
+        lim_frame = tk.Frame(main_container, bg=COLORS['main_bg'])
+        lim_frame.pack(fill="x", pady=5)
+        
+        def update_limits(*args):
+             try:
+                 self.max_concurrent_packs = int(self.limit_packs_var.get())
+                 self.max_concurrent_mods = int(self.limit_mods_var.get())
+                 self.save_config(sync_ui=False)
+             except: pass
+
+        # Packs
+        tk.Label(lim_frame, text="Modpacks:", bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(side="left")
+        self.limit_packs_var = tk.StringVar(value=str(getattr(self, 'max_concurrent_packs', 1)))
+        self.limit_packs_var.trace_add("write", update_limits)
+        tk.Entry(lim_frame, textvariable=self.limit_packs_var, width=5, bg=COLORS['input_bg'], fg="white", relief="flat").pack(side="left", padx=(5, 15))
+
+        # Mods
+        tk.Label(lim_frame, text="Mods:", bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(side="left")
+        self.limit_mods_var = tk.StringVar(value=str(getattr(self, 'max_concurrent_mods', 3)))
+        self.limit_mods_var.trace_add("write", update_limits)
+        tk.Entry(lim_frame, textvariable=self.limit_mods_var, width=5, bg=COLORS['input_bg'], fg="white", relief="flat").pack(side="left", padx=5)
+
+        # Download Speed
+        speed_frame = tk.Frame(main_container, bg=COLORS['main_bg'])
+        speed_frame.pack(fill="x", pady=15)
+        
+        self.limit_speed_enc_var = tk.BooleanVar(value=getattr(self, 'limit_download_speed_enabled', False))
+        tk.Checkbutton(speed_frame, text="Limit Download Speed", variable=self.limit_speed_enc_var,
+                      bg=COLORS['main_bg'], fg=COLORS['text_primary'], selectcolor=COLORS['main_bg'], activebackground=COLORS['main_bg'],
+                      command=lambda: [setattr(self, 'limit_download_speed_enabled', self.limit_speed_enc_var.get()), self.save_config(sync_ui=False)]).pack(side="left")
+        
+        self.limit_speed_val_var = tk.StringVar(value=str(getattr(self, 'max_download_speed', 2048)))
+        
+        def update_speed(*args):
+             try:
+                 self.max_download_speed = int(self.limit_speed_val_var.get())
+                 self.save_config(sync_ui=False)
+             except: pass
+        self.limit_speed_val_var.trace_add("write", update_speed)
+
+        tk.Entry(speed_frame, textvariable=self.limit_speed_val_var, width=8, bg=COLORS['input_bg'], fg="white", relief="flat").pack(side="left", padx=(10, 5))
+        tk.Label(speed_frame, text="KB/s", bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(side="left")
 
         # Discord RPC
         lbl_discord = tk.Label(main_container, text="DISCORD INTEGRATION", font=("Segoe UI", 14, "bold"),
@@ -3968,20 +5715,14 @@ class MinecraftLauncher:
                  relief="flat", padx=15, pady=8, cursor="hand2",
                  command=self.reset_to_defaults).pack(anchor="w")
 
-        # Apply mousewheel binding after all widgets are added
-        def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        
-        def bind_recursive(w):
-            w.bind("<MouseWheel>", _on_mousewheel)
-            for c in w.winfo_children():
-                bind_recursive(c)
-        bind_recursive(scrollable_frame)
+        # Initial binding
+        _bind_mousewheel(scrollable_frame)
         canvas.bind("<MouseWheel>", _on_mousewheel)
         
         # Populate Nav
         create_nav_btn("General", lbl_general)
         create_nav_btn("Java", lbl_java)
+        create_nav_btn("Downloads", lbl_downloads)
         create_nav_btn("Discord", lbl_discord)
         create_nav_btn("Account", lbl_acct)
         create_nav_btn("Appearance", lbl_appear)
@@ -4027,6 +5768,260 @@ class MinecraftLauncher:
                 
             except Exception as e:
                 custom_showerror("Error", f"Failed to reset: {e}")
+
+    def create_addons_tab(self):
+        frame = tk.Frame(self.tab_container, bg=COLORS['main_bg'])
+        self.tabs["Addons"] = frame
+        
+        # Header
+        header = tk.Frame(frame, bg=COLORS['main_bg'], pady=20, padx=30)
+        header.pack(fill="x")
+        
+        tk.Label(header, text="Addons & Agent", font=("Segoe UI", 24, "bold"), bg=COLORS['main_bg'], fg=COLORS['text_primary']).pack(side="left")
+
+        # Scrollable Content
+        canvas = tk.Canvas(frame, bg=COLORS['main_bg'], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=canvas.yview, style="Launcher.Vertical.TScrollbar")
+        scroll_frame = tk.Frame(canvas, bg=COLORS['main_bg'])
+        
+        scroll_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas_window = canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+        
+        def on_canvas_configure(event):
+            canvas.itemconfig(canvas_window, width=event.width)
+            
+        canvas.bind("<Configure>", on_canvas_configure)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # Mousewheel
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        
+        def _bind_mousewheel(widget):
+            widget.bind("<MouseWheel>", _on_mousewheel)
+            for child in widget.winfo_children():
+                _bind_mousewheel(child)
+
+        # Bind enter/leave for scrolling
+        frame.bind("<Enter>", lambda e: _bind_mousewheel(scroll_frame))
+        
+        # --- content ---
+        content = tk.Frame(scroll_frame, bg=COLORS['main_bg'], padx=30, pady=10)
+        content.pack(fill="x")
+
+        # GitHub Skin Sync
+        sync_frame = tk.Frame(content, bg=COLORS['card_bg'], padx=20, pady=20)
+        sync_frame.pack(fill="x", pady=(0, 20))
+        
+        tk.Label(sync_frame, text="GitHub Skin Sync", font=("Segoe UI", 16, "bold"), bg=COLORS['card_bg'], fg=COLORS['text_primary']).pack(anchor="w", pady=(0, 5))
+        tk.Label(sync_frame, text="Link a GitHub repository to sync skins with your friends.", font=("Segoe UI", 10), bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(anchor="w", pady=(0, 20))
+
+        # Enable Toggle
+        self.gh_sync_enabled = tk.BooleanVar(value=self.addons_config.get("gh_sync_enabled", False))
+        tk.Checkbutton(sync_frame, text="Enable Skin Sync", variable=self.gh_sync_enabled,
+                      bg=COLORS['card_bg'], fg=COLORS['text_primary'],
+                      selectcolor=COLORS['card_bg'], activebackground=COLORS['card_bg'],
+                      command=self._save_addons_config).pack(anchor="w", pady=(0, 15))
+
+        # Inputs Grid
+        grid_frame = tk.Frame(sync_frame, bg=COLORS['card_bg'])
+        grid_frame.pack(fill="x")
+        grid_frame.columnconfigure(1, weight=1)
+
+        # Repo
+        tk.Label(grid_frame, text="Repository (user/repo):", font=("Segoe UI", 10), bg=COLORS['card_bg'], fg=COLORS['text_secondary']).grid(row=0, column=0, sticky="w", pady=5)
+        self.gh_repo_entry = tk.Entry(grid_frame, font=("Segoe UI", 10), bg=COLORS['input_bg'], fg="white", relief="flat")
+        self.gh_repo_entry.insert(0, str(self.addons_config.get("gh_repo", "")))
+        self.gh_repo_entry.grid(row=0, column=1, sticky="ew", padx=10, ipady=5)
+
+        # Token
+        tk.Label(grid_frame, text="Access Token (PAT):", font=("Segoe UI", 10), bg=COLORS['card_bg'], fg=COLORS['text_secondary']).grid(row=1, column=0, sticky="w", pady=5)
+        self.gh_token_entry = tk.Entry(grid_frame, font=("Segoe UI", 10), bg=COLORS['input_bg'], fg="white", relief="flat", show="*")
+        self.gh_token_entry.insert(0, str(self.addons_config.get("gh_token", "")))
+        self.gh_token_entry.grid(row=1, column=1, sticky="ew", padx=10, ipady=5)
+        
+        # Save Button
+        tk.Button(sync_frame, text="Save & Sync", command=self._save_gh_sync_settings, 
+                 bg=COLORS['accent_blue'], fg="white", font=("Segoe UI", 10), 
+                 padx=20, pady=8, relief="flat", cursor="hand2").pack(anchor="w", pady=(20, 0))
+
+        # Instructions
+        info_frame = tk.Frame(content, bg=COLORS['main_bg'], pady=10)
+        info_frame.pack(fill="x")
+        
+        info_text = """
+How to use:
+1. Create a public or private GitHub repository.
+2. Generate a Personal Access Token (PAT) with 'repo' scope.
+3. Enter the repository name (e.g., 'MyName/Skins') and the token above.
+4. Enable the feature. The launcher will upload your current skin to the repo and download friends' skins automatically.
+        """
+        tk.Label(info_frame, text=info_text, font=("Segoe UI", 9), justify="left", bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(anchor="w")
+
+    def _save_addons_config(self):
+        self.addons_config["gh_sync_enabled"] = self.gh_sync_enabled.get()
+        self.save_config()
+
+    def _save_gh_sync_settings(self):
+        repo = self.gh_repo_entry.get().strip()
+        token = self.gh_token_entry.get().strip()
+        
+        self.addons_config.update({
+            "gh_sync_enabled": self.gh_sync_enabled.get(),
+            "gh_repo": repo,
+            "gh_token": token
+        })
+        self.save_config()
+        
+        if self.gh_sync_enabled.get():
+             self.perform_gh_skin_sync()
+        else:
+             custom_showinfo("Saved", "Settings saved.")
+
+    def perform_gh_skin_sync(self):
+        # Trigger Agent to Sync
+        if not self.profiles: return
+        
+        current_p = self.profiles[self.current_profile_index]
+        username = current_p.get("name", "Unknown")
+        skin_path = current_p.get("skin_path")
+        
+        payload = {
+            "repo": self.addons_config.get("gh_repo"),
+            "token": self.addons_config.get("gh_token"),
+            "username": username,
+            "skin_path": skin_path,
+            "upload": True,
+            "download": True
+        }
+        
+        self.show_progress_overlay("Syncing Skins...")
+        
+        def on_complete(res):
+            self.hide_progress_overlay()
+            if res.get("status") == "success":
+                custom_showinfo("Success", f"Skin sync complete!\n{res.get('msg', '')}")
+            else:
+                custom_showerror("Sync Error", res.get("msg", "Unknown error"))
+                
+        self.send_agent_request("gh_skin_sync", payload, lambda r: self.root.after(0, lambda: on_complete(r)))
+
+    def start_agent_process(self):
+
+        if hasattr(self, 'agent_process') and self.agent_process and self.agent_process.poll() is None:
+            return # Already running
+            
+        try:
+            cwd = os.path.dirname(os.path.abspath(__file__))
+            
+            # Determine command based on environment (Frozen vs Source)
+            if getattr(sys, 'frozen', False):
+                base_dir = os.path.dirname(sys.executable)
+                agent_exe = os.path.join(base_dir, "agent.exe")
+                cmd = [agent_exe, self.config_dir]
+                cwd = base_dir
+            else:
+                script = os.path.join(cwd, "agent.py")
+                cmd = [sys.executable, script, self.config_dir]
+            
+            # Start detached process with pipes
+            startupinfo = None
+            creationflags = 0
+            
+            if sys.platform == "win32":
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                creationflags = subprocess.CREATE_NO_WINDOW
+                
+            self.agent_process = subprocess.Popen(
+                cmd,
+                cwd=cwd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, 
+                text=True,
+                startupinfo=startupinfo,
+                creationflags=creationflags
+            )
+            
+            # Start Listener
+            threading.Thread(target=self._agent_listener_thread, daemon=True).start()
+            
+            self.log(f"Agent started with PID {self.agent_process.pid}")
+            
+        except Exception as e:
+            custom_showerror("Agent Error", f"Failed to start agent: {e}")
+
+    def _agent_listener_thread(self):
+        if not self.agent_process: return
+        
+        try:
+            while self.agent_process and self.agent_process.poll() is None:
+                # Use readline to get line-buffered output
+                if not self.agent_process.stdout: break
+                line = self.agent_process.stdout.readline()
+                if not line: break
+                
+                try:
+                    data = json.loads(line)
+                    req_id = data.get("id")
+                    
+                    if req_id in self.agent_callbacks:
+                        callback = self.agent_callbacks.pop(req_id)
+                        # Run callback on main thread
+                        self.root.after(0, lambda c=callback, d=data.get("result"): c(d))
+                        
+                except json.JSONDecodeError:
+                    pass
+        except Exception as e:
+            print(f"Agent listener error: {e}")
+            
+        # Cleanup if process died
+        self.root.after(0, self._on_agent_exit)
+
+    def _on_agent_exit(self):
+        self.agent_process = None
+
+    def send_agent_request(self, action, payload, callback=None):
+        if not self.agent_process or self.agent_process.poll() is not None:
+            # Try to auto-start
+            self.start_agent_process()
+            # If still failed, abort
+            if not self.agent_process or self.agent_process.poll() is not None:
+                if callback:
+                    callback({"status": "error", "msg": "Agent not running"})
+                return
+
+        req_id = str(uuid.uuid4())
+        request = {"id": req_id, "action": action, "payload": payload}
+        
+        if callback:
+            self.agent_callbacks[req_id] = callback
+            
+        try:
+            with self.agent_lock:
+                if self.agent_process.stdin:
+                    self.agent_process.stdin.write(json.dumps(request) + "\n")
+                    self.agent_process.stdin.flush()
+        except Exception as e:
+            if req_id in self.agent_callbacks:
+                 del self.agent_callbacks[req_id]
+            if callback:
+                 callback({"status": "error", "msg": str(e)})
+
+    def stop_agent_process(self):
+        if hasattr(self, 'agent_process') and self.agent_process:
+            self.agent_process.terminate()
+            self.agent_process = None
+            
+            self.log("Agent stopped.")
 
     def change_minecraft_dir(self):
         path = filedialog.askdirectory(initialdir=self.minecraft_dir)
@@ -4181,13 +6176,18 @@ class MinecraftLauncher:
     # --- LOGIC ---
     def setup_logging(self):
         try:
-            # Determine base directory (executable dir if frozen, else script dir)
-            if getattr(sys, 'frozen', False):
-                base_dir = os.path.dirname(sys.executable)
+            # Determine log directory based on config location
+            # If config_dir is set (which points to either local dir or .nlc), use that.
+            if hasattr(self, 'config_dir'):
+                log_dir = os.path.join(self.config_dir, "logs")
             else:
-                base_dir = os.path.dirname(os.path.abspath(__file__))
+                # Fallback if config_dir is not yet set
+                if getattr(sys, 'frozen', False):
+                    base_dir = os.path.dirname(sys.executable)
+                else:
+                    base_dir = os.path.dirname(os.path.abspath(__file__))
+                log_dir = os.path.join(base_dir, "logs")
             
-            log_dir = os.path.join(base_dir, "logs")
             if not os.path.exists(log_dir):
                 os.makedirs(log_dir)
 
@@ -4196,8 +6196,22 @@ class MinecraftLauncher:
             fname = f"launcher_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log"
             self.log_file_path = os.path.join(log_dir, fname)
             
-            with open(self.log_file_path, "w", encoding="utf-8") as f:
-                f.write("Launcher initialized.\n")
+            # Remove existing handlers
+            for handler in logging.root.handlers[:]:
+                logging.root.removeHandler(handler)
+                
+            logging.basicConfig(
+                level=logging.NOTSET, # Capture everything, handlers will filter
+                format="%(asctime)s [%(levelname)s] %(threadName)s: %(message)s",
+                handlers=[
+                    logging.FileHandler(self.log_file_path, encoding='utf-8'),
+                    logging.StreamHandler(sys.stdout)
+                ]
+            )
+            
+            logging.info(f"Launcher initialized. Log file: {self.log_file_path}")
+            logging.info(f"System: {platform.system()} {platform.release()} {platform.version()}")
+            
         except Exception as e:
             print(f"Logging setup failed: {e}")
             self.log_file_path = None
@@ -4287,17 +6301,19 @@ class MinecraftLauncher:
         self.save_config()
 
     def log(self, message):
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        line = f"[{timestamp}] {message}"
-        self.log_area.insert(tk.END, line + "\n")
-        self.log_area.see(tk.END)
+        # Update UI
+        try:
+            if hasattr(self, 'log_area') and self.log_area.winfo_exists():
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                # Strip [GAME] prefix for UI if needed, but keeping it is good for context
+                line = f"[{timestamp}] {message}"
+                self.log_area.insert(tk.END, line + "\n")
+                self.log_area.see(tk.END)
+        except:
+            pass
         
-        log_path = getattr(self, 'log_file_path', None)
-        if log_path:
-            try:
-                with open(log_path, "a", encoding="utf-8") as f:
-                    f.write(line + "\n")
-            except: pass
+        # Write to log file via logging module
+        logging.info(message)
 
     def set_status(self, text, color=None):
         self.status_label.config(text=text, fg=color if color else COLORS['text_secondary'])
@@ -4389,6 +6405,7 @@ class MinecraftLauncher:
 
                     # First Run Check (Must be done before any save_config triggers)
                     self.first_run = not data.get("first_run_completed", False)
+                    self.addons_config = data.get("addons", {})
                     
                     # Profiles (Accounts)
                     self.profiles = data.get("profiles", [])
@@ -4402,6 +6419,7 @@ class MinecraftLauncher:
                     if not self.installations:
                         # Create default
                         self.installations = [{
+                            "id": str(uuid.uuid4()),
                             "name": "Latest Release",
                             "version": "latest-release", # Metadata placeholder
                             "loader": "Vanilla",
@@ -4411,6 +6429,10 @@ class MinecraftLauncher:
                         }]
                         print("Initialized default installations")
                     else:
+                        # Ensure IDs
+                        for inst in self.installations:
+                            if "id" not in inst:
+                                inst["id"] = str(uuid.uuid4())
                         print(f"Loaded {len(self.installations)} installations")
                     
                     idx = data.get("current_profile_index", 0)
@@ -4429,6 +6451,19 @@ class MinecraftLauncher:
                     self.ram_allocation = data.get("ram_allocation", DEFAULT_RAM)
                     self.ram_var.set(self.ram_allocation)
                     self.ram_entry_var.set(str(self.ram_allocation))
+
+                    # Downloads & Features
+                    self.max_concurrent_packs = data.get("max_concurrent_packs", 1)
+                    self.max_concurrent_mods = data.get("max_concurrent_mods", 3)
+                    self.limit_download_speed_enabled = data.get("limit_download_speed_enabled", False)
+                    self.max_download_speed = data.get("max_download_speed", 2048) # KB/s
+                    self.enable_modrinth = data.get("enable_modrinth", False)
+                    
+                    if hasattr(self, 'enable_modrinth_var'): self.enable_modrinth_var.set(self.enable_modrinth)
+                    
+                    # Addons
+                    if "addons" in data:
+                        self.addons_config.update(data["addons"])
 
                     # Load RPC
                     self.rpc_enabled = data.get("rpc_enabled", True)
@@ -4562,10 +6597,18 @@ class MinecraftLauncher:
             "rpc_show_version": self.rpc_show_version,
             "rpc_show_server": self.rpc_show_server,
             "auto_update_check": self.auto_update_check,
+            # Features / Downloads
+            "max_concurrent_packs": getattr(self, 'max_concurrent_packs', 1),
+            "max_concurrent_mods": getattr(self, 'max_concurrent_mods', 3),
+            "limit_download_speed_enabled": getattr(self, 'limit_download_speed_enabled', False),
+            "max_download_speed": getattr(self, 'max_download_speed', 2048),
+            "enable_modrinth": getattr(self, 'enable_modrinth', True),
+            # UI State
             "close_launcher": getattr(self, 'close_launcher_var', tk.BooleanVar(value=True)).get(),
             "minimize_to_tray": getattr(self, 'minimize_to_tray_var', tk.BooleanVar(value=False)).get(),
             "show_console": getattr(self, 'show_console_var', tk.BooleanVar(value=False)).get(),
-            "current_wallpaper": getattr(self, 'current_wallpaper', None)
+            "current_wallpaper": getattr(self, 'current_wallpaper', None),
+            "addons": getattr(self, "addons_config", {})
         }
         try:
             with open(self.config_file, "w", encoding="utf-8") as f: json.dump(config, f, indent=4)
@@ -5031,6 +7074,14 @@ class MinecraftLauncher:
             
         return None
 
+    def get_installations(self):
+        # Return dict {id: inst}
+        d = {}
+        for inst in self.installations:
+            if "id" in inst:
+                d[inst["id"]] = inst
+        return d
+
     def start_launch(self, force_update=False):
         if not self.installations: return
         
@@ -5069,9 +7120,11 @@ class MinecraftLauncher:
         self.launch_btn.config(state="disabled", text="LAUNCHING...")
         self.launch_opts_btn.config(state="disabled")
         # self.set_status("Launching Minecraft...") # Redundant with overlay
-        threading.Thread(target=self.launch_logic, args=(version_id, username, loader, force_update), daemon=True).start()
+        inst_id = inst.get("id")
+        threading.Thread(target=self.launch_logic, args=(version_id, username, loader, force_update, inst_id), daemon=True).start()
 
-    def launch_logic(self, version, username, loader, force_update=False):
+    def launch_logic(self, version, username, loader, force_update=False, inst_id=None):
+        mods_backup_path = None
         # Callback wrapper to update overlay
         def update_status(t):
             self.log(f"Status: {t}")
@@ -5284,6 +7337,32 @@ class MinecraftLauncher:
                 # For offline local server, token can be anything usually, but validation might fail if not careful.
                 # Authlib Injector usually disables signature checks.
 
+            # --- MODPACK SWAP ---
+            try:
+                if inst_id:
+                     pack = next((p for p in self.modpacks if p.get('linked_installation_id') == inst_id), None)
+                     if pack:
+                         self.log(f"Loading Modpack: {pack['name']}")
+                         mods_dir = os.path.join(self.minecraft_dir, "mods")
+                         pack_mods_dir = os.path.join(self.get_modpack_dir(pack['id']), "mods")
+                         
+                         # Only swap if pack has mods folder
+                         if os.path.exists(pack_mods_dir):
+                             timestamp = int(time.time())
+                             mods_backup_path = os.path.join(self.minecraft_dir, f"mods_backup_{timestamp}")
+                             
+                             if os.path.exists(mods_dir):
+                                 # Rename current to backup
+                                 os.rename(mods_dir, mods_backup_path)
+                             
+                             # Copy pack mods to live folder
+                             # Using copytree can be slow. Symlink if possible?
+                             # Windows requires Admin for symlinks usually. Copy is safer.
+                             shutil.copytree(pack_mods_dir, mods_dir)
+                             self.log("Swapped mods folder for modpack.")
+            except Exception as e:
+                self.log(f"Modpack swap error: {e}")
+
             options = {
                 "username": username, 
                 "uuid": launch_uuid, 
@@ -5344,6 +7423,16 @@ class MinecraftLauncher:
             self.root.after(0, lambda: custom_showerror("Launch Error", err_msg))
             self.root.after(0, lambda: self.update_rpc("Idle", "In Launcher"))
         finally:
+            if mods_backup_path and os.path.exists(mods_backup_path):
+                try:
+                    current_mods = os.path.join(self.minecraft_dir, "mods")
+                    if os.path.exists(current_mods):
+                        shutil.rmtree(current_mods) 
+                    os.rename(mods_backup_path, current_mods)
+                    self.log("Restored original mods folder.")
+                except Exception as e:
+                    self.log(f"Error restoring mods: {e}")
+
             if local_skin_server:
                 self.log("Stopping local skin server...")
                 try: local_skin_server.stop()

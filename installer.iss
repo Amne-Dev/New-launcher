@@ -1,5 +1,5 @@
 #define MyAppName "New Launcher"
-#define MyAppVersion "1.6.4"
+#define MyAppVersion "1.8"
 #define MyAppPublisher "@amne-dev on github"
 #define MyAppURL "https://github.com/Amne-Dev/New-launcher"
 #define MyAppExeName "NewLauncher.exe"
@@ -30,10 +30,22 @@ SetupIconFile=logo.ico
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
-Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked; Check: IsFreshInstall
+
+[Code]
+function IsFreshInstall: Boolean;
+begin
+  // Check for the existence of the uninstall key. If it exists, it's an update.
+  // The AppId is {A3543210-9876-5432-1000-ABCDEF123456}
+  // We check both HKLM and HKCU to be safe, although PrivilegesRequired settings usually dictate one.
+  Result := not (RegKeyExists(HKEY_LOCAL_MACHINE, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{A3543210-9876-5432-1000-ABCDEF123456}_is1') or
+                 RegKeyExists(HKEY_CURRENT_USER, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{A3543210-9876-5432-1000-ABCDEF123456}_is1'));
+end;
+
 
 [Files]
 Source: "dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\agent.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "logo.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "logo.png"; DestDir: "{app}"; Flags: ignoreversion
 
@@ -42,4 +54,4 @@ Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFile
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon; IconFilename: "{app}\logo.ico"
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent runasoriginaluser
