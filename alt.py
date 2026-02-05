@@ -7390,6 +7390,7 @@ How to use:
 
             process = subprocess.Popen(
                 command, 
+                cwd=self.minecraft_dir,
                 stdout=subprocess.PIPE, 
                 stderr=subprocess.STDOUT, 
                 text=True, 
