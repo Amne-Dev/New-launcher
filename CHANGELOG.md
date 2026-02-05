@@ -2,10 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
-## [1.8.1] - 2026-02-05
+## [1.8.2] - 2026-02-05
 
 ### Fixed
-- **Modpack Crash**: Fixed a critical `AccessDeniedException` when running modpacks (like "Crash Assistant") from the Program Files directory. The game process now correctly sets its working directory to the Minecraft folder (`%Appdata%\.minecraft`), ensuring mods write config files to the correct writable location.
+
+- **Encoding Error**: Fixed a `UnicodeDecodeError` (charmap codec) when the game logs special characters (e.g., from chat commands). The launcher now strictly uses UTF-8 buffering for game output.
 
 ## [1.8] - 2026-02-04
 
