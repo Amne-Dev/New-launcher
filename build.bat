@@ -7,7 +7,14 @@ echo Building Launcher...
 pyinstaller --clean alt.spec
 if %ERRORLEVEL% NEQ 0 exit /b %ERRORLEVEL%
 
-echo. 
+echo Building Custom Installer...
+pyinstaller --clean installer_app.spec
+if %ERRORLEVEL% NEQ 0 exit /b %ERRORLEVEL%
+
+if not exist installer mkdir installer
+copy /Y dist\NLCSetup.exe installer\NLCSetup.exe >nul
+
+echo.
 echo Build Complete.
-echo Now compile 'installer.iss' with Inno Setup.
+echo Custom installer created at installer\NLCSetup.exe
 pause

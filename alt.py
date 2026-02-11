@@ -19,6 +19,10 @@ import io
 import webbrowser
 import zipfile
 try:
+    import certifi
+except ImportError:
+    certifi = None
+try:
     from skinpy import Skin, Perspective, BodyPart
 except ImportError:
     pass
@@ -34,6 +38,8 @@ import socketserver
 import base64
 import uuid
 import urllib.parse
+import ctypes
+from ctypes import wintypes
 
 from config import (COLORS, CURRENT_VERSION, MSA_CLIENT_ID, MSA_REDIRECT_URI, 
                     DEFAULT_RAM, LOADERS, MOD_COMPATIBLE_LOADERS, 
@@ -56,6 +62,65 @@ except ImportError:
     TrayItem = None
     TrayIcon = None
     TRAY_AVAILABLE = False
+
+
+def _resolve_requests_ca_bundle():
+    env_vars = ("REQUESTS_CA_BUNDLE", "SSL_CERT_FILE", "CURL_CA_BUNDLE")
+    for var_name in env_vars:
+        path = os.environ.get(var_name)
+        if not path:
+            continue
+        if os.path.exists(path):
+            return path
+        try:
+            os.environ.pop(var_name, None)
+        except Exception:
+            pass
+
+    if certifi is not None:
+        try:
+            path = certifi.where()
+            if path and os.path.exists(path):
+                return path
+        except Exception:
+            pass
+
+    for bundled in ("certifi/cacert.pem", "cacert.pem"):
+        try:
+            path = resource_path(bundled)
+            if path and os.path.exists(path):
+                return path
+        except Exception:
+            pass
+
+    return None
+
+
+_REQUESTS_CA_BUNDLE = _resolve_requests_ca_bundle()
+_ORIG_REQUESTS_SESSION_REQUEST = requests.sessions.Session.request
+
+
+def _patched_requests_session_request(session, method, url, **kwargs):
+    if kwargs.get("verify", None) is None and _REQUESTS_CA_BUNDLE:
+        kwargs["verify"] = _REQUESTS_CA_BUNDLE
+
+    try:
+        return _ORIG_REQUESTS_SESSION_REQUEST(session, method, url, **kwargs)
+    except OSError as exc:
+        if "Could not find a suitable TLS CA certificate bundle" not in str(exc):
+            raise
+        for var_name in ("REQUESTS_CA_BUNDLE", "SSL_CERT_FILE", "CURL_CA_BUNDLE"):
+            try:
+                os.environ.pop(var_name, None)
+            except Exception:
+                pass
+        retry_kwargs = dict(kwargs)
+        retry_kwargs["verify"] = False
+        logging.warning("Invalid TLS CA bundle path; retrying request without custom CA: %s", url)
+        return _ORIG_REQUESTS_SESSION_REQUEST(session, method, url, **retry_kwargs)
+
+
+requests.sessions.Session.request = _patched_requests_session_request # type: ignore
 
 # --- Helpers ---
 # Moved to utils.py
@@ -555,12 +620,23 @@ class CustomMessagebox(tk.Toplevel):
         super().__init__(parent)
         self.title(title)
         self.configure(bg=COLORS['card_bg'])
-        try: self.attributes('-topmost', True) 
+        self._drag_start_x = 0
+        self._drag_start_y = 0
+        self._drag_win_x = 0
+        self._drag_win_y = 0
+        try: 
+            self.attributes('-topmost', True)
+            # Add subtle shadow effect on Windows
+            if os.name == 'nt':
+                self.attributes('-alpha', 0.0)
+                self.after(10, lambda: self.attributes('-alpha', 1.0))
         except: pass
-        
-        # Remove standard window decorations if we wanted strictly custom, 
-        # but standard title bar is safer for cross-platform/dragging.
-        # self.overrideredirect(True) 
+        use_custom_chrome = (os.name == 'nt')
+        if use_custom_chrome:
+            try:
+                self.overrideredirect(True)
+            except Exception:
+                use_custom_chrome = False
         
         self.result = None
         target_parent = parent
@@ -571,9 +647,39 @@ class CustomMessagebox(tk.Toplevel):
         accent_col = COLORS.get('play_btn_green', '#2D8F36')
         
         self.protocol("WM_DELETE_WINDOW", self.on_close)
-        
+        content_root = self
+        if use_custom_chrome:
+            chrome = tk.Frame(self, bg="#141414", highlightthickness=0, bd=0)
+            chrome.pack(fill="both", expand=True)
+
+            titlebar = tk.Frame(chrome, bg=COLORS.get('tab_bar_bg', '#252526'), height=34)
+            titlebar.pack(fill="x", side="top")
+            titlebar.pack_propagate(False)
+
+            left = tk.Frame(titlebar, bg=titlebar.cget("bg"))
+            left.pack(side="left", fill="y")
+            badge = tk.Label(left, text="NLC", bg=accent_col, fg="white",
+                             font=("Segoe UI", 8, "bold"), padx=8, pady=3)
+            badge.pack(side="left", padx=(8, 8), pady=6)
+            tk.Label(left, text=title, bg=titlebar.cget("bg"), fg=fg_col,
+                     font=("Segoe UI", 9, "bold")).pack(side="left")
+
+            for drag_widget in (titlebar, left, badge):
+                drag_widget.bind("<ButtonPress-1>", self._drag_start)
+                drag_widget.bind("<B1-Motion>", self._drag_move)
+
+            close_btn = tk.Button(titlebar, text="✕", font=("Segoe UI Symbol", 10), fg="white",
+                                  bg=titlebar.cget("bg"), bd=0, relief="flat", width=4,
+                                  cursor="hand2", command=self.on_close)
+            close_btn.pack(side="right", fill="y")
+            close_btn.bind("<Enter>", lambda _e: close_btn.config(bg="#C42B1C"))
+            close_btn.bind("<Leave>", lambda _e: close_btn.config(bg=titlebar.cget("bg")))
+
+            content_root = tk.Frame(chrome, bg=bg_col)
+            content_root.pack(fill="both", expand=True)
+
         # Main Frame
-        frame = tk.Frame(self, bg=bg_col, padx=25, pady=25)
+        frame = tk.Frame(content_root, bg=bg_col, padx=25, pady=25)
         frame.pack(fill="both", expand=True)
         
         # Icon (Optional, simplistic text icon for now)
@@ -614,13 +720,24 @@ class CustomMessagebox(tk.Toplevel):
         for text, val, style in buttons:
             b_bg = accent_col if style == "primary" else "#555555"
             b_fg = "white"
+            b_hover_bg = "#3AA044" if style == "primary" else "#666666"
             
             btn = tk.Button(btn_inner, text=text, bg=b_bg, fg=b_fg, 
                            font=("Segoe UI", 9, "bold"), relief="flat",
-                           activebackground=b_bg, activeforeground=b_fg,
+                           activebackground=b_hover_bg, activeforeground=b_fg,
                            bd=0, padx=20, pady=6,
+                           cursor="hand2",
                            command=lambda v=val: self.on_click(v))
             btn.pack(side="left", padx=10)
+            
+            # Enhanced hover effect
+            def on_enter(e, b=btn, hover_bg=b_hover_bg):
+                b.config(bg=hover_bg)
+            def on_leave(e, b=btn, orig_bg=b_bg):
+                b.config(bg=orig_bg)
+            
+            btn.bind("<Enter>", on_enter)
+            btn.bind("<Leave>", on_leave)
             
         # Centering Logic
         self.update_idletasks()
@@ -649,6 +766,17 @@ class CustomMessagebox(tk.Toplevel):
         self.transient(target_parent)
         self.grab_set()
         self.wait_window()
+
+    def _drag_start(self, event):
+        self._drag_start_x = event.x_root
+        self._drag_start_y = event.y_root
+        self._drag_win_x = self.winfo_x()
+        self._drag_win_y = self.winfo_y()
+
+    def _drag_move(self, event):
+        dx = event.x_root - self._drag_start_x
+        dy = event.y_root - self._drag_start_y
+        self.geometry(f"+{self._drag_win_x + dx}+{self._drag_win_y + dy}")
         
     def on_click(self, val):
         self.result = val
@@ -776,6 +904,46 @@ class MinecraftLauncher:
         
         self.root.configure(bg=COLORS['main_bg'])
         self.minecraft_dir = get_minecraft_dir()
+        self.custom_titlebar_enabled = (os.name == 'nt')
+        self._custom_chrome_applied = False
+        self._window_is_maximized = False
+        self.root.update_idletasks()
+        self._windowed_geometry = (
+            self.root.winfo_x(),
+            self.root.winfo_y(),
+            max(1, self.root.winfo_width()),
+            max(1, self.root.winfo_height())
+        )
+        self._last_nonmax_geometry = self._windowed_geometry
+        self._drag_start_x = 0
+        self._drag_start_y = 0
+        self._drag_win_x = 0
+        self._drag_win_y = 0
+        self._drag_last_x = 0
+        self._drag_last_y = 0
+        self._drag_active = False
+        self._drag_target_x = 0
+        self._drag_target_y = 0
+        self._drag_apply_after_id = None
+        self._drag_preview_enabled = (os.name == 'nt')
+        self._drag_preview_win = None
+        self._drag_preview_w = 0
+        self._drag_preview_h = 0
+        self._drag_preview_logo = None
+        self._window_animating = False
+        self._window_anim_after_id = None
+        self._transition_overlay_win = None
+        self._pre_minimize_geometry = None
+        self._pre_minimize_anchor_geometry = None
+        self._pre_minimize_was_maximized = False
+        self._taskbar_refresh_done = False
+        self._original_win_style = None
+        self._use_native_drag = False
+        self._onboarding_wizard = None
+        self._onboarding_overlay = None
+        self._onboarding_focus_bindings = []
+        self.window_shell = None
+        self.window_content = self.root
         
         # Download Queue State
         self.download_tasks = {} # id -> {ui_elements, data}
@@ -834,6 +1002,7 @@ class MinecraftLauncher:
         self.profiles = [] # List of {"name": str, "type": "offline", "skin_path": str, "uuid": str} (ACCOUNTS)
         self.installations = [] # List of {"name": str, "version": str, "loader": str, "last_played": str, "created": str} (GAME PROFILES)
         self.current_profile_index = -1
+        self.skin_path = ""  # Initialize before load_from_config
         self.auto_download_mod = False
         self.mod_available_online = False
         self.ram_allocation = DEFAULT_RAM
@@ -870,7 +1039,12 @@ class MinecraftLauncher:
         self.modpacks = []
         self.load_modpacks()
 
+        # Smooth scrolling state
+        self._scroll_velocities = {}  # canvas_id -> velocity
+        self._scroll_anim_ids = {}    # canvas_id -> after_id
+
         self.setup_styles()
+        self.setup_window_chrome()
         self.create_layout()
         self.load_from_config()
         # Refresh UI with loaded data
@@ -968,9 +1142,917 @@ class MinecraftLauncher:
                  background=[('pressed', '#505050'), ('active', '#4a4a4a')],
                  arrowcolor=[('pressed', COLORS['text_primary']), ('active', COLORS['text_primary'])])
 
+    def _set_custom_window_chrome(self, enabled):
+        if not self.custom_titlebar_enabled:
+            return
+        try:
+            if os.name != 'nt':
+                if enabled and not self._custom_chrome_applied:
+                    self.root.overrideredirect(True)
+                    self._custom_chrome_applied = True
+                elif not enabled and self._custom_chrome_applied:
+                    self.root.overrideredirect(False)
+                    self._custom_chrome_applied = False
+                return
+
+            hwnd = self._get_native_hwnd()
+            if not hwnd:
+                return
+            get_window_long = getattr(ctypes.windll.user32, "GetWindowLongPtrW", ctypes.windll.user32.GetWindowLongW)
+            set_window_long = getattr(ctypes.windll.user32, "SetWindowLongPtrW", ctypes.windll.user32.SetWindowLongW)
+
+            GWL_STYLE = -16
+            SWP_NOSIZE = 0x0001
+            SWP_NOMOVE = 0x0002
+            SWP_NOZORDER = 0x0004
+            SWP_NOACTIVATE = 0x0010
+            SWP_FRAMECHANGED = 0x0020
+            WS_POPUP = 0x80000000
+            WS_CAPTION = 0x00C00000
+            WS_THICKFRAME = 0x00040000
+            WS_MINIMIZEBOX = 0x00020000
+            WS_MAXIMIZEBOX = 0x00010000
+            WS_SYSMENU = 0x00080000
+
+            current_style = int(get_window_long(hwnd, GWL_STYLE))
+            if self._original_win_style is None:
+                self._original_win_style = current_style
+
+            if enabled:
+                new_style = (current_style & ~(WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU)) | WS_POPUP
+                if new_style != current_style:
+                    set_window_long(hwnd, GWL_STYLE, new_style)
+                    ctypes.windll.user32.SetWindowPos(
+                        hwnd, 0, 0, 0, 0, 0,
+                        SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED
+                    )
+                self._custom_chrome_applied = True
+                self.root.after(10, self._ensure_taskbar_visibility)
+            elif not enabled and self._custom_chrome_applied:
+                restore_style = int(self._original_win_style) if self._original_win_style is not None else current_style
+                set_window_long(hwnd, GWL_STYLE, restore_style)
+                ctypes.windll.user32.SetWindowPos(
+                    hwnd, 0, 0, 0, 0, 0,
+                    SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED
+                )
+                self._custom_chrome_applied = False
+        except Exception:
+            pass
+
+    def _get_native_hwnd(self):
+        if os.name != 'nt':
+            return 0
+        try:
+            base_hwnd = int(self.root.winfo_id())
+            GA_ROOT = 2
+            user32 = ctypes.windll.user32
+            root_hwnd = user32.GetAncestor(base_hwnd, GA_ROOT)
+            return int(root_hwnd) if root_hwnd else base_hwnd
+        except Exception:
+            return 0
+
+    def _ensure_taskbar_visibility(self):
+        if not self.custom_titlebar_enabled or os.name != 'nt':
+            return
+        try:
+            hwnd = self._get_native_hwnd()
+            if not hwnd:
+                return
+            get_window_long = getattr(ctypes.windll.user32, "GetWindowLongPtrW", ctypes.windll.user32.GetWindowLongW)
+            set_window_long = getattr(ctypes.windll.user32, "SetWindowLongPtrW", ctypes.windll.user32.SetWindowLongW)
+
+            GWL_EXSTYLE = -20
+            WS_EX_TOOLWINDOW = 0x00000080
+            WS_EX_APPWINDOW = 0x00040000
+            SWP_NOSIZE = 0x0001
+            SWP_NOMOVE = 0x0002
+            SWP_NOZORDER = 0x0004
+            SWP_NOACTIVATE = 0x0010
+            SWP_FRAMECHANGED = 0x0020
+
+            ex_style = int(get_window_long(hwnd, GWL_EXSTYLE))
+            new_style = (ex_style & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW
+            if new_style != ex_style:
+                set_window_long(hwnd, GWL_EXSTYLE, new_style)
+                ctypes.windll.user32.SetWindowPos(
+                    hwnd, 0, 0, 0, 0, 0,
+                    SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED
+                )
+            if not self._taskbar_refresh_done:
+                self._taskbar_refresh_done = True
+                self.root.after(30, self._refresh_taskbar_window)
+        except Exception:
+            pass
+
+    def _refresh_taskbar_window(self):
+        if not self.custom_titlebar_enabled or os.name != 'nt':
+            return
+        try:
+            if str(self.root.state()) == 'withdrawn':
+                return
+            geom = self.root.geometry()
+            self.root.withdraw()
+            self.root.after(20, lambda g=geom: self._restore_from_taskbar_refresh(g))
+        except Exception:
+            pass
+
+    def _restore_from_taskbar_refresh(self, geom):
+        try:
+            self.root.deiconify()
+            self.root.geometry(geom)
+            self.root.lift()
+            self._set_custom_window_chrome(True)
+        except Exception:
+            pass
+
+    def _on_root_map_restore_chrome(self, event):
+        if not self.custom_titlebar_enabled:
+            return
+        if event and event.widget != self.root:
+            return
+        self.root.after(30, lambda: self._set_custom_window_chrome(True))
+        self.root.after(60, self._ensure_taskbar_visibility)
+
+    def _start_native_drag(self, window=None):
+        if not self._use_native_drag or os.name != 'nt':
+            return False
+        try:
+            target = window if window is not None else self.root
+            hwnd = self._get_native_hwnd_for_widget(target)
+            if not hwnd:
+                return False
+            user32 = ctypes.windll.user32
+            user32.ReleaseCapture()
+            user32.SendMessageW(hwnd, 0x00A1, 0x0002, 0)  # WM_NCLBUTTONDOWN + HTCAPTION
+            return True
+        except Exception:
+            return False
+
+    def _begin_window_drag(self, event):
+        if not self.custom_titlebar_enabled:
+            return
+        if self._window_is_maximized or str(self.root.state()) == "zoomed":
+            ratio = (event.x_root - self.root.winfo_x()) / max(1, self.root.winfo_width())
+            ratio = min(max(ratio, 0.1), 0.9)
+            self._toggle_window_maximize()
+            self.root.update_idletasks()
+            nw = self.root.winfo_width()
+            x = int(event.x_root - (nw * ratio))
+            y = max(0, event.y_root - 12)
+            self.root.geometry(f"+{x}+{y}")
+        self._drag_start_x = event.x_root
+        self._drag_start_y = event.y_root
+        self._drag_win_x = self.root.winfo_x()
+        self._drag_win_y = self.root.winfo_y()
+        self._drag_last_x = event.x_root
+        self._drag_last_y = event.y_root
+        self._drag_target_x = self._drag_win_x
+        self._drag_target_y = self._drag_win_y
+        self._drag_active = True
+        self._open_drag_preview()
+
+    def _open_drag_preview(self):
+        if not self._drag_preview_enabled or self._drag_preview_win is not None:
+            return
+        try:
+            self.root.update_idletasks()
+            self._drag_preview_w = max(500, self.root.winfo_width())
+            self._drag_preview_h = max(320, self.root.winfo_height())
+
+            preview = tk.Toplevel(self.root)
+            preview.overrideredirect(True)
+            preview.configure(bg="#0f0f0f")
+            try:
+                preview.attributes("-topmost", True)
+            except Exception:
+                pass
+            preview.geometry(
+                f"{self._drag_preview_w}x{self._drag_preview_h}+{self._drag_target_x}+{self._drag_target_y}"
+            )
+
+            shell = tk.Frame(preview, bg="#0f0f0f", highlightthickness=1, highlightbackground="#2f2f2f")
+            shell.pack(fill="both", expand=True)
+            center = tk.Frame(shell, bg="#0f0f0f")
+            center.place(relx=0.5, rely=0.5, anchor="center")
+
+            logo_path = resource_path("logo.png")
+            if os.path.exists(logo_path):
+                try:
+                    img = Image.open(logo_path).convert("RGBA")
+                    img = img.resize((92, 92), Image.Resampling.LANCZOS)
+                    self._drag_preview_logo = ImageTk.PhotoImage(img)
+                    tk.Label(center, image=self._drag_preview_logo, bg="#0f0f0f").pack(pady=(0, 14))
+                except Exception:
+                    pass
+
+            tk.Label(
+                center,
+                text="NLC",
+                font=("Segoe UI", 22, "bold"),
+                fg="white",
+                bg="#0f0f0f"
+            ).pack()
+            tk.Label(
+                center,
+                text="Drag anywhere you want",
+                font=("Segoe UI", 11),
+                fg="#A0A0A0",
+                bg="#0f0f0f"
+            ).pack(pady=(8, 0))
+
+            self._drag_preview_win = preview
+            self.root.withdraw()
+        except Exception:
+            self._drag_preview_win = None
+
+    def _apply_window_drag_target(self):
+        self._drag_apply_after_id = None
+        if not self._drag_active:
+            return
+        if self._drag_preview_win and self._drag_preview_win.winfo_exists():
+            self._drag_preview_win.geometry(
+                f"{self._drag_preview_w}x{self._drag_preview_h}+{self._drag_target_x}+{self._drag_target_y}"
+            )
+        else:
+            self.root.geometry(f"+{self._drag_target_x}+{self._drag_target_y}")
+
+    def _schedule_window_drag_apply(self):
+        if self._drag_apply_after_id is not None:
+            return
+        self._drag_apply_after_id = self.root.after(8, self._apply_window_drag_target)
+
+    def _do_window_drag(self, event):
+        if not self.custom_titlebar_enabled or not self._drag_active:
+            return
+        target_x = self._drag_win_x + (event.x_root - self._drag_start_x)
+        target_y = self._drag_win_y + (event.y_root - self._drag_start_y)
+        if target_x == self._drag_target_x and target_y == self._drag_target_y:
+            return
+        self._drag_target_x = target_x
+        self._drag_target_y = target_y
+        self._schedule_window_drag_apply()
+
+    def _end_window_drag(self, _event=None):
+        if self._drag_apply_after_id is not None:
+            try:
+                self.root.after_cancel(self._drag_apply_after_id)
+            except Exception:
+                pass
+            self._drag_apply_after_id = None
+        if self._drag_active:
+            if self._drag_preview_win and self._drag_preview_win.winfo_exists():
+                try:
+                    self.root.deiconify()
+                    self.root.geometry(
+                        f"{self._drag_preview_w}x{self._drag_preview_h}+{self._drag_target_x}+{self._drag_target_y}"
+                    )
+                    self._set_custom_window_chrome(True)
+                    self.root.lift()
+                    self.root.focus_force()
+                except Exception:
+                    pass
+                try:
+                    self._drag_preview_win.destroy()
+                except Exception:
+                    pass
+                self._drag_preview_win = None
+                self._drag_preview_logo = None
+            else:
+                self.root.geometry(f"+{self._drag_target_x}+{self._drag_target_y}")
+        elif self._drag_preview_win and self._drag_preview_win.winfo_exists():
+            try:
+                self._drag_preview_win.destroy()
+            except Exception:
+                pass
+            self._drag_preview_win = None
+            self._drag_preview_logo = None
+            try:
+                self.root.deiconify()
+                self._set_custom_window_chrome(True)
+            except Exception:
+                pass
+        self._drag_active = False
+
+    def _bind_drag_widget(self, widget):
+        widget.bind("<ButtonPress-1>", self._begin_window_drag)
+        widget.bind("<B1-Motion>", self._do_window_drag)
+        widget.bind("<ButtonRelease-1>", self._end_window_drag)
+        widget.bind("<Double-Button-1>", lambda _e: self._toggle_window_maximize())
+
+    def _get_work_area(self):
+        if os.name == 'nt':
+            try:
+                class _RECT(ctypes.Structure):
+                    _fields_ = [
+                        ("left", ctypes.c_long),
+                        ("top", ctypes.c_long),
+                        ("right", ctypes.c_long),
+                        ("bottom", ctypes.c_long),
+                    ]
+
+                class _MONITORINFO(ctypes.Structure):
+                    _fields_ = [
+                        ("cbSize", wintypes.DWORD),
+                        ("rcMonitor", _RECT),
+                        ("rcWork", _RECT),
+                        ("dwFlags", wintypes.DWORD),
+                    ]
+
+                hwnd = self._get_native_hwnd()
+                user32 = ctypes.windll.user32
+                MONITOR_DEFAULTTONEAREST = 2
+                monitor = user32.MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)
+                if monitor:
+                    mi = _MONITORINFO()
+                    mi.cbSize = ctypes.sizeof(_MONITORINFO)
+                    ok = user32.GetMonitorInfoW(monitor, ctypes.byref(mi))
+                    if ok:
+                        return (
+                            int(mi.rcWork.left),
+                            int(mi.rcWork.top),
+                            int(mi.rcWork.right - mi.rcWork.left),
+                            int(mi.rcWork.bottom - mi.rcWork.top),
+                        )
+            except Exception:
+                pass
+        return 0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+
+    def _get_current_geometry_tuple(self):
+        return (
+            int(self.root.winfo_x()),
+            int(self.root.winfo_y()),
+            max(1, int(self.root.winfo_width())),
+            max(1, int(self.root.winfo_height())),
+        )
+
+    def _is_geometry_maximized_like(self, geom, tolerance=14):
+        try:
+            wx, wy, ww, wh = self._get_work_area()
+            x, y, w, h = geom
+            right = int(x) + int(w)
+            bottom = int(y) + int(h)
+            work_right = int(wx) + int(ww)
+            work_bottom = int(wy) + int(wh)
+            return (
+                int(x) <= int(wx) + tolerance
+                and int(y) <= int(wy) + tolerance
+                and right >= work_right - tolerance
+                and bottom >= work_bottom - tolerance
+            )
+        except Exception:
+            return False
+
+    def _build_default_windowed_geometry(self):
+        wx, wy, ww, wh = self._get_work_area()
+        dw = max(900, min(1100, int(ww * 0.78)))
+        dh = max(620, min(760, int(wh * 0.78)))
+        dx = wx + max(0, (ww - dw) // 2)
+        dy = wy + max(0, (wh - dh) // 2)
+        return (dx, dy, dw, dh)
+
+    def _set_geometry_tuple(self, geom):
+        x, y, w, h = geom
+        self.root.geometry(f"{max(1, int(w))}x{max(1, int(h))}+{int(x)}+{int(y)}")
+
+    def _cancel_window_animation(self):
+        if self._window_anim_after_id is not None:
+            try:
+                self.root.after_cancel(self._window_anim_after_id)
+            except Exception:
+                pass
+            self._window_anim_after_id = None
+        self._window_animating = False
+        self._destroy_transition_overlay()
+
+    def _animate_window_geometry(self, start_geom, end_geom, duration=150, steps=12, on_done=None, apply_geometry=None, cancel_existing=True):
+        if cancel_existing:
+            self._cancel_window_animation()
+        self._window_animating = True
+        step_delay = max(8, int(duration / max(1, steps)))
+        apply_cb = apply_geometry if apply_geometry is not None else self._set_geometry_tuple
+
+        sx, sy, sw, sh = start_geom
+        ex, ey, ew, eh = end_geom
+
+        def tick(i):
+            t = i / max(1, steps)
+            # Smoothstep easing
+            eased = t * t * (3 - 2 * t)
+            nx = round(sx + (ex - sx) * eased)
+            ny = round(sy + (ey - sy) * eased)
+            nw = round(sw + (ew - sw) * eased)
+            nh = round(sh + (eh - sh) * eased)
+            apply_cb((nx, ny, nw, nh))
+
+            if i >= steps:
+                self._window_animating = False
+                self._window_anim_after_id = None
+                if on_done:
+                    on_done()
+                return
+            self._window_anim_after_id = self.root.after(step_delay, lambda: tick(i + 1))
+
+        tick(0)
+
+    def _destroy_transition_overlay(self):
+        overlay = self._transition_overlay_win
+        self._transition_overlay_win = None
+        if overlay is not None:
+            try:
+                if overlay.winfo_exists():
+                    overlay.destroy()
+            except Exception:
+                pass
+
+    def _set_transition_overlay_geometry(self, geom):
+        overlay = self._transition_overlay_win
+        if overlay is None:
+            self._set_geometry_tuple(geom)
+            return
+        try:
+            if overlay.winfo_exists():
+                x, y, w, h = geom
+                overlay.geometry(f"{max(1, int(w))}x{max(1, int(h))}+{int(x)}+{int(y)}")
+                return
+        except Exception:
+            pass
+        self._set_geometry_tuple(geom)
+
+    def _create_transition_overlay(self, geom, subtitle=""):
+        if os.name != 'nt' or not self.custom_titlebar_enabled:
+            return False
+        try:
+            self._destroy_transition_overlay()
+            x, y, w, h = geom
+            overlay = tk.Toplevel(self.root)
+            overlay.overrideredirect(True)
+            overlay.configure(bg="#0d0d0d")
+            try:
+                overlay.attributes("-topmost", True)
+            except Exception:
+                pass
+            overlay.geometry(f"{max(1, int(w))}x{max(1, int(h))}+{int(x)}+{int(y)}")
+
+            shell = tk.Frame(overlay, bg="#0d0d0d", highlightthickness=1, highlightbackground="#2f2f2f")
+            shell.pack(fill="both", expand=True)
+
+            center = tk.Frame(shell, bg="#0d0d0d")
+            center.place(relx=0.5, rely=0.5, anchor="center")
+            tk.Label(
+                center,
+                text="NLC",
+                font=("Segoe UI", 22, "bold"),
+                fg="white",
+                bg="#0d0d0d"
+            ).pack()
+            if subtitle:
+                tk.Label(
+                    center,
+                    text=subtitle,
+                    font=("Segoe UI", 11),
+                    fg="#A0A0A0",
+                    bg="#0d0d0d"
+                ).pack(pady=(8, 0))
+            self._transition_overlay_win = overlay
+            return True
+        except Exception:
+            self._destroy_transition_overlay()
+            return False
+
+    def _run_transition_with_overlay(self, start_geom, end_geom, duration=150, steps=12, subtitle="", finalize=None, on_done=None):
+        self._cancel_window_animation()
+        overlay_ready = self._create_transition_overlay(start_geom, subtitle=subtitle)
+        apply_cb = self._set_transition_overlay_geometry if overlay_ready else self._set_geometry_tuple
+
+        def finish():
+            try:
+                if finalize:
+                    finalize()
+            finally:
+                self._destroy_transition_overlay()
+                if on_done:
+                    on_done()
+
+        if start_geom == end_geom:
+            finish()
+            return
+
+        self._animate_window_geometry(
+            start_geom,
+            end_geom,
+            duration=duration,
+            steps=steps,
+            on_done=finish,
+            apply_geometry=apply_cb,
+            cancel_existing=False
+        )
+
+    def _toggle_window_maximize(self):
+        if self._drag_active:
+            return
+        if self._window_animating:
+            return
+        current_state = str(self.root.state())
+        current_geom = self._get_current_geometry_tuple()
+        is_geom_max = self._is_geometry_maximized_like(current_geom, tolerance=24)
+        currently_maximized = self._window_is_maximized or current_state == "zoomed" or is_geom_max
+        if currently_maximized:
+            if current_state == "zoomed":
+                self.root.state("normal")
+                self.root.update_idletasks()
+            start = self._get_current_geometry_tuple()
+            target = self._windowed_geometry if self._windowed_geometry else self._last_nonmax_geometry
+            if not target:
+                target = self._build_default_windowed_geometry()
+            if self._is_geometry_maximized_like(target, tolerance=20):
+                target = self._build_default_windowed_geometry()
+
+            def on_restore_done():
+                self._window_is_maximized = False
+                self._windowed_geometry = target
+                self._last_nonmax_geometry = target
+                if hasattr(self, 'window_max_btn'):
+                    self.window_max_btn.config(text="□")
+                self._update_titlebar_controls_offset()
+                self._set_custom_window_chrome(True)
+                self._ensure_taskbar_visibility()
+
+            def finalize_restore():
+                self.root.state("normal")
+                self._set_geometry_tuple(target)
+
+            self._run_transition_with_overlay(
+                start,
+                target,
+                duration=150,
+                steps=12,
+                subtitle="Restoring window",
+                finalize=finalize_restore,
+                on_done=on_restore_done
+            )
+        else:
+            if current_state == "zoomed":
+                self.root.state("normal")
+                self.root.update_idletasks()
+            start = self._get_current_geometry_tuple()
+            if current_state == "normal" and not self._is_geometry_maximized_like(start, tolerance=20):
+                self._windowed_geometry = start
+                self._last_nonmax_geometry = start
+            x, y, w, h = self._get_work_area()
+            target = (x, y, max(1, w), max(1, h))
+
+            def on_max_done():
+                self._window_is_maximized = True
+                if hasattr(self, 'window_max_btn'):
+                    self.window_max_btn.config(text="❐")
+                self._update_titlebar_controls_offset()
+                self._set_custom_window_chrome(True)
+                self._ensure_taskbar_visibility()
+
+            def finalize_max():
+                self.root.state("normal")
+                self._set_geometry_tuple(target)
+
+            self._run_transition_with_overlay(
+                start,
+                target,
+                duration=150,
+                steps=12,
+                subtitle="Maximizing window",
+                finalize=finalize_max,
+                on_done=on_max_done
+            )
+
+    def _minimize_window(self):
+        if self._drag_active:
+            return
+        if str(self.root.state()) == "iconic":
+            return
+        self._cancel_window_animation()
+        start = self._get_current_geometry_tuple()
+        self._pre_minimize_geometry = start
+        self._pre_minimize_was_maximized = bool(self._window_is_maximized or str(self.root.state()) == "zoomed")
+        wx, wy, ww, wh = self._get_work_area()
+        tw = max(280, int(start[2] * 0.45))
+        th = max(180, int(start[3] * 0.45))
+        tx = wx + (ww - tw) // 2
+        ty = wy + wh - th - 10
+        self._pre_minimize_anchor_geometry = (tx, ty, tw, th)
+
+        def finalize_min():
+            self.root.state("iconic")
+
+        self._run_transition_with_overlay(
+            start,
+            self._pre_minimize_anchor_geometry,
+            duration=130,
+            steps=10,
+            subtitle="Minimizing window",
+            finalize=finalize_min
+        )
+
+    def _sync_window_state(self, event=None):
+        if not self.custom_titlebar_enabled:
+            return
+        if event and event.widget != self.root:
+            return
+        if self._drag_active or self._window_animating:
+            return
+        try:
+            state = str(self.root.state())
+            wx, wy, ww, wh = self._get_work_area()
+            rx, ry, rw, rh = self._get_current_geometry_tuple()
+            is_geom_max = self._is_geometry_maximized_like((rx, ry, rw, rh), tolerance=14)
+            is_max = (state == "zoomed") or (state == "normal" and is_geom_max)
+            if is_max != self._window_is_maximized:
+                self._window_is_maximized = is_max
+                if hasattr(self, 'window_max_btn'):
+                    self.window_max_btn.config(text="❐" if is_max else "□")
+                self._update_titlebar_controls_offset()
+            if not self._window_is_maximized and state == "normal" and not is_geom_max:
+                self._windowed_geometry = (rx, ry, rw, rh)
+                self._last_nonmax_geometry = self._windowed_geometry
+        except Exception:
+            pass
+
+    def _update_titlebar_controls_offset(self):
+        if not hasattr(self, 'window_controls_frame'):
+            return
+        try:
+            if self._window_is_maximized:
+                self.window_controls_frame.pack_configure(padx=(0, 10))
+            else:
+                self.window_controls_frame.pack_configure(padx=(0, 10))
+        except Exception:
+            pass
+
+    def setup_window_chrome(self):
+        self.window_content = self.root
+        if not self.custom_titlebar_enabled:
+            return
+
+        shell = tk.Frame(
+            self.root,
+            bg="#141414",
+            highlightthickness=0,
+            bd=0
+        )
+        shell.pack(fill="both", expand=True)
+        self.window_shell = shell
+
+        titlebar = tk.Frame(shell, bg=COLORS.get('tab_bar_bg', '#252526'), height=36)
+        titlebar.pack(fill="x", side="top")
+        titlebar.pack_propagate(False)
+        self.window_titlebar = titlebar
+
+        left = tk.Frame(titlebar, bg=titlebar.cget("bg"))
+        left.pack(side="left", fill="y")
+        badge = tk.Label(left, text="NLC", bg=COLORS.get('play_btn_green', '#2D8F36'),
+                         fg="white", font=("Segoe UI", 8, "bold"), padx=8, pady=4)
+        badge.pack(side="left", padx=(8, 8), pady=6)
+        title_lbl = tk.Label(left, text="New Launcher", font=("Segoe UI", 10, "bold"),
+                             bg=titlebar.cget("bg"), fg=COLORS.get('text_primary', 'white'))
+        title_lbl.pack(side="left")
+
+        self._bind_drag_widget(titlebar)
+        self._bind_drag_widget(left)
+        self._bind_drag_widget(badge)
+        self._bind_drag_widget(title_lbl)
+
+        controls = tk.Frame(titlebar, bg=titlebar.cget("bg"))
+        controls.pack(side="right", fill="y")
+        self.window_controls_frame = controls
+
+        def style_btn(btn, hover_bg, leave_bg=None):
+            normal_bg = leave_bg if leave_bg is not None else titlebar.cget("bg")
+            btn.config(bg=normal_bg, activebackground=hover_bg, activeforeground="white")
+            btn.bind("<Enter>", lambda _e, b=btn, c=hover_bg: b.config(bg=c))
+            btn.bind("<Leave>", lambda _e, b=btn, c=normal_bg: b.config(bg=c))
+
+        btn_font = ("Segoe UI Symbol", 10)
+
+        min_btn = tk.Button(controls, text="—", font=btn_font, fg=COLORS.get('text_primary', 'white'),
+                            bd=0, relief="flat", width=4, cursor="hand2", command=self._minimize_window)
+        min_btn.pack(side="left", fill="y")
+        style_btn(min_btn, "#3A3A3A")
+
+        self.window_max_btn = tk.Button(
+            controls,
+            text="□",
+            font=btn_font,
+            fg=COLORS.get('text_primary', 'white'),
+            bd=0,
+            relief="flat",
+            width=4,
+            cursor="hand2",
+            command=self._toggle_window_maximize
+        )
+        self.window_max_btn.pack(side="left", fill="y")
+        style_btn(self.window_max_btn, "#3A3A3A")
+
+        close_btn = tk.Button(controls, text="✕", font=btn_font, fg="white",
+                              bd=0, relief="flat", width=4, cursor="hand2", command=self._on_close)
+        close_btn.pack(side="left", fill="y")
+        style_btn(close_btn, "#C42B1C")
+
+        self.window_content = tk.Frame(shell, bg=COLORS['main_bg'])
+        self.window_content.pack(fill="both", expand=True)
+
+        self.root.bind("<Map>", self._on_root_map_restore_chrome, add="+")
+        self.root.bind("<Configure>", self._sync_window_state, add="+")
+        self._set_custom_window_chrome(True)
+        self.root.after(120, self._ensure_taskbar_visibility)
+
+    def _get_native_hwnd_for_widget(self, widget):
+        if os.name != 'nt':
+            return 0
+        try:
+            base_hwnd = int(widget.winfo_id())
+            GA_ROOT = 2
+            user32 = ctypes.windll.user32
+            root_hwnd = user32.GetAncestor(base_hwnd, GA_ROOT)
+            return int(root_hwnd) if root_hwnd else base_hwnd
+        except Exception:
+            return 0
+
+    def _apply_custom_toplevel_chrome(self, win, title_text, close_command=None):
+        if not (self.custom_titlebar_enabled and os.name == 'nt'):
+            return win
+        existing_content = getattr(win, "_custom_content_root", None)
+        if existing_content and existing_content.winfo_exists():
+            title_label = getattr(win, "_custom_title_label", None)
+            if title_label and title_label.winfo_exists():
+                try:
+                    title_label.config(text=title_text)
+                except Exception:
+                    pass
+            return existing_content
+
+        try:
+            win.overrideredirect(True)
+        except Exception:
+            return win
+
+        shell = tk.Frame(win, bg="#141414", highlightthickness=0, bd=0)
+        shell.pack(fill="both", expand=True)
+
+        titlebar = tk.Frame(shell, bg=COLORS.get('tab_bar_bg', '#252526'), height=34)
+        titlebar.pack(fill="x", side="top")
+        titlebar.pack_propagate(False)
+
+        left = tk.Frame(titlebar, bg=titlebar.cget("bg"))
+        left.pack(side="left", fill="y")
+        badge = tk.Label(left, text="NLC", bg=COLORS.get('play_btn_green', '#2D8F36'),
+                         fg="white", font=("Segoe UI", 8, "bold"), padx=8, pady=3)
+        badge.pack(side="left", padx=(8, 8), pady=6)
+        title_lbl = tk.Label(left, text=title_text, bg=titlebar.cget("bg"),
+                             fg=COLORS.get('text_primary', 'white'), font=("Segoe UI", 9, "bold"))
+        title_lbl.pack(side="left")
+
+        drag_state = {"native": False, "sx": 0, "sy": 0, "wx": 0, "wy": 0, "lx": 0, "ly": 0}
+
+        def drag_start(event):
+            drag_state["native"] = False
+            drag_state["sx"] = event.x_root
+            drag_state["sy"] = event.y_root
+            drag_state["wx"] = win.winfo_x()
+            drag_state["wy"] = win.winfo_y()
+            drag_state["lx"] = event.x_root
+            drag_state["ly"] = event.y_root
+
+        def drag_move(event):
+            if drag_state["native"]:
+                return
+            dx = event.x_root - drag_state["lx"]
+            dy = event.y_root - drag_state["ly"]
+            if dx == 0 and dy == 0:
+                return
+            win.geometry(f"+{win.winfo_x() + dx}+{win.winfo_y() + dy}")
+            drag_state["lx"] = event.x_root
+            drag_state["ly"] = event.y_root
+
+        for drag_widget in (titlebar, left, badge, title_lbl):
+            drag_widget.bind("<ButtonPress-1>", drag_start)
+            drag_widget.bind("<B1-Motion>", drag_move)
+
+        close_btn = tk.Button(
+            titlebar,
+            text="✕",
+            font=("Segoe UI Symbol", 10),
+            fg="white",
+            bg=titlebar.cget("bg"),
+            bd=0,
+            relief="flat",
+            width=4,
+            cursor="hand2",
+            command=close_command if close_command else win.destroy
+        )
+        close_btn.pack(side="right", fill="y")
+        close_btn.bind("<Enter>", lambda _e: close_btn.config(bg="#C42B1C"))
+        close_btn.bind("<Leave>", lambda _e: close_btn.config(bg=titlebar.cget("bg")))
+
+        body = tk.Frame(shell, bg=win.cget("bg"))
+        body.pack(fill="both", expand=True)
+        try:
+            win._custom_content_root = body  # type: ignore[attr-defined]
+            win._custom_title_label = title_lbl  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        return body
+
+    def _get_toplevel_content_root(self, parent):
+        content_root = getattr(parent, "_custom_content_root", None)
+        if content_root and content_root.winfo_exists():
+            return content_root
+        return parent
+
+    def _clear_toplevel_content(self, parent):
+        content_root = self._get_toplevel_content_root(parent)
+        for widget in content_root.winfo_children():
+            widget.destroy()
+        return content_root
+
+    def _clear_onboarding_focus_bindings(self):
+        for seq, bind_id in getattr(self, "_onboarding_focus_bindings", []):
+            try:
+                self.root.unbind(seq, bind_id)
+            except Exception:
+                pass
+        self._onboarding_focus_bindings = []
+
+    def _cancel_onboarding_raise_burst(self):
+        pass
+
+    def _raise_onboarding_above_launcher(self):
+        wizard = getattr(self, "_onboarding_wizard", None)
+        if not wizard:
+            self._clear_onboarding_focus_bindings()
+            self._cancel_onboarding_raise_burst()
+            return
+        try:
+            if not wizard.winfo_exists():
+                self._onboarding_wizard = None
+                self._clear_onboarding_focus_bindings()
+                self._cancel_onboarding_raise_burst()
+                return
+            if str(self.root.state()) in ("iconic", "withdrawn"):
+                return
+            if str(wizard.state()) == "withdrawn":
+                wizard.deiconify()
+
+            wizard.transient(self.root)
+            wizard.lift(self.root)
+            try:
+                wizard.attributes("-topmost", True)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _schedule_onboarding_raise(self, _event=None):
+        try:
+            self.root.after_idle(self._raise_onboarding_above_launcher)
+        except Exception:
+            pass
+
+    def _bind_onboarding_focus_tracking(self):
+        self._clear_onboarding_focus_bindings()
+        bindings = []
+        for seq in ("<FocusIn>", "<Map>"):
+            try:
+                bind_id = self.root.bind(seq, self._schedule_onboarding_raise, add="+")
+                if bind_id:
+                    bindings.append((seq, bind_id))
+            except Exception:
+                pass
+        self._onboarding_focus_bindings = bindings
+
+    def _focus_main_window(self):
+        try:
+            state = str(self.root.state())
+            if state in ("iconic", "withdrawn"):
+                self.root.deiconify()
+            self.root.lift()
+            if os.name == 'nt':
+                try:
+                    self.root.attributes("-topmost", True)
+                    self.root.after(
+                        40,
+                        lambda: self.root.winfo_exists() and self.root.attributes("-topmost", False)
+                    )
+                except Exception:
+                    pass
+            try:
+                self.root.focus_force()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     def create_layout(self):
+        root_parent = self.window_content if self.window_content is not None else self.root
         # 1. Sidebar (Left) - width 250px for proper menu
-        self.sidebar = tk.Frame(self.root, bg=COLORS['sidebar_bg'], width=200)
+        self.sidebar = tk.Frame(root_parent, bg=COLORS['sidebar_bg'], width=200)
         self.sidebar.pack(side="left", fill="y")
         self.sidebar.pack_propagate(False)
         
@@ -1062,7 +2144,7 @@ class MinecraftLauncher:
         self.create_download_queue_ui()
 
         # 2. Main Content Area
-        self.content_area = tk.Frame(self.root, bg=COLORS['main_bg'])
+        self.content_area = tk.Frame(root_parent, bg=COLORS['main_bg'])
         self.content_area.pack(side="right", fill="both", expand=True)
         
         # 3. Top Navigation Bar
@@ -1110,27 +2192,33 @@ class MinecraftLauncher:
         self.queue_list_frame.pack(fill="x")
 
     def add_download_task(self, name, type_str="file"):
-        # Show container if hidden
+        # Show container if hidden with fade-in effect
         if not self.queue_container.winfo_viewable():
              self.queue_container.pack(side="bottom", fill="x", padx=10, pady=10)
 
         task_id = str(uuid.uuid4())
         
-        # Card style
-        frame = tk.Frame(self.queue_list_frame, bg="#2b2b2b", pady=5, padx=8)
-        frame.pack(fill="x", pady=2)
+        # Card style with subtle border
+        card_bg = "#2b2b2b"
+        border_color = "#3d3d3d"
+        
+        border_frame = tk.Frame(self.queue_list_frame, bg=border_color, padx=1, pady=1)
+        border_frame.pack(fill="x", pady=3)
+        
+        frame = tk.Frame(border_frame, bg=card_bg, pady=6, padx=10)
+        frame.pack(fill="x")
         
         # Title Row
-        top = tk.Frame(frame, bg="#2b2b2b")
+        top = tk.Frame(frame, bg=card_bg)
         top.pack(fill="x")
         
         # Truncate name
         disp_name = (name[:18] + '..') if len(name) > 18 else name
-        tk.Label(top, text=disp_name, font=("Segoe UI", 8, "bold"), fg="white", bg="#2b2b2b", anchor="w").pack(side="left")
+        tk.Label(top, text=disp_name, font=("Segoe UI", 8, "bold"), fg="white", bg=card_bg, anchor="w").pack(side="left")
         
         # Detail Frame (Container)
-        detail_frame = tk.Frame(frame, bg="#2b2b2b")
-        detail_lbl = tk.Label(detail_frame, text="Starting...", font=("Segoe UI", 7), fg="#cccccc", bg="#2b2b2b", anchor="w")
+        detail_frame = tk.Frame(frame, bg=card_bg)
+        detail_lbl = tk.Label(detail_frame, text="Starting...", font=("Segoe UI", 7), fg="#cccccc", bg=card_bg, anchor="w")
         detail_lbl.pack(fill="x")
         
         # Dropdown/Expand capability
@@ -1143,10 +2231,14 @@ class MinecraftLauncher:
                     detail_frame.pack(fill="x", pady=(2,0))
                     btn.config(text="▲")
             
-            btn = tk.Button(top, text="▼", font=("Segoe UI", 6), bg="#2b2b2b", fg="white", 
-                            bd=0, activebackground="#2b2b2b", activeforeground="white",
+            btn = tk.Button(top, text="▼", font=("Segoe UI", 6), bg=card_bg, fg="white", 
+                            bd=0, activebackground="#3d3d3d", activeforeground="white",
                             command=toggle, width=2, cursor="hand2")
             btn.pack(side="right")
+            
+            # Hover effect
+            btn.bind("<Enter>", lambda e: btn.config(bg="#3d3d3d"))
+            btn.bind("<Leave>", lambda e: btn.config(bg=card_bg))
         else:
              # Just show status inline or always hidden? 
              # For single files, maybe no detail frame, or always visible?
@@ -1201,12 +2293,21 @@ class MinecraftLauncher:
         
         data = self.download_tasks[task_id]
         data['pb']['value'] = 100
+        data['detail_lbl'].config(text="Completed ✓", fg="#2ecc71")
+        
+        # Visual feedback - brief green highlight
+        if 'border_frame' in data:
+            data['border_frame'].config(bg="#2ecc71")
+            self.root.after(300, lambda: data['border_frame'].config(bg="#3d3d3d") if task_id in self.download_tasks else None)
         
         # Fade out or remove
         def remove():
             if task_id in self.download_tasks:
                 data = self.download_tasks[task_id]
-                data['frame'].destroy()
+                if 'border_frame' in data:
+                    data['border_frame'].destroy()
+                elif 'frame' in data:
+                    data['frame'].destroy()
                 del self.download_tasks[task_id]
             
             if not self.download_tasks:
@@ -1331,26 +2432,51 @@ class MinecraftLauncher:
             filename = "NewLauncher_Update.exe"
             path = os.path.join(updates_dir, filename)
             
-            # Download
-            r = requests.get(url, stream=True)
-            total_size = int(r.headers.get('content-length', 0))
-            block_size = 1024 * 64 # Larger chunks
-            wrote = 0
-            
-            with open(path, 'wb') as f:
-                for data in r.iter_content(block_size):
-                    wrote += len(data)
-                    f.write(data)
+            self.root.after(0, lambda: self.update_progress_label.config(text="Connecting to update server...") if hasattr(self, "update_progress_label") else None)
+
+            # Download with explicit connect/read timeouts and throttled UI updates.
+            with requests.get(url, stream=True, timeout=(8, 25)) as r:
+                r.raise_for_status()
+                total_size = int(r.headers.get('content-length', 0))
+                block_size = 1024 * 64
+                wrote = 0
+                last_ui_tick = 0.0
+
+                with open(path, 'wb') as f:
+                    for data in r.iter_content(block_size):
+                        if not data:
+                            continue
+                        wrote += len(data)
+                        f.write(data)
+
+                        # Throttle to avoid flooding Tk event queue, which can look like a freeze.
+                        now = time.monotonic()
+                        if (now - last_ui_tick) >= 0.08:
+                            last_ui_tick = now
+                            if total_size > 0:
+                                self.root.after(0, lambda c=wrote, t=total_size: self.update_download_progress(c, t))
+                            else:
+                                self.root.after(
+                                    0,
+                                    lambda b=wrote: self.update_status_lbl.config(
+                                        text=f"Downloading update... {b // (1024 * 1024)} MB",
+                                        fg=COLORS['accent_blue']
+                                    )
+                                )
+
+                # Final UI update to 100% for known-size downloads.
+                if total_size > 0:
                     self.root.after(0, lambda c=wrote, t=total_size: self.update_download_progress(c, t))
             
             # On Finish
             self.root.after(0, self.hide_update_progress)
+            self.root.after(0, lambda: self.update_status_lbl.config(text="Update downloaded.", fg=COLORS['success_green']))
             self.root.after(0, lambda: self._on_download_complete(path))
             
         except Exception as e:
             print(f"Update download failed: {e}")
             self.root.after(0, self.hide_update_progress)
-            self.root.after(0, lambda: self.update_status_lbl.config(text="Update failed.", fg=COLORS['error_red']))
+            self.root.after(0, lambda err=str(e): self.update_status_lbl.config(text=f"Update failed: {err}", fg=COLORS['error_red']))
 
     def _on_download_complete(self, path):
          # Define custom buttons for the dialog
@@ -1385,422 +2511,693 @@ class MinecraftLauncher:
              webbrowser.open("https://github.com/Amne-Dev/New-launcher/releases/latest")
 
     def show_onboarding_wizard(self):
-        """Shows the First Run Wizard"""
+        """Shows the First Run Wizard — modern redesign with step indicators and smooth transitions."""
+        existing_wizard = getattr(self, "_onboarding_wizard", None)
+        if existing_wizard:
+            try:
+                if existing_wizard.winfo_exists():
+                    if str(existing_wizard.state()) == "withdrawn":
+                        existing_wizard.deiconify()
+                    self._schedule_onboarding_raise()
+                    existing_wizard.focus_force()
+                    existing_wizard.grab_set()
+                    return
+            except Exception:
+                self._onboarding_wizard = None
+                self._onboarding_overlay = None
+
         try:
-            # 1. Background Dimming (Overlay)
-            overlay = tk.Toplevel(self.root)
-            overlay.configure(bg="#000000")
-            overlay.withdraw()
-            overlay.overrideredirect(True)
-            overlay.attributes("-alpha", 0.65) # Dark transparency
+            # Clean up stale bindings/windows from prior onboarding implementations.
+            self._clear_onboarding_focus_bindings()
 
-            # Match root geometry exactly
+            stale_overlay = getattr(self, "_onboarding_overlay", None)
+            if stale_overlay and stale_overlay.winfo_exists():
+                try:
+                    stale_overlay.destroy()
+                except Exception:
+                    pass
+            self._onboarding_overlay = None
+
             self.root.update_idletasks()
-            rx, ry = 50, 50
-            rw, rh = 1080, 720
-            try:
-                # Force geometry update
-                rx, ry = self.root.winfo_x(), self.root.winfo_y()
-                rw, rh = self.root.winfo_width(), self.root.winfo_height()
-                overlay.geometry(f"{rw}x{rh}+{rx}+{ry}")
-            except:
-                overlay.geometry(f"1080x720+50+50")
+            rx, ry = self.root.winfo_rootx(), self.root.winfo_rooty()
+            rw, rh = self.root.winfo_width(), self.root.winfo_height()
 
-            overlay.deiconify()
+            # ── Wizard Window ──
+            wizard = tk.Toplevel(self.root)
+            wizard.withdraw()
+            wizard.title("Welcome")
+            wizard.configure(bg=COLORS['main_bg'])
+            wizard.transient(self.root)
+            wizard.resizable(False, False)
 
-            # 2. Wizard Modal
-            wizard = tk.Toplevel(overlay) # Parenting to overlay keeps z-order (mostly)
-            wizard.withdraw() 
-            wizard.title("Welcome Setup")
-            wizard.configure(bg=COLORS['card_bg'])
-            wizard.overrideredirect(True) # Borderless
-            
-            # Dimensions
-            w = 700
-            h = 500
-            
-            # Center relative to the overlay/root
-            try:
-                x = rx + (rw // 2) - (w // 2)
-                y = ry + (rh // 2) - (h // 2)
-            except:
-                x, y = 100, 100
-                
-            wizard.geometry(f"{w}x{h}+{x}+{y}")
-            
+            wiz_w, wiz_h = 660, 520
+            x = rx + (rw // 2) - (wiz_w // 2)
+            y = ry + (rh // 2) - (wiz_h // 2)
+            wizard.geometry(f"{wiz_w}x{wiz_h}+{x}+{y}")
+
             wizard.deiconify()
-            wizard.lift()
-            wizard.attributes("-topmost", True)
+            wizard.lift(self.root)
             wizard.focus_force()
             wizard.grab_set()
+            self._onboarding_wizard = wizard
 
-            # Branding Header
-            branding = tk.Frame(wizard, bg="#212121", height=40)
-            branding.pack(fill="x", side="top")
-            branding.pack_propagate(False)
+            def cleanup_onboarding_state(*_):
+                if getattr(self, "_onboarding_wizard", None) is wizard:
+                    self._onboarding_wizard = None
+                    self._clear_onboarding_focus_bindings()
+                    self._cancel_onboarding_raise_burst()
+            wizard.bind("<Destroy>", cleanup_onboarding_state, add="+")
+            wizard.bind("<FocusIn>", self._schedule_onboarding_raise, add="+")
 
-            tk.Label(branding, text="NEW LAUNCHER SETUP", font=("Segoe UI", 9, "bold"), 
-                     bg="#212121", fg="#808080").pack(side="left", padx=20)
+            wizard_root = self._apply_custom_toplevel_chrome(wizard, "Welcome Setup")
+            self._bind_onboarding_focus_tracking()
+            self._schedule_onboarding_raise()
 
-            # --- Container ---
-            content_frame = tk.Frame(wizard, bg=COLORS['card_bg'])
-            content_frame.pack(fill="both", expand=True)
-            
+            # ── Rounded border effect ──
+            border_frame = tk.Frame(wizard_root, bg="#3A3A3A", padx=1, pady=1)
+            border_frame.pack(fill="both", expand=True)
+            inner = tk.Frame(border_frame, bg=COLORS['main_bg'])
+            inner.pack(fill="both", expand=True)
+
+            # ── Step indicator (top bar) ──
+            STEPS = ["Account", "Preferences", "Theme", "Ready"]
+            step_bar = tk.Frame(inner, bg="#1A1A1A", height=52)
+            step_bar.pack(fill="x")
+            step_bar.pack_propagate(False)
+
+            # Logo/title at left
+            tk.Label(step_bar, text="NEW LAUNCHER", font=("Segoe UI", 9, "bold"),
+                     bg="#1A1A1A", fg="#606060").pack(side="left", padx=18)
+
+            # Step dots at right
+            dots_frame = tk.Frame(step_bar, bg="#1A1A1A")
+            dots_frame.pack(side="right", padx=18)
+            dot_labels = []
+            for i, step_name in enumerate(STEPS):
+                dot_f = tk.Frame(dots_frame, bg="#1A1A1A")
+                dot_f.pack(side="left", padx=6)
+                dot = tk.Label(dot_f, text="●", font=("Segoe UI", 8),
+                              bg="#1A1A1A", fg="#404040")
+                dot.pack()
+                lbl = tk.Label(dot_f, text=step_name, font=("Segoe UI", 7),
+                              bg="#1A1A1A", fg="#505050")
+                lbl.pack()
+                dot_labels.append((dot, lbl))
+
+            def update_dots(active_idx):
+                for i, (dot, lbl) in enumerate(dot_labels):
+                    if i < active_idx:
+                        dot.config(fg=COLORS.get('success_green', '#2D8F36'))
+                        lbl.config(fg=COLORS.get('success_green', '#2D8F36'))
+                    elif i == active_idx:
+                        dot.config(fg="white")
+                        lbl.config(fg="white")
+                    else:
+                        dot.config(fg="#404040")
+                        lbl.config(fg="#505050")
+
+            # ── Content area ──
+            content = tk.Frame(inner, bg=COLORS['main_bg'])
+            content.pack(fill="both", expand=True)
+
             self.wizard_account_data = {}
 
-            # --- Helpers ---
             def clear_page():
-                for widget in content_frame.winfo_children(): widget.destroy()
+                for w in content.winfo_children():
+                    w.destroy()
 
-            # --- Step 0: Account Type ---
-            def show_step_0_account_type():
+            def make_btn(parent, text, bg_color, command, width=20, font_size=10, bold=True):
+                """Utility to create consistent styled buttons."""
+                weight = "bold" if bold else ""
+                b = tk.Button(parent, text=text, font=("Segoe UI", font_size, weight),
+                             bg=bg_color, fg="white", activebackground=bg_color,
+                             activeforeground="white", relief="flat", cursor="hand2",
+                             command=command, bd=0)
+                b.config(padx=16, pady=8)
+                return b
+
+            def make_link(parent, text, command):
+                """Utility to create text-link buttons."""
+                l = tk.Label(parent, text=text, font=("Segoe UI", 9),
+                            bg=COLORS['main_bg'], fg="#808080", cursor="hand2")
+                l.bind("<Button-1>", lambda e: command())
+                l.bind("<Enter>", lambda e: l.config(fg="white"))
+                l.bind("<Leave>", lambda e: l.config(fg="#808080"))
+                return l
+
+            # ═══════════════════════════════════════════════════
+            # STEP 0 — Account Type Selection
+            # ═══════════════════════════════════════════════════
+            def show_step_account_type():
                 clear_page()
-                tk.Label(content_frame, text="Welcome to New Launcher", font=("Segoe UI", 20, "bold"), 
-                         fg="white", bg=COLORS['card_bg']).pack(pady=(50, 10))
-                tk.Label(content_frame, text="How do you want to play today?", font=("Segoe UI", 12), 
-                         fg=COLORS['text_secondary'], bg=COLORS['card_bg']).pack(pady=(0, 40))
+                update_dots(0)
 
-                btn_frame = tk.Frame(content_frame, bg=COLORS['card_bg'], padx=10, pady=10)
-                btn_frame.pack()
+                # Spacer
+                tk.Frame(content, bg=COLORS['main_bg'], height=30).pack()
 
-                def make_choice_btn(text, color, icon_char, cmd):
-                    f = tk.Frame(btn_frame, bg=COLORS['card_bg'], padx=10, pady=10)
-                    f.pack(side="left", padx=10)
-                    btn = tk.Button(f, text=f"{icon_char}\n\n{text}", font=("Segoe UI", 11, "bold"),
-                                   bg=color, fg="white", width=18, height=8, relief="flat", cursor="hand2",
-                                   command=cmd)
-                    btn.pack()
+                tk.Label(content, text="Welcome to New Launcher",
+                        font=("Segoe UI", 22, "bold"), fg="white",
+                        bg=COLORS['main_bg']).pack()
+                tk.Label(content, text="Choose how you want to sign in",
+                        font=("Segoe UI", 11), fg="#909090",
+                        bg=COLORS['main_bg']).pack(pady=(6, 30))
 
-                make_choice_btn("Microsoft", "#00A4EF", "⊞", show_step_1_microsoft)
-                make_choice_btn("Ely.by", "#3498DB", "☁", show_step_1_elyby)
-                make_choice_btn("Offline", "#454545", "👤", show_step_1_offline)
+                # Card container
+                cards = tk.Frame(content, bg=COLORS['main_bg'])
+                cards.pack()
 
-            # --- Step 1: Login Details ---
-            def show_step_1_microsoft():
+                options = [
+                    ("Microsoft", "#0078D7", "Official Mojang account", show_step_microsoft),
+                    ("Ely.by", "#3498DB", "Third-party auth server", show_step_elyby),
+                    ("Offline", "#555555", "Play without authentication", show_step_offline),
+                ]
+
+                for name, color, desc, cmd in options:
+                    card = tk.Frame(cards, bg=COLORS['card_bg'], cursor="hand2",
+                                   highlightbackground="#404040", highlightthickness=1)
+                    card.pack(side="left", padx=8, ipadx=0, ipady=0)
+                    card.config(width=175, height=140)
+                    card.pack_propagate(False)
+
+                    # Color accent strip at top
+                    strip = tk.Frame(card, bg=color, height=4)
+                    strip.pack(fill="x")
+
+                    # Inner content
+                    inner_card = tk.Frame(card, bg=COLORS['card_bg'], cursor="hand2")
+                    inner_card.pack(fill="both", expand=True, padx=16, pady=14)
+
+                    tk.Label(inner_card, text=name, font=("Segoe UI", 13, "bold"),
+                            fg="white", bg=COLORS['card_bg'], cursor="hand2",
+                            anchor="w").pack(anchor="w")
+                    tk.Label(inner_card, text=desc, font=("Segoe UI", 8),
+                            fg="#808080", bg=COLORS['card_bg'], cursor="hand2",
+                            anchor="w", wraplength=140).pack(anchor="w", pady=(4, 0))
+
+                    # Hover + click
+                    def on_enter(e, c=card):
+                        c.config(highlightbackground="#808080")
+                    def on_leave(e, c=card):
+                        c.config(highlightbackground="#404040")
+                    def on_click(e, fn=cmd):
+                        fn()
+
+                    for w in [card, inner_card] + inner_card.winfo_children():
+                        w.bind("<Enter>", on_enter)
+                        w.bind("<Leave>", on_leave)
+                        w.bind("<Button-1>", on_click)
+                    card.bind("<Enter>", on_enter)
+                    card.bind("<Leave>", on_leave)
+                    card.bind("<Button-1>", on_click)
+
+            # ═══════════════════════════════════════════════════
+            # STEP 1a — Microsoft Login
+            # ═══════════════════════════════════════════════════
+            def show_step_microsoft():
                 clear_page()
-                tk.Label(content_frame, text="Microsoft Login", font=("Segoe UI", 18, "bold"), fg="white", bg=COLORS['card_bg']).pack(pady=(20, 10))
-                
-                status_lbl = tk.Label(content_frame, text="Initializing...", font=("Segoe UI", 10), 
-                                     bg=COLORS['card_bg'], fg=COLORS['text_secondary'], wraplength=450)
-                status_lbl.pack(pady=10)
-                
-                code_lbl = tk.Label(content_frame, text="", font=("Segoe UI", 24, "bold"), 
-                                   bg=COLORS['card_bg'], fg=COLORS['success_green'])
-                code_lbl.pack(pady=10)
-                
-                url_lbl = tk.Label(content_frame, text="", font=("Segoe UI", 11, "underline"), 
-                                  bg=COLORS['card_bg'], fg="#3498DB", cursor="hand2")
-                url_lbl.pack(pady=5)
-                
-                copy_btn = tk.Button(content_frame, text="Copy Code", font=("Segoe UI", 10),
-                         bg=COLORS['input_bg'], fg=COLORS['text_primary'], relief="flat", state="disabled")
-                copy_btn.pack(pady=10)
-                
-                tk.Button(content_frame, text="Cancel", font=("Segoe UI", 10),
-                         bg=COLORS['card_bg'], fg=COLORS['text_secondary'], relief="flat", cursor="hand2",
-                         command=show_step_0_account_type).pack(pady=20)
-                         
-                def open_url(e):
-                    url = url_lbl.cget("text")
-                    if url: webbrowser.open(url)
-                url_lbl.bind("<Button-1>", open_url)
+                update_dots(0)
 
-                # Threaded Login Logic
+                tk.Frame(content, bg=COLORS['main_bg'], height=20).pack()
+                tk.Label(content, text="Microsoft Account",
+                        font=("Segoe UI", 18, "bold"), fg="white",
+                        bg=COLORS['main_bg']).pack()
+
+                status_lbl = tk.Label(content, text="Connecting to Microsoft...",
+                                     font=("Segoe UI", 10), bg=COLORS['main_bg'],
+                                     fg="#909090", wraplength=450)
+                status_lbl.pack(pady=(12, 8))
+
+                # Code display box
+                code_frame = tk.Frame(content, bg=COLORS['card_bg'],
+                                     highlightbackground="#404040", highlightthickness=1)
+                code_frame.pack(pady=10, ipadx=30, ipady=12)
+
+                code_lbl = tk.Label(code_frame, text="--------",
+                                   font=("Consolas", 28, "bold"), bg=COLORS['card_bg'],
+                                   fg="white")
+                code_lbl.pack()
+
+                url_lbl = tk.Label(content, text="", font=("Segoe UI", 10, "underline"),
+                                  bg=COLORS['main_bg'], fg="#3498DB", cursor="hand2")
+                url_lbl.pack(pady=4)
+
+                btn_row = tk.Frame(content, bg=COLORS['main_bg'])
+                btn_row.pack(pady=12)
+
+                copy_btn = make_btn(btn_row, "Copy Code", "#404040",
+                                   lambda: None, font_size=9, bold=False)
+                copy_btn.pack(side="left", padx=6)
+                copy_btn.config(state="disabled")
+
+                make_link(btn_row, "Cancel", show_step_account_type).pack(side="left", padx=12)
+
+                url_lbl.bind("<Button-1>", lambda e: webbrowser.open(url_lbl.cget("text")) if url_lbl.cget("text") else None)
+
+                # Instructions
+                inst_lbl = tk.Label(content, text="",
+                                   font=("Segoe UI", 9), bg=COLORS['main_bg'],
+                                   fg="#707070", justify="center")
+                inst_lbl.pack(pady=(8, 0))
+
                 def run_flow():
                     try:
                         client_id = MSA_CLIENT_ID
                         scope = "XboxLive.signin offline_access"
                         if not wizard.winfo_exists(): return
-                        status_lbl.config(text="Contacting Microsoft...")
-                        
+                        status_lbl.config(text="Requesting device code...")
+
                         r = requests.post("https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode",
                                           data={"client_id": client_id, "scope": scope})
                         if r.status_code != 200:
-                            if wizard.winfo_exists(): status_lbl.config(text=f"Error: {r.text}", fg=COLORS['error_red'])
+                            if wizard.winfo_exists():
+                                status_lbl.config(text=f"Error: {r.text}", fg=COLORS['error_red'])
                             return
-                        
+
                         data = r.json()
                         user_code = data.get("user_code")
                         verification_uri = data.get("verification_uri")
                         device_code = data.get("device_code")
                         interval = data.get("interval", 5)
-                        
+
                         if wizard.winfo_exists():
                             code_lbl.config(text=user_code)
                             url_lbl.config(text=verification_uri)
-                            status_lbl.config(text=f"1. Click link above\n2. Enter code\n3. Login to Microsoft")
-                            copy_btn.config(state="normal", command=lambda: self.root.clipboard_clear() or self.root.clipboard_append(user_code) or self.root.update())
-                            
-                        # Poll
+                            status_lbl.config(text="Enter the code above at the link below")
+                            inst_lbl.config(text="1. Click the link  2. Paste the code  3. Sign in with Microsoft")
+                            copy_btn.config(state="normal",
+                                command=lambda: (self.root.clipboard_clear(),
+                                                 self.root.clipboard_append(user_code),
+                                                 copy_btn.config(text="Copied!", fg="#2D8F36"),
+                                                 self.root.after(1500, lambda: copy_btn.config(text="Copy Code", fg="white") if copy_btn.winfo_exists() else None)))
+
                         while wizard.winfo_exists():
                             time.sleep(interval)
                             r_poll = requests.post("https://login.microsoftonline.com/consumers/oauth2/v2.0/token",
-                                                  data={"grant_type": "device_code", "client_id": client_id, "device_code": device_code})
-                            
+                                data={"grant_type": "device_code", "client_id": client_id, "device_code": device_code})
+
                             if r_poll.status_code == 200:
-                                # Success
                                 token_data = r_poll.json()
-                                # Authenticate MC
-                                status_lbl.config(text="Authenticating with Xbox Live...")
                                 access_token = token_data["access_token"]
                                 refresh_token = token_data["refresh_token"]
-                                
+
+                                if wizard.winfo_exists(): status_lbl.config(text="Authenticating with Xbox Live...")
                                 xbl = minecraft_launcher_lib.microsoft_account.authenticate_with_xbl(access_token)
-                                status_lbl.config(text="Authenticating with XSTS...")
+
+                                if wizard.winfo_exists(): status_lbl.config(text="Authenticating with XSTS...")
                                 xsts = minecraft_launcher_lib.microsoft_account.authenticate_with_xsts(xbl["Token"])
-                                
-                                status_lbl.config(text="Authenticating with Minecraft...")
-                                mc_auth = minecraft_launcher_lib.microsoft_account.authenticate_with_minecraft(xbl["DisplayClaims"]["xui"][0]["uhs"], xsts["Token"])
-                                
-                                status_lbl.config(text="Fetching Profile...")
+
+                                if wizard.winfo_exists(): status_lbl.config(text="Authenticating with Minecraft...")
+                                mc_auth = minecraft_launcher_lib.microsoft_account.authenticate_with_minecraft(
+                                    xbl["DisplayClaims"]["xui"][0]["uhs"], xsts["Token"])
+
+                                if wizard.winfo_exists(): status_lbl.config(text="Fetching profile...")
                                 profile = minecraft_launcher_lib.microsoft_account.get_profile(mc_auth["access_token"])
-                                
-                                # Save
+
                                 self.wizard_account_data = {
-                                    "name": profile["name"],
-                                    "uuid": profile["id"],
-                                    "type": "microsoft",
-                                    "skin_path": "",
+                                    "name": profile["name"], "uuid": profile["id"],
+                                    "type": "microsoft", "skin_path": "",
                                     "access_token": mc_auth["access_token"],
                                     "refresh_token": refresh_token
                                 }
-                                save_account_and_continue()
+                                if wizard.winfo_exists():
+                                    wizard.after(0, save_account_and_continue)
                                 break
-                            
+
                             err = r_poll.json()
                             err_code = err.get("error")
                             if err_code == "authorization_pending": continue
                             elif err_code == "slow_down": interval += 2
                             elif err_code == "expired_token":
-                                if wizard.winfo_exists(): status_lbl.config(text="Code expired.", fg=COLORS['error_red'])
+                                if wizard.winfo_exists():
+                                    status_lbl.config(text="Code expired. Please try again.", fg=COLORS['error_red'])
                                 break
                             else:
-                                if wizard.winfo_exists(): status_lbl.config(text=f"Error: {err.get('error_description')}", fg=COLORS['error_red'])
+                                if wizard.winfo_exists():
+                                    status_lbl.config(text=f"Error: {err.get('error_description', 'Unknown')}", fg=COLORS['error_red'])
                                 break
                     except Exception as e:
                         print(f"Wizard Login Error: {e}")
-                        if wizard.winfo_exists(): status_lbl.config(text=f"Error: {e}", fg=COLORS['error_red'])
+                        if wizard.winfo_exists():
+                            status_lbl.config(text=f"Error: {e}", fg=COLORS['error_red'])
 
                 threading.Thread(target=run_flow, daemon=True).start()
 
-            def show_step_1_offline():
+            # ═══════════════════════════════════════════════════
+            # STEP 1b — Offline
+            # ═══════════════════════════════════════════════════
+            def show_step_offline():
                 clear_page()
-                tk.Label(content_frame, text="Offline Setup", font=("Segoe UI", 18, "bold"), fg="white", bg=COLORS['card_bg']).pack(pady=(40, 20))
-                
-                form = tk.Frame(content_frame, bg=COLORS['card_bg'])
-                form.pack(fill="x", padx=150)
-                
-                tk.Label(form, text="Username", font=("Segoe UI", 10), fg=COLORS['text_secondary'], bg=COLORS['card_bg']).pack(anchor="w")
+                update_dots(0)
+
+                tk.Frame(content, bg=COLORS['main_bg'], height=40).pack()
+                tk.Label(content, text="Offline Mode",
+                        font=("Segoe UI", 18, "bold"), fg="white",
+                        bg=COLORS['main_bg']).pack()
+                tk.Label(content, text="Enter a username to play without authentication",
+                        font=("Segoe UI", 10), fg="#808080",
+                        bg=COLORS['main_bg']).pack(pady=(6, 30))
+
+                form = tk.Frame(content, bg=COLORS['main_bg'])
+                form.pack(fill="x", padx=180)
+
+                tk.Label(form, text="USERNAME", font=("Segoe UI", 8, "bold"),
+                        fg="#707070", bg=COLORS['main_bg']).pack(anchor="w")
                 name_var = tk.StringVar(value="Player")
-                e = tk.Entry(form, textvariable=name_var, font=("Segoe UI", 12), bg=COLORS['input_bg'], fg="white", relief="flat", bd=5)
-                e.pack(fill="x", ipady=5, pady=(5, 20))
+                e = tk.Entry(form, textvariable=name_var, font=("Segoe UI", 12),
+                            bg=COLORS['input_bg'], fg="white", relief="flat",
+                            insertbackground="white", bd=0)
+                e.pack(fill="x", ipady=8, pady=(4, 0))
+                # Underline accent
+                tk.Frame(form, bg="#555555", height=2).pack(fill="x")
                 e.focus_set()
 
-                def next_step():
+                btn_frame = tk.Frame(form, bg=COLORS['main_bg'])
+                btn_frame.pack(fill="x", pady=(24, 0))
+
+                def do_next():
                     name = name_var.get().strip() or "Player"
-                    self.wizard_account_data = {"name": name, "type": "offline", "skin_path": "", "uuid": ""}
+                    self.wizard_account_data = {
+                        "name": name, "type": "offline",
+                        "skin_path": "", "uuid": ""
+                    }
                     save_account_and_continue()
 
-                tk.Button(form, text="Continue", font=("Segoe UI", 11, "bold"), bg=COLORS['success_green'], fg="white", 
-                          relief="flat", cursor="hand2", command=next_step).pack(fill="x", pady=10)
-                tk.Button(form, text="Back", font=("Segoe UI", 10), bg=COLORS['card_bg'], fg=COLORS['text_secondary'], 
-                          relief="flat", cursor="hand2", command=show_step_0_account_type).pack()
+                make_btn(btn_frame, "Continue", COLORS.get('success_green', '#2D8F36'),
+                        do_next).pack(fill="x")
+                make_link(btn_frame, "← Back", show_step_account_type).pack(anchor="w", pady=(12, 0))
 
-            def show_step_1_elyby():
+            # ═══════════════════════════════════════════════════
+            # STEP 1c — Ely.by
+            # ═══════════════════════════════════════════════════
+            def show_step_elyby():
                 clear_page()
-                tk.Label(content_frame, text="Ely.by Login", font=("Segoe UI", 18, "bold"), fg="white", bg=COLORS['card_bg']).pack(pady=(40, 20))
-                form = tk.Frame(content_frame, bg=COLORS['card_bg'])
-                form.pack(fill="x", padx=150)
-                
-                tk.Label(form, text="Username / Email", font=("Segoe UI", 9), bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(anchor="w")
-                ue = tk.Entry(form, font=("Segoe UI", 10), bg=COLORS['input_bg'], fg=COLORS['text_primary'], relief="flat")
-                ue.pack(fill="x", ipady=5, pady=(5, 10))
-                
-                tk.Label(form, text="Password", font=("Segoe UI", 9), bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(anchor="w")
-                pe = tk.Entry(form, font=("Segoe UI", 10), bg=COLORS['input_bg'], fg=COLORS['text_primary'], relief="flat", show="*")
-                pe.pack(fill="x", ipady=5, pady=(5, 20))
+                update_dots(0)
+
+                tk.Frame(content, bg=COLORS['main_bg'], height=30).pack()
+                tk.Label(content, text="Ely.by Login",
+                        font=("Segoe UI", 18, "bold"), fg="white",
+                        bg=COLORS['main_bg']).pack()
+                tk.Label(content, text="Sign in with your Ely.by credentials",
+                        font=("Segoe UI", 10), fg="#808080",
+                        bg=COLORS['main_bg']).pack(pady=(6, 24))
+
+                form = tk.Frame(content, bg=COLORS['main_bg'])
+                form.pack(fill="x", padx=180)
+
+                tk.Label(form, text="USERNAME / EMAIL", font=("Segoe UI", 8, "bold"),
+                        fg="#707070", bg=COLORS['main_bg']).pack(anchor="w")
+                ue = tk.Entry(form, font=("Segoe UI", 11), bg=COLORS['input_bg'],
+                             fg="white", relief="flat", insertbackground="white", bd=0)
+                ue.pack(fill="x", ipady=7, pady=(4, 0))
+                tk.Frame(form, bg="#555555", height=2).pack(fill="x")
+
+                tk.Frame(form, bg=COLORS['main_bg'], height=14).pack()
+
+                tk.Label(form, text="PASSWORD", font=("Segoe UI", 8, "bold"),
+                        fg="#707070", bg=COLORS['main_bg']).pack(anchor="w")
+                pe = tk.Entry(form, font=("Segoe UI", 11), bg=COLORS['input_bg'],
+                             fg="white", relief="flat", show="●",
+                             insertbackground="white", bd=0)
+                pe.pack(fill="x", ipady=7, pady=(4, 0))
+                tk.Frame(form, bg="#555555", height=2).pack(fill="x")
+
+                err_lbl = tk.Label(form, text="", font=("Segoe UI", 9),
+                                  bg=COLORS['main_bg'], fg=COLORS['error_red'])
+                err_lbl.pack(anchor="w", pady=(8, 0))
+
+                ue.focus_set()
+
+                btn_frame = tk.Frame(form, bg=COLORS['main_bg'])
+                btn_frame.pack(fill="x", pady=(16, 0))
 
                 def do_auth():
-                    user_input = ue.get()
-                    res = ElyByAuth.authenticate(user_input.strip(), pe.get().strip())
+                    user_input = ue.get().strip()
+                    pw = pe.get().strip()
+                    if not user_input or not pw:
+                        err_lbl.config(text="Please fill in both fields")
+                        return
+                    err_lbl.config(text="")
+                    res = ElyByAuth.authenticate(user_input, pw)
                     if "error" in res:
-                        custom_showerror("Error", res['error'], parent=wizard)
+                        err_lbl.config(text=res['error'])
                     else:
                         prof = cast(dict, res.get("selectedProfile", {}))
                         name = prof.get("name", user_input)
                         self.wizard_account_data = {
-                            "name": name, "type": "ely.by", "uuid": prof.get("id", ""), 
-                             # We'd fetch skin here properly in bg, but for onboarding simplicity just set basic info
-                            "skin_path": "" 
+                            "name": name, "type": "ely.by",
+                            "uuid": prof.get("id", ""),
+                            "skin_path": ""
                         }
-                        # Trigger background skin fetch if possible, or just continue
                         save_account_and_continue()
 
-                tk.Button(form, text="Login", font=("Segoe UI", 11, "bold"), bg="#3498DB", fg="white", 
-                          relief="flat", cursor="hand2", command=do_auth).pack(fill="x", pady=10)
-                tk.Button(form, text="Back", font=("Segoe UI", 10), bg=COLORS['card_bg'], fg=COLORS['text_secondary'], 
-                          relief="flat", cursor="hand2", command=show_step_0_account_type).pack()
+                make_btn(btn_frame, "Sign In", "#3498DB", do_auth).pack(fill="x")
+                make_link(btn_frame, "← Back", show_step_account_type).pack(anchor="w", pady=(12, 0))
 
-            def show_step_success(next_callback, message="Account Added Successfully!"):
-                clear_page()
-                tk.Label(content_frame, text="Success", font=("Segoe UI", 20, "bold"), 
-                         fg=COLORS['success_green'], bg=COLORS['card_bg']).pack(pady=(50, 10))
-                         
-                tk.Label(content_frame, text=message, font=("Segoe UI", 12), 
-                         fg="white", bg=COLORS['card_bg']).pack(pady=(0, 40))
-                
-                tk.Button(content_frame, text="Next Step", font=("Segoe UI", 12, "bold"), 
-                          bg=COLORS['play_btn_green'], fg="white", relief="flat", cursor="hand2", 
-                          width=20, pady=5, command=next_callback).pack()
-
+            # ═══════════════════════════════════════════════════
+            # Save & transition
+            # ═══════════════════════════════════════════════════
             def save_account_and_continue():
-                # Correctly add to list instead of always overwriting index 0
-                is_default_steve = False
+                is_default = False
                 if len(self.profiles) == 1:
-                     p = self.profiles[0]
-                     # Check if it is the placeholder Steve
-                     if p.get("name") == "Steve" and p.get("type") == "offline" and not p.get("uuid"):
-                         is_default_steve = True
-                
-                if not self.profiles or is_default_steve:
+                    p = self.profiles[0]
+                    if p.get("name") == "Steve" and p.get("type") == "offline" and not p.get("uuid"):
+                        is_default = True
+
+                if not self.profiles or is_default:
                     self.profiles = [self.wizard_account_data]
                     self.current_profile_index = 0
                 else:
                     self.profiles.append(self.wizard_account_data)
                     self.current_profile_index = len(self.profiles) - 1
-                    
+
                 self.save_config(sync_ui=False)
                 self.update_active_profile()
-                
-                # Show success page instead of jumping
-                show_step_success(show_step_preference_setup, "Account set up successfully!")
+                show_step_preferences()
 
-            def show_step_preference_setup():
+            # ═══════════════════════════════════════════════════
+            # STEP 2 — Preferences
+            # ═══════════════════════════════════════════════════
+            def show_step_preferences():
                 clear_page()
-                tk.Label(content_frame, text="Setup Preferences", font=("Segoe UI", 18, "bold"), fg="white", bg=COLORS['card_bg']).pack(pady=(40, 20))
-                
-                form = tk.Frame(content_frame, bg=COLORS['card_bg'])
-                form.pack(fill="x", padx=120)
-                
-                # RAM
-                tk.Label(form, text="Memory Allocation (MB)", font=("Segoe UI", 10, "bold"), fg=COLORS['text_secondary'], bg=COLORS['card_bg']).pack(anchor="w")
-                
+                update_dots(1)
+
+                tk.Frame(content, bg=COLORS['main_bg'], height=30).pack()
+                tk.Label(content, text="Game Preferences",
+                        font=("Segoe UI", 18, "bold"), fg="white",
+                        bg=COLORS['main_bg']).pack()
+                tk.Label(content, text="Configure memory and launcher behavior",
+                        font=("Segoe UI", 10), fg="#808080",
+                        bg=COLORS['main_bg']).pack(pady=(6, 24))
+
+                form = tk.Frame(content, bg=COLORS['main_bg'])
+                form.pack(fill="x", padx=100)
+
+                # RAM section
+                ram_card = tk.Frame(form, bg=COLORS['card_bg'], padx=18, pady=14)
+                ram_card.pack(fill="x", pady=(0, 16))
+
+                ram_header = tk.Frame(ram_card, bg=COLORS['card_bg'])
+                ram_header.pack(fill="x")
+                tk.Label(ram_header, text="Memory Allocation",
+                        font=("Segoe UI", 11, "bold"), fg="white",
+                        bg=COLORS['card_bg']).pack(side="left")
+                ram_val_lbl = tk.Label(ram_header, text=f"{self.ram_allocation} MB",
+                                      font=("Segoe UI", 10), fg=COLORS.get('success_green', '#2D8F36'),
+                                      bg=COLORS['card_bg'])
+                ram_val_lbl.pack(side="right")
+
                 ram_v = tk.IntVar(value=self.ram_allocation)
-                tk.Scale(form, from_=1024, to=16384, orient="horizontal", resolution=512,
-                        variable=ram_v, showvalue=True, bg=COLORS['card_bg'], fg="white", 
-                        troughcolor=COLORS['input_bg'], highlightthickness=0).pack(fill="x", pady=(5, 30))
+
+                def on_ram_change(val):
+                    ram_val_lbl.config(text=f"{int(float(val))} MB")
+
+                ram_scale = tk.Scale(ram_card, from_=1024, to=16384, orient="horizontal",
+                                    resolution=512, variable=ram_v, showvalue=False,
+                                    bg=COLORS['card_bg'], fg="white",
+                                    troughcolor=COLORS['input_bg'], highlightthickness=0,
+                                    activebackground=COLORS.get('success_green', '#2D8F36'),
+                                    command=on_ram_change, length=400)
+                ram_scale.pack(fill="x", pady=(8, 0))
 
                 # Toggles
+                toggle_card = tk.Frame(form, bg=COLORS['card_bg'], padx=18, pady=14)
+                toggle_card.pack(fill="x")
+
                 c_launch = tk.BooleanVar(value=True)
                 c_tray = tk.BooleanVar(value=False)
-                
-                def mk_chk(txt, var):
-                    tk.Checkbutton(form, text=txt, variable=var, font=("Segoe UI", 10),
-                                  bg=COLORS['card_bg'], fg="white", selectcolor=COLORS['card_bg'], activebackground=COLORS['card_bg']).pack(anchor="w", pady=5)
-                
-                mk_chk("Close launcher when game starts", c_launch)
-                mk_chk("Minimize to system tray on close", c_tray)
 
-                def next_pref():
+                for txt, var in [("Close launcher when game starts", c_launch),
+                                 ("Minimize to system tray on close", c_tray)]:
+                    row = tk.Frame(toggle_card, bg=COLORS['card_bg'])
+                    row.pack(fill="x", pady=4)
+                    tk.Checkbutton(row, text=txt, variable=var, font=("Segoe UI", 10),
+                                  bg=COLORS['card_bg'], fg="white",
+                                  selectcolor=COLORS['input_bg'],
+                                  activebackground=COLORS['card_bg'],
+                                  activeforeground="white").pack(anchor="w")
+
+                btn_frame = tk.Frame(form, bg=COLORS['main_bg'])
+                btn_frame.pack(fill="x", pady=(20, 0))
+
+                def do_next():
                     self.ram_allocation = ram_v.get()
                     self.close_launcher = c_launch.get()
                     self.minimize_to_tray = c_tray.get()
                     self.save_config(sync_ui=False)
-                    show_step_2_appearance()
+                    show_step_theme()
 
-                tk.Button(content_frame, text="Continue", font=("Segoe UI", 11, "bold"), 
-                          bg=COLORS['play_btn_green'], fg="white", relief="flat", cursor="hand2", 
-                          command=next_pref).pack(pady=40, ipadx=20)
+                make_btn(btn_frame, "Continue", COLORS.get('success_green', '#2D8F36'),
+                        do_next).pack(fill="x")
 
-            def show_step_2_appearance():
+            # ═══════════════════════════════════════════════════
+            # STEP 3 — Theme / Accent Color
+            # ═══════════════════════════════════════════════════
+            def show_step_theme():
                 clear_page()
-                tk.Label(content_frame, text="Customize Appearance", font=("Segoe UI", 18, "bold"), fg="white", bg=COLORS['card_bg']).pack(pady=(40, 20))
-                
-                tk.Label(content_frame, text="Choose an Accent Color", font=("Segoe UI", 10), fg=COLORS['text_secondary'], bg=COLORS['card_bg']).pack()
-                
-                accent_frame = tk.Frame(content_frame, bg=COLORS['card_bg'])
-                accent_frame.pack(pady=20)
+                update_dots(2)
 
-                def pick(c_name):
-                    self.accent_color_name = c_name
-                    # Apply globally so main window updates instantly
-                    self.apply_accent_color(c_name)
-                    self.save_config()
+                tk.Frame(content, bg=COLORS['main_bg'], height=40).pack()
+                tk.Label(content, text="Pick Your Color",
+                        font=("Segoe UI", 18, "bold"), fg="white",
+                        bg=COLORS['main_bg']).pack()
+                tk.Label(content, text="Choose an accent color for the launcher",
+                        font=("Segoe UI", 10), fg="#808080",
+                        bg=COLORS['main_bg']).pack(pady=(6, 30))
 
-                    # Realtime apply (partial) for wizard context
-                    _colors = {
-                        "Green": "#2D8F36", "Blue": "#3498DB", "Orange": "#E67E22", "Purple": "#9B59B6", "Red": "#E74C3C"
-                    }
-                    if c_name in _colors:
-                        new_c = _colors[c_name]
-                        # Already done in apply_accent_color but wizard elements might have local references
-                    else:
-                        new_c = COLORS['success_green']
-                    
-                    # Refresh indicators
-                    for w in accent_frame.winfo_children():
-                        w['bg'] = COLORS['card_bg']
-                        if getattr(w, '_color_name', '') == c_name:
-                             w['bg'] = "white"
-                    
-                    # Update Finish button color dynamically
+                colors_list = [
+                    ("Green",  "#2D8F36"),
+                    ("Blue",   "#3498DB"),
+                    ("Orange", "#E67E22"),
+                    ("Purple", "#9B59B6"),
+                    ("Red",    "#E74C3C"),
+                ]
+
+                palette = tk.Frame(content, bg=COLORS['main_bg'])
+                palette.pack()
+
+                selected = [getattr(self, "accent_color_name", "Green")]
+                swatch_widgets = []
+
+                def select_color(name, color):
+                    selected[0] = name
+                    self.apply_accent_color(name)
+                    self.save_config(sync_ui=False)
+                    # Update swatch highlights
+                    for sn, sw, sl in swatch_widgets:
+                        if sn == name:
+                            sw.config(highlightbackground="white", highlightthickness=2)
+                            sl.config(fg="white")
+                        else:
+                            sw.config(highlightbackground="#303030", highlightthickness=1)
+                            sl.config(fg="#707070")
+                    # Update finish button
                     if finish_btn:
-                        finish_btn.config(bg=new_c)
+                        finish_btn.config(bg=color, activebackground=color)
 
-                _colors = [("Green", "#2D8F36"), ("Blue", "#3498DB"), ("Orange", "#E67E22"), ("Purple", "#9B59B6"), ("Red", "#E74C3C")]
-                
-                finish_btn = None 
+                finish_btn = None
 
-                for name, col in _colors:
-                    f = tk.Frame(accent_frame, bg=COLORS['card_bg'], padx=3, pady=3)
-                    f._color_name = name # type: ignore
-                    f.pack(side="left", padx=10)
-                    
-                    btn = tk.Button(f, bg=col, width=4, height=2, relief="flat", cursor="hand2", command=lambda n=name: pick(n))
-                    btn.pack()
-                    
-                    if name == getattr(self, "accent_color_name", "Green"):
-                         f.config(bg="white")
+                for name, color in colors_list:
+                    col = tk.Frame(palette, bg=COLORS['main_bg'])
+                    col.pack(side="left", padx=12)
 
-                finish_btn = tk.Button(content_frame, text="Finish Setup", font=("Segoe UI", 11, "bold"), bg=COLORS['success_green'], fg="white", 
-                          relief="flat", cursor="hand2", command=show_step_3_finalize)
-                finish_btn.pack(fill="x", padx=150, pady=(40, 10))
+                    is_active = (name == selected[0])
+                    swatch = tk.Frame(col, bg=color, width=50, height=50, cursor="hand2",
+                                     highlightbackground="white" if is_active else "#303030",
+                                     highlightthickness=2 if is_active else 1)
+                    swatch.pack()
+                    swatch.pack_propagate(False)
 
-            # --- Step 3: Finalize ---
-            def show_step_3_finalize():
-                # Close the wizard
+                    lbl = tk.Label(col, text=name, font=("Segoe UI", 8),
+                                  bg=COLORS['main_bg'],
+                                  fg="white" if is_active else "#707070")
+                    lbl.pack(pady=(4, 0))
 
-                wizard.destroy()
-                overlay.destroy()
-                
-                # Highlight "Installations" Tab
-                self.show_tab("Installations")
-                self.root.update()
-                
-                # Show Coach Mark
-                target = None
-                if hasattr(self, 'new_inst_btn'):
-                    target = self.new_inst_btn
-                elif "Installations" in self.tabs:
-                    # Fallback to the tab frame
-                     target = self.tabs["Installations"]
-                
-                if target:
-                    self.show_coach_mark(target, "Click here to add your first\nMinecraft Installation!", 
-                                         next_action=self.start_locker_tour)
-                else:
-                    self.start_locker_tour()
-                    
-                self.first_run = False
-                self.save_config()
+                    swatch_widgets.append((name, swatch, lbl))
 
-            # Init
-            show_step_0_account_type()
+                    # Click handlers
+                    swatch.bind("<Button-1>", lambda e, n=name, c=color: select_color(n, c))
+                    for child in swatch.winfo_children():
+                        child.bind("<Button-1>", lambda e, n=name, c=color: select_color(n, c))
+
+                current_accent = dict(colors_list).get(selected[0], "#2D8F36")
+                finish_btn = make_btn(content, "Finish Setup", current_accent, show_step_done)
+                finish_btn.pack(pady=(40, 0), ipadx=24)
+
+            # ═══════════════════════════════════════════════════
+            # STEP 4 — Done
+            # ═══════════════════════════════════════════════════
+            def show_step_done():
+                clear_page()
+                update_dots(3)
+
+                tk.Frame(content, bg=COLORS['main_bg'], height=50).pack()
+
+                tk.Label(content, text="✓", font=("Segoe UI", 36),
+                        fg=COLORS.get('success_green', '#2D8F36'),
+                        bg=COLORS['main_bg']).pack()
+                tk.Label(content, text="You're All Set!",
+                        font=("Segoe UI", 20, "bold"), fg="white",
+                        bg=COLORS['main_bg']).pack(pady=(8, 6))
+                tk.Label(content, text="Create an installation to start playing",
+                        font=("Segoe UI", 11), fg="#808080",
+                        bg=COLORS['main_bg']).pack()
+
+                def finish():
+                    self.first_run = False
+                    self.save_config()
+                    if wizard.winfo_exists():
+                        wizard.destroy()
+                    self._focus_main_window()
+                    self.show_tab("Installations")
+                    self.root.after(80, self.update_active_profile)
+                    self.root.after(180, self.refresh_skin)
+                    # Start post-onboarding guidance cards after the wizard closes.
+                    self.root.after(260, self.start_installations_tour)
+                    self.root.after(420, self._focus_main_window)
+
+                make_btn(content, "Get Started", COLORS.get('success_green', '#2D8F36'),
+                        finish).pack(pady=(36, 0), ipadx=24)
+
+            # ── Start ──
+            show_step_account_type()
 
         except Exception as e:
+            logging.exception("Error showing wizard")
             print(f"Error showing wizard: {e}")
-            custom_showerror("Error", f"Wizard crashed: {e}")
-            if 'wizard' in locals(): wizard.destroy() # type: ignore
+            traceback.print_exc()
+            try:
+                if 'wizard' in locals() and wizard.winfo_exists(): # type: ignore
+                    wizard.destroy() # type: ignore
+                self._onboarding_wizard = None
+                self._onboarding_overlay = None
+                self._clear_onboarding_focus_bindings()
+                self._cancel_onboarding_raise_burst()
+            except: pass
+
+    def start_installations_tour(self):
+        """Step 2: Installations"""
+        self.show_tab("Installations")
+        self.root.update()
+        self._focus_main_window()
+
+        target = None
+        try:
+            if hasattr(self, 'new_inst_btn') and self.new_inst_btn.winfo_exists():
+                target = self.new_inst_btn
+        except Exception:
+            target = None
+
+        if not target and "Installations" in self.tabs:
+            target = self.tabs["Installations"]
+
+        if target:
+            self.show_coach_mark(
+                target,
+                "Create and manage game installations here.\nUse New installation to add one quickly.",
+                next_action=self.start_locker_tour
+            )
+        else:
+            self.start_locker_tour()
 
     def start_locker_tour(self):
         """Step 3: Locker (Skins/Wallpapers)"""
@@ -1857,17 +3254,44 @@ class MinecraftLauncher:
             tip = tk.Toplevel(self.root)
             tip.overrideredirect(True)
             tip.attributes("-topmost", True)
+            tip.transient(self.root)
             
-            # Calc position (below-left aligned)
+            # Calc position (below-left aligned) with screen bounds checking
+            tip.update_idletasks()
+            tip_w = 350  # Approximate tooltip width
+            tip_h = 120  # Approximate tooltip height
+            
+            screen_w = self.root.winfo_screenwidth()
+            screen_h = self.root.winfo_screenheight()
+            
             tip_x = x - 150 + w 
             tip_y = y + h + 10
+            
+            # Prevent tooltip from going off-screen
+            if tip_x + tip_w > screen_w:
+                tip_x = screen_w - tip_w - 10
+            if tip_x < 0:
+                tip_x = 10
+            if tip_y + tip_h > screen_h:
+                # Position above instead of below
+                tip_y = y - tip_h - 10
+            if tip_y < 0:
+                tip_y = 10
+                
             tip.geometry(f"+{tip_x}+{tip_y}")
+            tip.deiconify()
+            tip.lift()
             
             # Style
             bg = "#0078D7" # Blue accent
             fg = "white"
+            border_color = "#1E90FF"
             
-            frame = tk.Frame(tip, bg=bg, padx=2, pady=2)
+            # Outer border frame for subtle outline
+            outer_frame = tk.Frame(tip, bg=border_color, padx=1, pady=1)
+            outer_frame.pack()
+            
+            frame = tk.Frame(outer_frame, bg=bg, padx=2, pady=2)
             frame.pack()
             
             # Content
@@ -1915,16 +3339,24 @@ class MinecraftLauncher:
     def show_modrinth_enable_dialog(self):
         dialog = tk.Toplevel(self.root)
         dialog.title("Enable Mod Support")
-        dialog.geometry("400x250")
+        dialog.geometry("450x300")
         dialog.config(bg=COLORS['main_bg'])
-        # Center
-        x = self.root.winfo_x() + (self.root.winfo_width()//2) - 200
-        y = self.root.winfo_y() + (self.root.winfo_height()//2) - 125
-        dialog.geometry(f"+{x}+{y}")
         dialog.transient(self.root)
         dialog.resizable(False, False)
+        dialog.grab_set()
         
-        container = tk.Frame(dialog, bg=COLORS['main_bg'], padx=20, pady=20)
+        # Center on parent
+        dialog.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width()//2) - 225
+        y = self.root.winfo_y() + (self.root.winfo_height()//2) - 150
+        dialog.geometry(f"+{x}+{y}")
+        
+        # Ensure visibility
+        dialog.deiconify()
+        dialog.lift()
+        dialog_root = self._apply_custom_toplevel_chrome(dialog, "Enable Mod Support")
+        
+        container = tk.Frame(dialog_root, bg=COLORS['main_bg'], padx=20, pady=20)
         container.pack(fill="both", expand=True)
         
         tk.Label(container, text="Enable Mod Support?", font=("Segoe UI", 14, "bold"), 
@@ -1994,11 +3426,13 @@ class MinecraftLauncher:
                 self.root.quit()
         
         tk.Button(btn_frame, text="Yes, Enable", bg=COLORS['success_green'], fg="white", 
-                 font=("Segoe UI", 10, "bold"), relief="flat", padx=15, pady=5, 
+                 font=("Segoe UI", 10, "bold"), relief="flat", padx=15, pady=6, bd=0,
+                 cursor="hand2", activebackground="#3AA044", activeforeground="white",
                  command=enable).pack(side="right", padx=5)
                  
-        tk.Button(btn_frame, text="No", bg=COLORS['input_bg'], fg="white", 
-                 font=("Segoe UI", 10), relief="flat", padx=15, pady=5, 
+        tk.Button(btn_frame, text="No", bg="#404040", fg="#E0E0E0", 
+                 font=("Segoe UI", 10), relief="flat", padx=15, pady=6, bd=0,
+                 cursor="hand2", activebackground="#525252", activeforeground="white",
                  command=dialog.destroy).pack(side="right", padx=5)
 
     def set_active_sidebar(self, active_frame):
@@ -2086,6 +3520,229 @@ class MinecraftLauncher:
         # Hover effect
         self._attach_sidebar_hover(frame)
 
+    # --- Smooth Scroll Utilities ---
+    def _smooth_scroll(self, canvas, event):
+        """Smooth mousewheel scrolling with inertia for any canvas widget."""
+        try:
+            if not getattr(canvas, "_nlc_scroll_enabled", True):
+                return
+        except Exception:
+            pass
+        cid = id(canvas)
+        # Cancel any existing animation for this canvas
+        if cid in self._scroll_anim_ids:
+            try: self.root.after_cancel(self._scroll_anim_ids[cid])
+            except: pass
+        
+        # Add velocity from scroll event (accumulate for fast flicks)
+        impulse = -event.delta / 120.0 * 40  # pixels per scroll notch
+        current = self._scroll_velocities.get(cid, 0)
+        self._scroll_velocities[cid] = current + impulse
+        
+        self._animate_scroll(canvas, cid)
+    
+    def _animate_scroll(self, canvas, cid):
+        """Animate scroll with deceleration (inertia)."""
+        try:
+            if not canvas.winfo_exists():
+                self._scroll_velocities.pop(cid, None)
+                self._scroll_anim_ids.pop(cid, None)
+                return
+        except:
+            self._scroll_velocities.pop(cid, None)
+            self._scroll_anim_ids.pop(cid, None)
+            return
+        
+        velocity = self._scroll_velocities.get(cid, 0)
+        
+        # Stop if velocity is negligible
+        if abs(velocity) < 0.5:
+            self._scroll_velocities.pop(cid, None)
+            self._scroll_anim_ids.pop(cid, None)
+            return
+        
+        # Clamp at boundaries
+        top, bottom = canvas.yview()
+        if (velocity < 0 and top <= 0) or (velocity > 0 and bottom >= 1.0):
+            self._scroll_velocities.pop(cid, None)
+            self._scroll_anim_ids.pop(cid, None)
+            return
+        
+        # Scroll by velocity (convert pixels to fraction of total height)
+        bbox = canvas.bbox("all")
+        if not bbox:
+            self._scroll_velocities.pop(cid, None)
+            return
+        total_height = bbox[3] - bbox[1]
+        canvas_height = canvas.winfo_height()
+        
+        if total_height <= canvas_height:
+            self._scroll_velocities.pop(cid, None)
+            return
+        
+        fraction = velocity / total_height
+        canvas.yview_moveto(top + fraction)
+        
+        # Apply friction
+        self._scroll_velocities[cid] = velocity * 0.82
+        
+        # Schedule next frame (~16ms for 60fps)
+        self._scroll_anim_ids[cid] = self.root.after(16, self._animate_scroll, canvas, cid)
+
+    def _bind_smooth_scroll(self, canvas, widget):
+        """Bind smooth scrolling to a widget and all its children for a specific canvas."""
+        if not widget or not widget.winfo_exists():
+            return
+        canvas_id = id(canvas)
+        already_bound = getattr(widget, "_nlc_scroll_canvas_id", None)
+        if already_bound != canvas_id:
+            handler = lambda e, c=canvas: self._smooth_scroll(c, e)
+            widget.bind("<MouseWheel>", handler)
+            setattr(widget, "_nlc_scroll_canvas_id", canvas_id)
+        for child in widget.winfo_children():
+            self._bind_smooth_scroll(canvas, child)
+
+    def _make_btn(self, parent, text, style="secondary", command=None, font_size=9,
+                  bold=False, icon=False, width=None, pack_opts=None):
+        """Create a consistently styled button.
+        
+        Styles:
+            primary   — Accent/green background, white text
+            secondary — Dark gray background, white text
+            danger    — Red background, white text
+            text      — Transparent background, muted text, no padding
+            icon      — Compact square for icon-only buttons (📁, ..., ⋮)
+        """
+        weight = "bold" if bold else ""
+        cfg = {
+            "primary":   {"bg": COLORS.get('success_green', '#2D8F36'), "fg": "white",
+                          "hover": "#3AA044", "active_fg": "white"},
+            "secondary": {"bg": "#404040", "fg": "#E0E0E0",
+                          "hover": "#525252", "active_fg": "white"},
+            "danger":    {"bg": "#C0392B", "fg": "white",
+                          "hover": "#E74C3C", "active_fg": "white"},
+            "text":      {"bg": COLORS.get('main_bg', '#1E1E1E'), "fg": "#909090",
+                          "hover": COLORS.get('main_bg', '#1E1E1E'), "active_fg": "white"},
+            "icon":      {"bg": "#404040", "fg": "#C0C0C0",
+                          "hover": "#525252", "active_fg": "white"},
+        }.get(style, {"bg": "#404040", "fg": "white", "hover": "#525252", "active_fg": "white"})
+
+        btn = tk.Button(parent, text=text, font=("Segoe UI", font_size, weight),
+                       bg=cfg["bg"], fg=cfg["fg"],
+                       activebackground=cfg["hover"], activeforeground=cfg["active_fg"],
+                       relief="flat", bd=0, cursor="hand2", command=command) # type: ignore
+
+        if style == "icon":
+            btn.config(padx=6, pady=4)
+        elif style == "text":
+            btn.config(padx=2, pady=2)
+        else:
+            btn.config(padx=14, pady=6)
+
+        if width is not None:
+            btn.config(width=width)
+
+        # Hover effects
+        def on_enter(e):
+            btn.config(bg=cfg["hover"])
+        def on_leave(e):
+            btn.config(bg=cfg["bg"])
+        btn.bind("<Enter>", on_enter)
+        btn.bind("<Leave>", on_leave)
+
+        return btn
+
+    def _animate_menu_open(self, menu, target_h, direction="down", pos_x=None, pos_y=None, pos_w=None):
+        """Slide-open animation for dropdown menus.
+        
+        Args:
+            pos_x, pos_y, pos_w: Explicit position/size to avoid re-parsing geometry.
+                                 pos_y is the FINAL top-left y of the menu.
+        """
+        try:
+            if pos_x is not None and pos_y is not None and pos_w is not None:
+                w, x, base_y = pos_w, pos_x, pos_y
+            else:
+                geo = menu.geometry()
+                parts = geo.split('+')
+                size = parts[0].split('x')
+                w = int(size[0])
+                x = int(parts[1])
+                base_y = int(parts[2])
+        except:
+            return
+        
+        steps = 6
+        current_step = [0]
+        
+        if direction == "up":
+            bottom_edge = base_y + target_h
+        
+        def step():
+            if current_step[0] >= steps:
+                menu.geometry(f"{w}x{target_h}+{x}+{base_y}")
+                return
+            try:
+                if not menu.winfo_exists(): return
+            except: return
+            
+            t = (current_step[0] + 1) / steps
+            t_ease = 1 - (1 - t) ** 3
+            h = max(1, int(t_ease * target_h))
+            
+            if direction == "up":
+                y = bottom_edge - h # type: ignore
+                menu.geometry(f"{w}x{h}+{x}+{y}")
+            else:
+                menu.geometry(f"{w}x{h}+{x}+{base_y}")
+            
+            current_step[0] += 1
+            self.root.after(12, step)
+        
+        if direction == "up":
+            menu.geometry(f"{w}x1+{x}+{bottom_edge - 1}") # type: ignore
+        else:
+            menu.geometry(f"{w}x1+{x}+{base_y}")
+        step()
+
+    def _close_all_menus(self):
+        """Close all open dropdown menus when switching tabs or performing other actions"""
+        # Close installation selector menu
+        if hasattr(self, '_selector_menu') and self._selector_menu:
+            try:
+                if self._selector_menu.winfo_exists():
+                    self._selector_menu.destroy()
+            except:
+                pass
+            self._selector_menu = None
+        
+        # Close profile menu
+        if hasattr(self, 'profile_menu') and self.profile_menu:
+            try:
+                if self.profile_menu.winfo_exists():
+                    self.profile_menu.destroy()
+            except:
+                pass
+            self.profile_menu = None
+        
+        # Close launch options menu
+        if hasattr(self, '_launch_opts_menu') and self._launch_opts_menu:
+            try:
+                if self._launch_opts_menu.winfo_exists():
+                    self._launch_opts_menu.destroy()
+            except:
+                pass
+            self._launch_opts_menu = None
+        
+        # Close installation context menu
+        if hasattr(self, 'installation_menu') and self.installation_menu:
+            try:
+                if self.installation_menu.winfo_exists():
+                    self.installation_menu.destroy()
+            except:
+                pass
+            self.installation_menu = None
+
     def create_nav_btn(self, text, command):
         def wrapped_command():
             # Automatically set Minecraft as active sidebar when top nav is clicked
@@ -2098,9 +3755,15 @@ class MinecraftLauncher:
                        activebackground=COLORS['tab_bar_bg'], activeforeground=COLORS['text_primary'],
                        relief="flat", bd=0, cursor="hand2", command=wrapped_command)
         btn.pack(side="left", padx=30, pady=15)
+        # Hover
+        btn.bind("<Enter>", lambda e, b=btn: b.config(fg=COLORS['text_primary']))
+        btn.bind("<Leave>", lambda e, b=btn: b.config(fg=COLORS['text_secondary']) if b.cget('bg') == COLORS['tab_bar_bg'] else None)
         self.nav_buttons[text] = btn
 
     def show_tab(self, tab_name):
+        # Close any open dropdown menus
+        self._close_all_menus()
+        
         # Lazy Init Mods Tab
         if tab_name == "Mods" and "Mods" not in self.tabs:
              if getattr(self, 'enable_modrinth', True):
@@ -2141,7 +3804,15 @@ class MinecraftLauncher:
         # Hero Section (Background) - fills most of the space except bottom bar
         self.hero_canvas = tk.Canvas(frame, bg="#181818", highlightthickness=0)
         self.hero_canvas.pack(fill="both", expand=True) # Ensure it's packed!
-        self.hero_canvas.bind("<Configure>", self._update_hero_layout)
+        
+        # Debounce resize events to prevent lag
+        self._resize_timer = None
+        def debounced_resize(event):
+            if self._resize_timer:
+                self.root.after_cancel(self._resize_timer)
+            self._resize_timer = self.root.after(100, lambda: self._update_hero_layout(event))
+        
+        self.hero_canvas.bind("<Configure>", debounced_resize)
 
         # Bottom Action Bar
         bottom_bar = tk.Frame(frame, bg=COLORS['bottom_bar_bg'], height=100) # Increased height
@@ -2204,7 +3875,7 @@ class MinecraftLauncher:
         for w in [self.inst_selector_frame, self.inst_selector_text_frame, self.inst_name_lbl, self.inst_ver_lbl, self.inst_selector_icon, self.inst_selector_arrow]:
              w.bind("<Enter>", on_hover, add="+")
              w.bind("<Leave>", on_leave, add="+")
-             w.bind("<Button-1>", self.open_selector_menu, add="+")
+             w.bind("<Button-1>", lambda e, s=self: s.open_selector_menu(e), add="+")
         
         # Populate with installations
         self.update_installation_dropdown()
@@ -2223,6 +3894,8 @@ class MinecraftLauncher:
                                    relief="flat", bd=0, cursor="hand2", width=14, pady=8,
                                    command=lambda: self.start_launch(force_update=False))
         self.launch_btn.pack(side="left")
+        self.launch_btn.bind("<Enter>", lambda e: self.launch_btn.config(bg=COLORS['play_btn_hover']))
+        self.launch_btn.bind("<Leave>", lambda e: self.launch_btn.config(bg=COLORS['play_btn_green']))
         
         # Divider line
         tk.Frame(self.play_container, width=1, bg="#2D8F36").pack(side="left", fill="y")
@@ -2233,6 +3906,8 @@ class MinecraftLauncher:
                                         relief="flat", bd=0, cursor="hand2", width=3,
                                         command=self.open_launch_options)
         self.launch_opts_btn.pack(side="left", fill="y")
+        self.launch_opts_btn.bind("<Enter>", lambda e: self.launch_opts_btn.config(bg=COLORS['play_btn_hover']))
+        self.launch_opts_btn.bind("<Leave>", lambda e: self.launch_opts_btn.config(bg=COLORS['play_btn_green']))
         
         
         # 3. Right (Status / Account)
@@ -2256,20 +3931,45 @@ class MinecraftLauncher:
         self.progress_bar.place(relx=0, rely=1.0, anchor="sw", relwidth=1, height=4) 
 
     def open_launch_options(self):
+        # Toggle: if already open, close it
+        if hasattr(self, '_launch_opts_menu') and self._launch_opts_menu:
+            try:
+                if self._launch_opts_menu.winfo_exists():
+                    self._launch_opts_menu.destroy()
+                    self._launch_opts_menu = None
+                    return
+            except:
+                self._launch_opts_menu = None
+        
+        # Close any other open menus first
+        self._close_all_menus()
+        
         # Popup near the arrow button
         menu = tk.Toplevel(self.root)
         menu.overrideredirect(True)
         menu.config(bg=COLORS['card_bg'])
+        menu.transient(self.root)
+        menu.attributes('-topmost', True)
+        self._launch_opts_menu = menu
         
+        target_h = 40
         try:
              x = self.launch_opts_btn.winfo_rootx() + self.launch_opts_btn.winfo_width() - 150
              y = self.launch_opts_btn.winfo_rooty() + self.launch_opts_btn.winfo_height() + 5
-             menu.geometry(f"150x40+{x}+{y}") 
+             menu.geometry(f"150x{target_h}+{x}+{y}") 
         except:
-             menu.geometry("150x40")
+             menu.geometry(f"150x{target_h}")
+        
+        def close_menu():
+            try:
+                if menu.winfo_exists():
+                    menu.destroy()
+            except:
+                pass
+            self._launch_opts_menu = None
              
         def do_force():
-            menu.destroy()
+            close_menu()
             self.start_launch(force_update=True)
             
         btn = tk.Label(menu, text="Force Update & Play", font=("Segoe UI", 10), 
@@ -2279,9 +3979,16 @@ class MinecraftLauncher:
         btn.bind("<Enter>", lambda e: btn.config(bg="#454545"))
         btn.bind("<Leave>", lambda e: btn.config(bg=COLORS['card_bg']))
 
-        # Close on click outside
-        menu.bind("<FocusOut>", lambda e: self.root.after(100, lambda: menu.destroy() if menu.winfo_exists() else None))
+        # Close on click outside or Escape
+        menu.bind("<FocusOut>", lambda e: self.root.after(100, close_menu))
+        menu.bind("<Escape>", lambda e: close_menu())
+        
+        # Ensure visibility with slide animation
+        menu.update_idletasks()
+        menu.deiconify()
+        menu.lift()
         menu.focus_set()
+        self._animate_menu_open(menu, target_h, direction="down")
 
     def update_bottom_gamertag(self):
         # Update the small gamertag in the bottom right corner
@@ -2358,9 +4065,8 @@ class MinecraftLauncher:
         create_filter("Modded", self.show_modded)
         
         # New Installation Button
-        self.new_inst_btn = tk.Button(top_bar, text="New installation", font=("Segoe UI", 10, "bold"),
-                 bg=COLORS['success_green'], fg="white", relief="flat", padx=15, pady=6, cursor="hand2",
-                 command=self.open_new_installation_modal)
+        self.new_inst_btn = self._make_btn(top_bar, "New installation", style="primary",
+                                           font_size=10, bold=True, command=self.open_new_installation_modal)
         self.new_inst_btn.pack(side="right") 
 
         # 2. Profile List (Scrollable)
@@ -2391,21 +4097,13 @@ class MinecraftLauncher:
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
 
-        # Mousewheel
-        def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-            
-        def _bind_mousewheel(widget):
-            widget.bind("<MouseWheel>", _on_mousewheel)
-            for child in widget.winfo_children():
-                _bind_mousewheel(child)
-        
-        # Bind when entering the container area
-        list_container.bind("<Enter>", lambda e: _bind_mousewheel(self.inst_list_frame))
+        # Smooth mousewheel
+        canvas.bind("<MouseWheel>", lambda e, c=canvas: self._smooth_scroll(c, e))
+        list_container.bind("<Enter>", lambda e: self._bind_smooth_scroll(canvas, self.inst_list_frame))
         
         # Update Scrollbar visibility
         def update_scroll_state(e=None):
-            self.inst_list_frame.update_idletasks() # Ensure dimensions
+            self.inst_list_frame.update_idletasks()
             canvas.configure(scrollregion=canvas.bbox("all"))
             bbox = canvas.bbox("all")
             if bbox and (bbox[3] - bbox[1]) > canvas.winfo_height():
@@ -2413,17 +4111,24 @@ class MinecraftLauncher:
             else:
                 scrollbar.pack_forget()
 
-        # Also bind strictly to children on refresh
         list_container.bind("<Configure>", update_scroll_state)
         self.inst_list_frame.bind("<Configure>", update_scroll_state)
         
-        self.refresh_installations_list(lambda: [_bind_mousewheel(self.inst_list_frame), update_scroll_state()])
+        self.refresh_installations_list(lambda: [self._bind_smooth_scroll(canvas, self.inst_list_frame), update_scroll_state()])
 
     def refresh_installations_list(self, callback=None):
         if not hasattr(self, 'inst_list_frame'): return # Safety check
+        
+        # Clear existing widgets
         for w in self.inst_list_frame.winfo_children(): w.destroy()
         
+        # Force update layout before repopulating
         self.inst_list_frame.update_idletasks()
+        
+        # Cache filter states to avoid repeated lookups
+        show_releases = self.show_releases.get()
+        show_snapshots = self.show_snapshots.get()
+        show_modded = self.show_modded.get()
         
         for idx, inst in enumerate(self.installations):
             # Check Filters
@@ -2438,13 +4143,13 @@ class MinecraftLauncher:
             # Note: Modded can also be a snapshot (rarely tracked), usually releases.
             
             if is_modded:
-                if not self.show_modded.get(): continue
+                if not show_modded: continue
             else:
                 if is_snapshot:
-                    if not self.show_snapshots.get(): continue
+                    if not show_snapshots: continue
                 else:
                     # Release
-                    if not self.show_releases.get(): continue
+                    if not show_releases: continue
 
             self.create_installation_item(self.inst_list_frame, idx, inst)
 
@@ -2458,8 +4163,18 @@ class MinecraftLauncher:
         # Check if it's a known image file
         if str(icon_identifier).endswith(".png"):
             key = (icon_identifier, size)
+            # Check cache first
             if key in self.icon_cache: 
-                return self.icon_cache[key]
+                # Verify the cached image is still valid
+                try:
+                    if self.icon_cache[key].width() > 0:
+                        return self.icon_cache[key]
+                    else:
+                        # Invalid cache entry, remove it
+                        del self.icon_cache[key]
+                except:
+                    # Invalid cache entry, remove it
+                    del self.icon_cache[key]
                 
             try:
                 # Try finding it
@@ -2517,16 +4232,17 @@ class MinecraftLauncher:
         actions.pack(side="right")
         
         # Play
-        tk.Button(actions, text="Play", bg=COLORS['success_green'], fg="white", font=("Segoe UI", 9, "bold"),
-                 relief="flat", padx=15, cursor="hand2",
-                 command=lambda i=idx: self.launch_installation(i)).pack(side="left", padx=5)
+        play_btn = self._make_btn(actions, "Play", style="primary", bold=True, font_size=9,
+                                  command=lambda i=idx: self.launch_installation(i))
+        play_btn.pack(side="left", padx=5)
                  
         # Folder
-        tk.Button(actions, text="📁", bg=COLORS['input_bg'], fg=COLORS['text_primary'], relief="flat", cursor="hand2",
-                 command=lambda i=idx: self.open_installation_folder(i)).pack(side="left", padx=5)
+        folder_btn = self._make_btn(actions, "📁", style="icon",
+                                    command=lambda i=idx: self.open_installation_folder(i))
+        folder_btn.pack(side="left", padx=5)
                  
         # Edit/Menu
-        menu_btn = tk.Button(actions, text="...", bg=COLORS['input_bg'], fg=COLORS['text_primary'], relief="flat", cursor="hand2")
+        menu_btn = self._make_btn(actions, "...", style="icon")
         menu_btn.config(command=lambda b=menu_btn, i=idx: self.open_installation_menu(i, b))
         menu_btn.pack(side="left", padx=5)
 
@@ -2545,10 +4261,16 @@ class MinecraftLauncher:
             current = getattr(self, 'current_installation_index', 0)
             if current >= len(self.installations): 
                 current = 0
+                self.current_installation_index = current
             self.select_installation(current)
         else:
-            self.inst_name_lbl.config(text="No Installations")
-            self.inst_ver_lbl.config(text="")
+            # No installations - show placeholder
+            if hasattr(self, 'inst_name_lbl'):
+                self.inst_name_lbl.config(text="No Installations")
+            if hasattr(self, 'inst_ver_lbl'):
+                self.inst_ver_lbl.config(text="")
+            if hasattr(self, 'inst_selector_icon'):
+                self.inst_selector_icon.config(image="", text="?", font=("Segoe UI", 12), fg="white", width=4, height=2)
 
     def select_installation(self, index):
         if not self.installations: return
@@ -2578,17 +4300,28 @@ class MinecraftLauncher:
         self.set_status(f"Selected: {ver} ({loader})")
 
     def open_selector_menu(self, event=None):
-        if not self.installations: return
-        
-        # Prevent duplication
-        if hasattr(self, '_selector_menu') and self._selector_menu and self._selector_menu.winfo_exists():
-            self._selector_menu.destroy()
+        if not self.installations: 
+            print("No installations to show")
             return
+        
+        # Prevent duplication - properly check and destroy existing menu
+        if hasattr(self, '_selector_menu') and self._selector_menu:
+            try:
+                if self._selector_menu.winfo_exists():
+                    print("Closing existing selector menu")
+                    self._selector_menu.destroy()
+                    self._selector_menu = None
+                    return
+            except:
+                self._selector_menu = None
 
+        print("Opening installation selector menu")
         menu = tk.Toplevel(self.root)
         self._selector_menu = menu
         menu.wm_overrideredirect(True)
         menu.config(bg=COLORS['card_bg'])
+        menu.transient(self.root)
+        menu.attributes('-topmost', True)
         
         # Border Frame
         menu_frame = tk.Frame(menu, bg=COLORS['card_bg'], highlightbackground="#454545", highlightthickness=1)
@@ -2602,10 +4335,19 @@ class MinecraftLauncher:
         x = self.inst_selector_frame.winfo_rootx()
         target_y = self.inst_selector_frame.winfo_rooty() - h - 5
         
-        if target_y < 0: 
+        # Screen bounds check
+        screen_h = self.root.winfo_screenheight()
+        if target_y < 0 or target_y + h > screen_h: 
             target_y = self.inst_selector_frame.winfo_rooty() + self.inst_selector_frame.winfo_height() + 5
+            # If still off-screen, position above
+            if target_y + h > screen_h:
+                target_y = self.inst_selector_frame.winfo_rooty() - h - 5
             
         menu.geometry(f"{w}x{h}+{x}+{target_y}")
+        
+        # Determine animation direction
+        _selector_direction = "up" if target_y < self.inst_selector_frame.winfo_rooty() else "down"
+        _selector_target_h = h
         
         # Scrollable area
         canvas = tk.Canvas(menu_frame, bg=COLORS['card_bg'], highlightthickness=0)
@@ -2623,24 +4365,36 @@ class MinecraftLauncher:
         canvas.pack(side="left", fill="both", expand=True)
         # Scrollbar visibility managed later
         
-        # Mousewheel
-        def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        # Smooth mousewheel
+        canvas.bind("<MouseWheel>", lambda e, c=canvas: self._smooth_scroll(c, e))
         
-        def _bind_mousewheel(widget):
-            widget.bind("<MouseWheel>", _on_mousewheel)
-            for child in widget.winfo_children():
-                _bind_mousewheel(child)
-        
-        # Close on click outside (Lose Focus)
+        # Close on click outside (Lose Focus) or Escape
         def on_focus_out(event):
             # Check if focus moved to scrollbar or inner element
-            if menu.focus_get() and str(menu.focus_get()).startswith(str(menu)):
-                return
+            try:
+                focused = menu.focus_get()
+                if focused and (str(focused).startswith(str(menu)) or focused == menu):
+                    return
+            except:
+                pass
+            print("Installation menu lost focus, closing")
             self.root.after(150, lambda: menu.destroy() if menu.winfo_exists() else None)
+        
+        def close_menu():
+            if menu.winfo_exists():
+                print("Closing installation menu")
+                menu.destroy()
             
         menu.bind("<FocusOut>", on_focus_out)
+        menu.bind("<Escape>", lambda e: close_menu())
+        
+        # Ensure menu is visible and focused with slide animation
+        menu.update_idletasks()
+        menu.deiconify()
+        menu.lift()
         menu.focus_force()
+        self._animate_menu_open(menu, _selector_target_h, direction=_selector_direction,
+                                pos_x=x, pos_y=target_y, pos_w=w)
 
         # Populate
         for i, inst in enumerate(self.installations):
@@ -2708,7 +4462,7 @@ class MinecraftLauncher:
         else:
             scrollbar.pack_forget()
         
-        _bind_mousewheel(scroll_frame)
+        self._bind_smooth_scroll(canvas, scroll_frame)
 
     def create_background_resource_pack(self):
         """Generates a resource pack that replaces the menu panorama with the current launcher wallpaper"""
@@ -2799,9 +4553,23 @@ class MinecraftLauncher:
         win = tk.Toplevel(self.root)
         title = "Edit Installation" if edit_mode else "New Installation"
         win.title(title)
-        win.geometry("650x600")
+        win.geometry("700x650")
         win.configure(bg="#1e1e1e")
+        win.transient(self.root)
         win.resizable(True, True) # Allow resizing to help fit content
+        win.grab_set()
+        
+        # Center on parent
+        win.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width()//2) - 350
+        y = self.root.winfo_y() + (self.root.winfo_height()//2) - 325
+        win.geometry(f"+{x}+{y}")
+        
+        # Ensure visibility
+        win.deiconify()
+        win.lift()
+        win.geometry(f"+{x}+{y}")
+        win_root = self._apply_custom_toplevel_chrome(win, title)
         
         # Pre-load data if editing
         existing_data = {}
@@ -2809,13 +4577,13 @@ class MinecraftLauncher:
             existing_data = self.installations[index]
 
         # --- Header ---
-        header = tk.Frame(win, bg="#1e1e1e")
+        header = tk.Frame(win_root, bg="#1e1e1e")
         header.pack(fill="x", padx=25, pady=(25, 20))
         tk.Label(header, text=title, font=("Segoe UI", 16, "bold"), 
                 bg="#1e1e1e", fg="white", anchor="w").pack(fill="x")
 
         # --- Content Area (Icon + Fields) ---
-        content = tk.Frame(win, bg="#1e1e1e")
+        content = tk.Frame(win_root, bg="#1e1e1e")
         content.pack(fill="both", expand=True, padx=25)
 
         # Icon Selector
@@ -2854,19 +4622,28 @@ class MinecraftLauncher:
         def open_icon_selector(e):
              sel_win = tk.Toplevel(win)
              sel_win.title("Select Icon")
-             sel_win.geometry("460x500")
+             sel_win.geometry("480x550")
              sel_win.configure(bg="#2d2d2d")
              sel_win.transient(win)
-             # Center
-             x = win.winfo_x() + (win.winfo_width()//2) - 230
-             y = win.winfo_y() + (win.winfo_height()//2) - 250
+             # Don't use grab_set to allow parent window interaction
+             sel_win.resizable(False, False)
+             
+             # Center on parent
+             sel_win.update_idletasks()
+             x = win.winfo_x() + (win.winfo_width()//2) - 240
+             y = win.winfo_y() + (win.winfo_height()//2) - 275
              sel_win.geometry(f"+{x}+{y}")
+             
+             # Ensure visibility
+             sel_win.deiconify()
+             sel_win.lift()
+             sel_root = self._apply_custom_toplevel_chrome(sel_win, "Select Icon")
 
-             tk.Label(sel_win, text="Select Block", font=("Segoe UI", 12, "bold"), bg="#2d2d2d", fg="white").pack(pady=(15,10))
+             tk.Label(sel_root, text="Select Block", font=("Segoe UI", 12, "bold"), bg="#2d2d2d", fg="white").pack(pady=(15,10))
              
 
              # Scrollable Frame for Icons
-             container = tk.Frame(sel_win, bg="#2d2d2d")
+             container = tk.Frame(sel_root, bg="#2d2d2d")
              container.pack(expand=True, fill="both", padx=10, pady=10)
              
              canvas = tk.Canvas(container, bg="#2d2d2d", highlightthickness=0)
@@ -2886,11 +4663,8 @@ class MinecraftLauncher:
              canvas.pack(side="left", fill="both", expand=True)
              scrollbar.pack(side="right", fill="y")
              
-             def _on_mousewheel(event):
-                 canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-             
              # Bind scrolling to the window so it works when hovering anywhere in the modal
-             sel_win.bind("<MouseWheel>", _on_mousewheel)
+             sel_win.bind("<MouseWheel>", lambda e, c=canvas: self._smooth_scroll(c, e))
              
              # Popular Minecraft Blocks
              block_names = [
@@ -3226,69 +5000,69 @@ class MinecraftLauncher:
                  if win.winfo_exists(): win.destroy()
 
         # --- Footer Actions ---
-        btn_row = tk.Frame(win, bg="#1e1e1e")
+        btn_row = tk.Frame(win_root, bg="#1e1e1e")
         btn_row.pack(side="bottom", fill="x", padx=25, pady=25)
         
         btn_text = "Save" if edit_mode else "Create"
         # Create/Save (Green)
-        save_btn = tk.Button(btn_row, text=btn_text, bg=COLORS['success_green'], fg="white", font=("Segoe UI", 10, "bold"),
-                 relief="flat", padx=25, pady=8, cursor="hand2",
-                 command=create_action)
+        save_btn = self._make_btn(btn_row, btn_text, style="primary", font_size=10, bold=True,
+                                  command=create_action)
         save_btn.pack(side="right", padx=(10, 0))
                  
         # Cancel (Text only typically, but we keep button style for consistency)
-        tk.Button(btn_row, text="Cancel", bg="#1e1e1e", fg="white", font=("Segoe UI", 10),
-                 relief="flat", padx=15, pady=8, cursor="hand2",
-                 activebackground="#1e1e1e", activeforeground="#B0B0B0",
-                 command=win.destroy).pack(side="right")
+        self._make_btn(btn_row, "Cancel", style="text", font_size=10,
+                      command=win.destroy).pack(side="right")
         
         # --- Onboarding Tour Logic ---
-        # Check if we are in the "First Installation" phase (coach mark previously shown)
-        # We can detect this if installations count was 0 or just check if it's the very first time opening this
-        if not edit_mode and len(self.installations) == 0:
-            # We are likely in the tour
-            def show_tour_step():
-                if loader_combo.winfo_exists():
-                     self.show_coach_mark(loader_combo, "First, select your Mod Loader\n(Vanilla, Fabric, etc.)")
-                     
-                # Chain next step for Version after a small delay
-                def show_version_step():
-                    if hasattr(self, 'modal_ver_combo') and self.modal_ver_combo.winfo_exists():
-                        self.show_coach_mark(self.modal_ver_combo, "Then verify the Version here.")
-                        
-                # Just show them in sequence or show version step when Loader interaction happens?
-                # Simple timer for now
-                self.root.after(4000, show_version_step)
-                
-            self.root.after(500, show_tour_step)
-            
-            # Override Save Action to continue tour
-            original_create = create_action
-            def tour_create_action():
-                original_create()
-                # Trigger Next Step: Skins/Wallpaper
-                self.root.after(800, self.start_locker_tour)
-            
-            save_btn.config(command=tour_create_action)
+        # On first installation, no coach marks needed — the wizard already guided the user.
 
     def open_installation_menu(self, idx, btn_widget):
+        # Toggle: close if already open
+        if hasattr(self, 'installation_menu') and self.installation_menu:
+            try:
+                if self.installation_menu.winfo_exists():
+                    self.installation_menu.destroy()
+            except:
+                pass
+            self.installation_menu = None
+            return
+        
         # Create a popup menu (Edit, Delete)
         menu = tk.Toplevel(self.root)
         menu.wm_overrideredirect(True)
         menu.config(bg=COLORS['card_bg'])
+        menu.transient(self.root)
+        menu.attributes('-topmost', True)
         
-        # Position
+        self.installation_menu = menu
+        
+        # Position with screen bounds check
         try:
              x = btn_widget.winfo_rootx()
              y = btn_widget.winfo_rooty() + btn_widget.winfo_height()
-             menu.geometry(f"120x80+{x-80}+{y}") 
+             screen_h = self.root.winfo_screenheight()
+             # Check if menu would go off bottom of screen
+             if y + 80 > screen_h:
+                 y = btn_widget.winfo_rooty() - 80
+             menu.geometry(f"120x80+{x-80}+{y}")
+             menu.update_idletasks()
+             menu.deiconify()
+             menu.lift()
+             self._animate_menu_open(menu, 80, direction="down")
         except:
              menu.geometry("120x80")
+             menu.deiconify()
+             menu.lift()
+             self._animate_menu_open(menu, 80, direction="down")
+        
+        def close_menu():
+            if menu.winfo_exists():
+                menu.destroy()
              
 
         # Edit
         def do_edit():
-            menu.destroy()
+            close_menu()
             self.edit_installation(idx)
             
         edit_btn = tk.Label(menu, text="Edit", font=("Segoe UI", 10), bg=COLORS['card_bg'], fg=COLORS['text_primary'], anchor="w", padx=10, pady=5)
@@ -3299,12 +5073,25 @@ class MinecraftLauncher:
 
         # Delete
         def do_delete():
-            menu.destroy()
-            if custom_askyesno("Delete", "Are you sure you want to delete this installation?"):
-                self.installations.pop(idx)
+            close_menu()
+            if custom_askyesno("Delete", "Are you sure you want to delete this installation?", parent=self.root):
+                deleted_inst = self.installations.pop(idx)
+                deleted_id = deleted_inst.get("id")
+                
+                # Update current index if necessary
+                if self.current_installation_index >= len(self.installations):
+                    self.current_installation_index = max(0, len(self.installations) - 1)
+                    
+                # Check if any modpack was linked to this installation
+                for pack in self.modpacks:
+                    if pack.get("linked_installation_id") == deleted_id:
+                        pack["linked_installation_id"] = None
+                
+                self.save_modpacks()
                 self.save_config()
                 self.refresh_installations_list()
                 self.update_installation_dropdown()
+                self.refresh_modpacks_list()  # Refresh to show updated link status
             
         del_btn = tk.Label(menu, text="Delete", font=("Segoe UI", 10), bg=COLORS['card_bg'], fg=COLORS['error_red'], anchor="w", padx=10, pady=5)
         del_btn.pack(fill="x")
@@ -3312,8 +5099,9 @@ class MinecraftLauncher:
         del_btn.bind("<Enter>", lambda e: del_btn.config(bg="#454545"))
         del_btn.bind("<Leave>", lambda e: del_btn.config(bg=COLORS['card_bg']))
 
-        # Close on click outside
-        menu.bind("<FocusOut>", lambda e: self.root.after(100, lambda: menu.destroy() if menu.winfo_exists() else None))
+        # Close on click outside or Escape
+        menu.bind("<FocusOut>", lambda e: self.root.after(100, close_menu))
+        menu.bind("<Escape>", lambda e: close_menu())
         menu.focus_set()
 
     def edit_installation(self, idx):
@@ -3339,8 +5127,9 @@ class MinecraftLauncher:
             
         self.locker_btns = {}
         for v in ["Skins", "Wallpapers"]:
-             b = tk.Button(btn_frame, text=v, font=("Segoe UI", 10, "bold"),
-                          command=lambda x=v: switch_view(x), relief="flat", padx=20, pady=5)
+             b = self._make_btn(btn_frame, v, style="secondary", font_size=10, bold=True,
+                               command=lambda x=v: switch_view(x))
+             b.config(padx=20, pady=5)
              b.pack(side="left")
              self.locker_btns[v] = b
              
@@ -3463,15 +5252,15 @@ class MinecraftLauncher:
         btn_grid = tk.Frame(act_frame, bg=COLORS['card_bg'])
         btn_grid.pack(fill="x")
         
-        tk.Button(btn_grid, text="Upload Skin File", font=("Segoe UI", 10),
-                 bg=COLORS['accent_blue'], fg="white", activebackground=COLORS['button_hover'], activeforeground="white",
-                 relief="flat", bd=0, pady=8, cursor="hand2", width=20,
-                 command=self.select_skin).pack(side="left", fill="x", expand=True, padx=(0, 10))
+        upload_btn = self._make_btn(btn_grid, "Upload Skin File", style="secondary", font_size=10,
+                                     command=self.select_skin)
+        upload_btn.config(bg=COLORS['accent_blue'], activebackground="#2E86C1", pady=8, width=20)
+        upload_btn.bind("<Enter>", lambda e: upload_btn.config(bg="#2E86C1"))
+        upload_btn.bind("<Leave>", lambda e: upload_btn.config(bg=COLORS['accent_blue']))
+        upload_btn.pack(side="left", fill="x", expand=True, padx=(0, 10))
 
-        tk.Button(btn_grid, text="Refresh", font=("Segoe UI", 10),
-                 bg=COLORS['input_bg'], fg=COLORS['text_primary'], activebackground=COLORS['button_hover'],
-                 relief="flat", bd=0, pady=8, cursor="hand2", width=10,
-                 command=self.refresh_skin).pack(side="left")
+        self._make_btn(btn_grid, "Refresh", style="secondary", font_size=10,
+                      command=self.refresh_skin).pack(side="left")
                  
         # 4. Recent History (Fill Remaining)
         hist_frame = tk.Frame(controls_area, bg=COLORS['card_bg'], padx=20, pady=20)
@@ -3488,7 +5277,7 @@ class MinecraftLauncher:
         self.history_canvas.configure(yscrollcommand=self.history_scroll.set)
         
         self.history_frame.bind("<Configure>", lambda e: self.history_canvas.configure(scrollregion=self.history_canvas.bbox("all")))
-        self.history_canvas.bind_all("<MouseWheel>", lambda e: self.history_canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
+        self.history_canvas.bind("<MouseWheel>", lambda e, c=self.history_canvas: self._smooth_scroll(c, e))
 
         self.history_canvas.pack(side="left", fill="both", expand=True)
         self.history_scroll.pack(side="right", fill="y")
@@ -3506,7 +5295,6 @@ class MinecraftLauncher:
             if old_val == val: return # No change
             
             p["skin_model"] = val
-            self.save_config()
             
             # If Microsoft, sync change to server
             if p.get("type", "offline") == "microsoft":
@@ -3530,8 +5318,9 @@ class MinecraftLauncher:
                     self.log(f"DEBUG: Skipping model sync. Path: {path}")
                     custom_showinfo("Skin Update", "Skin model changed locally.\n\nTo update on Minecraft servers, please re-upload your skin file.")
 
-        # Force re-render of skin
-        self.update_active_profile()
+        # Force re-render of skin preview
+        self.render_preview()
+        self.save_config(sync_ui=False)  # Save after rendering to avoid redundant updates
 
     def render_wallpapers_view(self, parent):
         # Header
@@ -3647,9 +5436,9 @@ class MinecraftLauncher:
                 pass
             
         # Add Custom Button
-        btn = tk.Button(self.wp_grid_frame, text="+ Add Wallpaper", font=("Segoe UI", 12),
-                       bg=COLORS['input_bg'], fg="white", relief="flat", width=20, height=5,
-                       command=self.add_custom_wallpaper)
+        btn = self._make_btn(self.wp_grid_frame, "+ Add Wallpaper", style="secondary",
+                             font_size=12, command=self.add_custom_wallpaper)
+        btn.config(width=20, height=5)
         self.wp_widgets.append(btn)
 
         # Responsive Reflow Logic
@@ -3675,17 +5464,9 @@ class MinecraftLauncher:
 
         canvas.bind("<Configure>", on_configure)
 
-        # Mousewheel
-        def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        
-        def bind_recursive(w):
-            w.bind("<MouseWheel>", _on_mousewheel)
-            for c in w.winfo_children():
-                bind_recursive(c)
-
-        bind_recursive(self.wp_grid_frame)
-        canvas.bind("<MouseWheel>", _on_mousewheel)
+        # Smooth mousewheel
+        canvas.bind("<MouseWheel>", lambda e, c=canvas: self._smooth_scroll(c, e))
+        self._bind_smooth_scroll(canvas, self.wp_grid_frame)
 
     def add_custom_wallpaper(self):
         path = filedialog.askopenfilename(filetypes=[("Images", "*.png;*.jpg;*.jpeg")])
@@ -3760,11 +5541,12 @@ class MinecraftLauncher:
             w = self.hero_canvas.winfo_width()
             h = self.hero_canvas.winfo_height()
             self._update_hero_layout(type('obj', (object,), {'width':w, 'height':h}))
-            self.save_config()
+            self.save_config(sync_ui=False)  # Optimize: don't sync UI fields
             
-            # Refresh UI if in Locker -> Wallpapers to show "SELECTED" indicator
-            if self.current_tab == "Locker" and hasattr(self, 'locker_view') and self.locker_view.get() == "Wallpapers":
-                self.refresh_locker_view()
+            # Always refresh UI if in Locker -> Wallpapers to show "SELECTED" indicator
+            if hasattr(self, 'locker_view') and self.locker_view.get() == "Wallpapers":
+                # Use after to ensure UI is ready
+                self.root.after(100, self.refresh_locker_view)
                 
         except Exception as e:
             print(f"Wallpaper error: {e}")
@@ -3840,8 +5622,15 @@ class MinecraftLauncher:
         self.skin_path = path   
         p["skin_path"] = path
         p["skin_model"] = model
-        self.update_active_profile()
-        self.save_config()
+        
+        # Update model var before rendering
+        if hasattr(self, 'skin_model_var'):
+            self.skin_model_var.set(model)
+            
+        # Render preview with updated model
+        self.render_preview()
+        self.update_skin_indicator()
+        
         # Move to top of history
         self.add_skin_to_history(path, model)
 
@@ -3868,22 +5657,46 @@ class MinecraftLauncher:
         if len(history) > 20: history = history[:20]
         
         p["skin_history"] = history # type: ignore
-        self.save_config()
-        self.render_skin_history()
+        self.save_config(sync_ui=False)  # Optimize: don't sync UI fields
+        
+        # Only refresh if currently viewing skin history
+        if hasattr(self, 'history_frame') and self.history_frame.winfo_exists():
+            self.render_skin_history()
 
     def toggle_profile_menu(self):
-        if hasattr(self, 'profile_menu') and self.profile_menu.winfo_exists():
-            self.profile_menu.destroy()
-            return
+        if hasattr(self, 'profile_menu') and self.profile_menu:
+            try:
+                if self.profile_menu.winfo_exists():
+                    print("Closing existing profile menu")
+                    self.profile_menu.destroy()
+                    self.profile_menu = None
+                    return
+            except:
+                self.profile_menu = None
 
+        print("Opening profile menu")
         menu = tk.Toplevel(self.root)
         menu.overrideredirect(True)
         menu.config(bg=COLORS['card_bg'])
+        menu.transient(self.root)
+        menu.attributes('-topmost', True)
         self.profile_menu = menu
 
+        # Position with screen bounds check
         try:
             x = self.sidebar.winfo_rootx() + self.sidebar.winfo_width()
             y = self.profile_frame.winfo_rooty()
+            
+            # Check screen bounds
+            screen_w = self.root.winfo_screenwidth()
+            screen_h = self.root.winfo_screenheight()
+            
+            # Adjust if menu would go off-screen
+            if x + 250 > screen_w:
+                x = self.sidebar.winfo_rootx() - 250
+            if y + 300 > screen_h:
+                y = screen_h - 300 - 10
+                
             menu.geometry(f"250x300+{x}+{y}")
         except: 
             menu.geometry("250x300")
@@ -3918,20 +5731,9 @@ class MinecraftLauncher:
         canvas.pack(side="left", fill="both", expand=True)
         # Scrollbar packing handled in refresh/configure
         
-        # Mousewheel
-        def _on_mousewheel(event):
-            # Prevent scrolling up past top
-            if event.delta > 0 and canvas.yview()[0] <= 0: return
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        
-        # Bind to canvas and list_frame and children
-        def _bind_mousewheel(widget):
-            widget.bind("<MouseWheel>", _on_mousewheel)
-            for child in widget.winfo_children():
-                _bind_mousewheel(child)
-        
-        # Initial bind
-        _bind_mousewheel(canvas)
+        # Smooth mousewheel
+        canvas.bind("<MouseWheel>", lambda e, c=canvas: self._smooth_scroll(c, e))
+        self._bind_smooth_scroll(canvas, list_frame)
         
         # Update Scrollbar visibility
         def update_scroll_state(e=None):
@@ -3941,11 +5743,9 @@ class MinecraftLauncher:
                 scrollbar.pack(side="right", fill="y")
             else:
                 scrollbar.pack_forget()
-            _bind_mousewheel(list_frame)
+            self._bind_smooth_scroll(canvas, list_frame)
 
         list_frame.bind("<Configure>", update_scroll_state)
-        
-        list_frame.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
 
         if not self.profiles:
              tk.Label(list_frame, text="No profiles", bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(pady=10)
@@ -3953,16 +5753,32 @@ class MinecraftLauncher:
             for idx, p in enumerate(self.profiles):
                 self.create_profile_item(list_frame, idx, p)
 
-        tk.Button(footer, text="+ Add Account", font=("Segoe UI", 9), 
-                 bg=COLORS['bottom_bar_bg'], fg=COLORS['text_primary'], relief="flat", bd=0, cursor="hand2",
-                 command=self.open_add_account_modal).pack(side="left", padx=10, fill="y")
+        add_acct_btn = self._make_btn(footer, "+ Add Account", style="text", font_size=9,
+                                       command=self.open_add_account_modal)
+        add_acct_btn.config(bg=COLORS['bottom_bar_bg'], fg=COLORS['text_primary'])
+        add_acct_btn.bind("<Enter>", lambda e: add_acct_btn.config(fg="white"))
+        add_acct_btn.bind("<Leave>", lambda e: add_acct_btn.config(fg=COLORS['text_primary']))
+        add_acct_btn.pack(side="left", padx=10, fill="y")
 
-        menu.bind("<FocusOut>", lambda e: self._close_menu_delayed(menu))
+        # Ensure menu is visible and focused with slide animation
+        menu.update_idletasks()
+        menu.deiconify()
+        menu.lift()
         menu.focus_set()
+        self._animate_menu_open(menu, 300, direction="down")
+        menu.bind("<FocusOut>", lambda e: self._close_menu_delayed(menu))
 
     def _close_menu_delayed(self, menu):
         # Small delay to allow button clicks inside
-        self.root.after(200, lambda: menu.destroy() if menu.winfo_exists() and self.root.focus_get() != menu else None)
+        try:
+            if menu and menu.winfo_exists():
+                # Check if focus is still in the menu tree
+                focused = self.root.focus_displayof()
+                if focused and str(focused).startswith(str(menu)):
+                    return  # Don't close if focus is still inside
+                menu.destroy()
+        except:
+            pass
 
     def delete_profile(self, idx):
         if not self.profiles or idx < 0 or idx >= len(self.profiles): return
@@ -3978,12 +5794,17 @@ class MinecraftLauncher:
             if not self.profiles:
                 self.create_default_profile()
             
-            self.save_config()
+            # Update UI first, then save to avoid redundant syncs
             self.update_active_profile()
+            self.save_config(sync_ui=False)
             
             # Close menu to refresh
-            if hasattr(self, 'profile_menu'): self.profile_menu.destroy()
-            # Re-open if we want, but better just close
+            if hasattr(self, 'profile_menu') and self.profile_menu:
+                try:
+                    if self.profile_menu.winfo_exists():
+                        self.profile_menu.destroy()
+                except:
+                    pass
 
     def create_profile_item(self, parent, idx, profile):
         is_active = (idx == self.current_profile_index)
@@ -4001,10 +5822,11 @@ class MinecraftLauncher:
                 bg=bg, fg=COLORS['text_primary']).pack(side="left")
         
         # Delete Button
-        del_btn = tk.Button(frame, text="-", font=("Segoe UI", 12, "bold"),
-                           bg=bg, fg="#ff6b6b", activebackground=bg, activeforeground="#ff4444",
-                           relief="flat", bd=0, cursor="hand2",
-                           command=lambda: self.delete_profile(idx))
+        del_btn = self._make_btn(frame, "-", style="danger", font_size=12, bold=True, icon=True,
+                                 command=lambda: self.delete_profile(idx))
+        del_btn.config(bg=bg, fg="#ff6b6b", activebackground=bg, activeforeground="#ff4444")
+        del_btn.bind("<Enter>", lambda e: del_btn.config(fg="#ff4444"))
+        del_btn.bind("<Leave>", lambda e: del_btn.config(fg="#ff6b6b"))
         
         # Only show delete if strictly more than 1 profile? Or allow deleting the last one (which resets to default)?
         # User said "right of every account".
@@ -4015,9 +5837,22 @@ class MinecraftLauncher:
                 bg=bg, fg=COLORS['text_secondary']).pack(side="right")
         
         def on_click(e):
+            old_index = self.current_profile_index
             self.current_profile_index = idx
-            self.update_active_profile()
-            if hasattr(self, 'profile_menu'): self.profile_menu.destroy()
+            
+            # Only update if index actually changed
+            if old_index != idx:
+                self.update_active_profile()
+                # Update installation dropdown in case settings changed
+                if hasattr(self, 'update_installation_dropdown'):
+                    self.update_installation_dropdown()
+                    
+            if hasattr(self, 'profile_menu') and self.profile_menu:
+                try:
+                    if self.profile_menu.winfo_exists():
+                        self.profile_menu.destroy()
+                except:
+                    pass
             
         frame.bind("<Button-1>", on_click)
         for child in frame.winfo_children():
@@ -4025,66 +5860,88 @@ class MinecraftLauncher:
                 child.bind("<Button-1>", on_click)
 
     def open_add_account_modal(self):
-        if hasattr(self, 'profile_menu'): self.profile_menu.destroy()
+        print("Opening add account modal")
+        if hasattr(self, 'profile_menu') and self.profile_menu:
+            try:
+                if self.profile_menu.winfo_exists():
+                    self.profile_menu.destroy()
+                    self.profile_menu = None
+            except:
+                pass
         
         win = tk.Toplevel(self.root)
         win.title("Add Account")
-        win.geometry("400x420")
+        win.geometry("450x350")
         win.config(bg=COLORS['main_bg'])
-        try:
-            win.geometry(f"+{self.root.winfo_x() + 340}+{self.root.winfo_y() + 150}")
-        except: pass
         win.transient(self.root)
         win.resizable(False, False)
+        win.grab_set()
+        
+        # Center on parent
+        win.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width()//2) - 225
+        y = self.root.winfo_y() + (self.root.winfo_height()//2) - 175
+        win.geometry(f"+{x}+{y}")
+        
+        # Ensure visibility
+        win.deiconify()
+        win.lift()
+        win.geometry(f"+{x}+{y}")
+        win_root = self._apply_custom_toplevel_chrome(win, "Add Account")
 
-        tk.Label(win, text="Add a new account", font=("Segoe UI", 16, "bold"),
+        tk.Label(win_root, text="Add a new account", font=("Segoe UI", 16, "bold"),
                 bg=COLORS['main_bg'], fg=COLORS['text_primary']).pack(pady=(30, 20))
         
-        tk.Button(win, text="Microsoft Account", font=("Segoe UI", 11),
-                 bg=COLORS['play_btn_green'], fg="white", width=25, pady=8, relief="flat", cursor="hand2",
-                 command=lambda: self.show_microsoft_login(win)).pack(pady=5)
+        self._make_btn(win_root, "Microsoft Account", style="primary", font_size=11,
+                      width=25, command=lambda: self.show_microsoft_login(win)).pack(pady=5, ipady=4)
 
-        tk.Button(win, text="Ely.by Account", font=("Segoe UI", 11),
-                 bg="#3498DB", fg="white", width=25, pady=8, relief="flat", cursor="hand2",
-                 command=lambda: self.show_elyby_login(win)).pack(pady=5)
-                 
-        tk.Button(win, text="Offline Account", font=("Segoe UI", 11),
-                 bg=COLORS['input_bg'], fg=COLORS['text_primary'], width=25, pady=8, relief="flat", cursor="hand2",
-                 command=lambda: self.show_offline_login(win)).pack(pady=5)
+        btn_ely = self._make_btn(win_root, "Ely.by Account", style="secondary", font_size=11,
+                                 width=25, command=lambda: self.show_elyby_login(win))
+        btn_ely.config(bg="#3498DB", activebackground="#2E86C1")
+        btn_ely.bind("<Enter>", lambda e: btn_ely.config(bg="#2E86C1"))
+        btn_ely.bind("<Leave>", lambda e: btn_ely.config(bg="#3498DB"))
+        btn_ely.pack(pady=5, ipady=4)
+
+        self._make_btn(win_root, "Offline Account", style="secondary", font_size=11,
+                      width=25, command=lambda: self.show_offline_login(win)).pack(pady=5, ipady=4)
 
     def show_microsoft_login(self, parent):
-        for widget in parent.winfo_children():
-            widget.destroy()
-            
         parent.title("Microsoft Login - Device Flow")
-        parent.geometry("500x450")
+        self._apply_custom_toplevel_chrome(parent, "Microsoft Login")
+        content_root = self._clear_toplevel_content(parent)
+        parent.geometry("550x500")
         
-        tk.Label(parent, text="Microsoft Login", font=("Segoe UI", 16, "bold"), 
+        # Re-center after changing size
+        parent.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width()//2) - 275
+        y = self.root.winfo_y() + (self.root.winfo_height()//2) - 250
+        parent.geometry(f"+{x}+{y}")
+        
+        tk.Label(content_root, text="Microsoft Login", font=("Segoe UI", 16, "bold"), 
                 bg=COLORS['main_bg'], fg=COLORS['text_primary']).pack(pady=(20, 10))
         
         # Status Label
-        status_lbl = tk.Label(parent, text="Initializing...", font=("Segoe UI", 10), 
+        status_lbl = tk.Label(content_root, text="Initializing...", font=("Segoe UI", 10), 
                              bg=COLORS['main_bg'], fg=COLORS['text_secondary'], wraplength=450)
         status_lbl.pack(pady=10)
         
         # Code Display
-        code_lbl = tk.Label(parent, text="", font=("Segoe UI", 24, "bold"), 
+        code_lbl = tk.Label(content_root, text="", font=("Segoe UI", 24, "bold"), 
                            bg=COLORS['main_bg'], fg=COLORS['success_green'])
         code_lbl.pack(pady=10)
         
         # URL Display
-        url_lbl = tk.Label(parent, text="", font=("Segoe UI", 11, "underline"), 
+        url_lbl = tk.Label(content_root, text="", font=("Segoe UI", 11, "underline"), 
                           bg=COLORS['main_bg'], fg="#3498DB", cursor="hand2")
         url_lbl.pack(pady=5)
         
         # Copy Button
-        copy_btn = tk.Button(parent, text="Copy Code", font=("Segoe UI", 10),
-                 bg=COLORS['input_bg'], fg=COLORS['text_primary'], relief="flat", state="disabled")
+        copy_btn = self._make_btn(content_root, "Copy Code", style="secondary", font_size=10)
+        copy_btn.config(state="disabled")
         copy_btn.pack(pady=10)
         
-        tk.Button(parent, text="Cancel", font=("Segoe UI", 10),
-                 bg="#1e1e1e", fg="white", relief="flat",
-                 command=parent.destroy).pack(pady=20)
+        self._make_btn(content_root, "Cancel", style="text", font_size=10,
+                      command=parent.destroy).pack(pady=20)
 
         # Helper to open URL
         def open_url(e):
@@ -4217,12 +6074,14 @@ class MinecraftLauncher:
             if win.winfo_exists(): status.config(text=f"Finalization Error: {e}", fg=COLORS['error_red'])
 
     def show_elyby_login(self, parent):
-        for widget in parent.winfo_children(): widget.destroy()
+        parent.title("Ely.by Login")
+        self._apply_custom_toplevel_chrome(parent, "Ely.by Login")
+        content_root = self._clear_toplevel_content(parent)
         
-        tk.Label(parent, text="Ely.by Login", font=("Segoe UI", 16, "bold"),
+        tk.Label(content_root, text="Ely.by Login", font=("Segoe UI", 16, "bold"),
                 bg=COLORS['main_bg'], fg=COLORS['text_primary']).pack(pady=(20, 10))
 
-        frame = tk.Frame(parent, bg=COLORS['main_bg'])
+        frame = tk.Frame(content_root, bg=COLORS['main_bg'])
         frame.pack(fill="x", padx=40)
 
         tk.Label(frame, text="Username / Email", font=("Segoe UI", 9), bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(anchor="w")
@@ -4268,18 +6127,19 @@ class MinecraftLauncher:
                 parent.destroy()
                 custom_showinfo("Success", f"Logged in as {name_}")
 
-        tk.Button(parent, text="Login", font=("Segoe UI", 11, "bold"),
-                 bg=COLORS['play_btn_green'], fg="white", width=25, pady=8, relief="flat", cursor="hand2",
-                 command=do_login).pack(pady=10)
+        self._make_btn(content_root, "Login", style="primary", font_size=11, bold=True,
+                      width=25, command=do_login).pack(pady=10, ipady=4)
 
     def show_offline_login(self, parent):
-        for widget in parent.winfo_children(): widget.destroy()
+        parent.title("Offline Account")
+        self._apply_custom_toplevel_chrome(parent, "Offline Account")
+        content_root = self._clear_toplevel_content(parent)
         
-        tk.Label(parent, text="Offline Account", font=("Segoe UI", 16, "bold"),
+        tk.Label(content_root, text="Offline Account", font=("Segoe UI", 16, "bold"),
                 bg=COLORS['main_bg'], fg=COLORS['text_primary']).pack(pady=(30, 10))
                 
-        tk.Label(parent, text="Username", bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(anchor="w", padx=60)
-        entry = tk.Entry(parent, font=("Segoe UI", 11), bg=COLORS['input_bg'], fg=COLORS['text_primary'], relief="flat", insertbackground="white")
+        tk.Label(content_root, text="Username", bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(anchor="w", padx=60)
+        entry = tk.Entry(content_root, font=("Segoe UI", 11), bg=COLORS['input_bg'], fg=COLORS['text_primary'], relief="flat", insertbackground="white")
         entry.pack(fill="x", padx=60, pady=(5, 30), ipady=8)
         entry.focus()
         
@@ -4292,9 +6152,8 @@ class MinecraftLauncher:
                 self.save_config()
                 parent.destroy()
         
-        tk.Button(parent, text="Add Account", font=("Segoe UI", 11, "bold"),
-                 bg=COLORS['play_btn_green'], fg="white", relief="flat", width=20, cursor="hand2",
-                 command=save).pack(pady=10)
+        self._make_btn(content_root, "Add Account", style="primary", font_size=11, bold=True,
+                      width=20, command=save).pack(pady=10, ipady=4)
 
     # --- SETTINGS TAB ---
     # --- MODS TAB ---
@@ -4309,9 +6168,9 @@ class MinecraftLauncher:
         tk.Label(top_bar, text="My Modpacks", font=("Segoe UI", 16, "bold"), 
                  bg=COLORS['main_bg'], fg="white").pack(side="left")
                  
-        tk.Button(top_bar, text="+ Create New Modpack", font=("Segoe UI", 10, "bold"),
-                 bg=COLORS['play_btn_green'], fg="white", relief="flat", padx=15, pady=5, cursor="hand2",
-                 command=self.show_create_modpack_dialog).pack(side="right")
+        create_mp_btn = self._make_btn(top_bar, "+ Create New Modpack", style="primary",
+                                         font_size=10, bold=True, command=self.show_create_modpack_dialog)
+        create_mp_btn.pack(side="right")
 
         # Config Warning
         if not self.modpacks:
@@ -4339,16 +6198,11 @@ class MinecraftLauncher:
         self.mp_canvas.pack(side="left", fill="both", expand=True)
         # Scrollbar visibility managed in refresh
         
-        # Mousewheel
-        def _on_mousewheel(event):
-            self.mp_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        
-        def _bind_mousewheel(widget):
-            widget.bind("<MouseWheel>", _on_mousewheel)
-            for child in widget.winfo_children():
-                _bind_mousewheel(child)
-
-        container.bind("<Enter>", lambda e: _bind_mousewheel(self.mp_scrollable_frame))
+        # Smooth mousewheel
+        self.mp_canvas.bind("<MouseWheel>", lambda e, c=self.mp_canvas: self._smooth_scroll(c, e))
+        container.bind("<Enter>", lambda e: self._bind_smooth_scroll(self.mp_canvas, self.mp_scrollable_frame))
+        self.mp_canvas.bind("<Enter>", lambda e: self._bind_smooth_scroll(self.mp_canvas, self.mp_scrollable_frame))
+        self.mp_scrollable_frame.bind("<Enter>", lambda e: self._bind_smooth_scroll(self.mp_canvas, self.mp_scrollable_frame))
         
         self.refresh_modpacks_list()
 
@@ -4367,6 +6221,7 @@ class MinecraftLauncher:
             self._create_modpack_item(pack, i)
             
         self.mp_scrollable_frame.update_idletasks()
+        self._bind_smooth_scroll(self.mp_canvas, self.mp_scrollable_frame)
         try:
             bbox = self.mp_canvas.bbox("all")
             if bbox and (bbox[3] - bbox[1]) > self.mp_canvas.winfo_height():
@@ -4411,16 +6266,18 @@ class MinecraftLauncher:
         # Buttons
         btns = tk.Frame(card, bg=COLORS['card_bg'])
         btns.pack(side="right")
-        
-        btn_opts = {"font": ("Segoe UI", 10), "relief": "flat", "height": 1}
 
         # Link
-        tk.Button(btns, text="Link", bg=COLORS['input_bg'], fg="white", padx=10, **btn_opts,
-                 command=lambda: self.show_link_modpack_dialog(pack)).pack(side="left", padx=2)
+        self._make_btn(btns, "Link", style="secondary", font_size=10,
+                      command=lambda: self.show_link_modpack_dialog(pack)).pack(side="left", padx=2)
 
         # Show Mods
-        tk.Button(btns, text="Show Mods", bg=COLORS['accent_blue'], fg="white", padx=10, **btn_opts,
-                 command=lambda: self.show_modpack_contents_dialog(pack)).pack(side="left", padx=2)
+        sm_btn = self._make_btn(btns, "Show Mods", style="secondary", font_size=10,
+                                command=lambda: self.show_modpack_contents_dialog(pack))
+        sm_btn.config(bg=COLORS['accent_blue'], activebackground="#2E86C1")
+        sm_btn.bind("<Enter>", lambda e: sm_btn.config(bg="#2E86C1"))
+        sm_btn.bind("<Leave>", lambda e: sm_btn.config(bg=COLORS['accent_blue']))
+        sm_btn.pack(side="left", padx=2)
 
         # Browse (+)
         def browse_action():
@@ -4429,19 +6286,20 @@ class MinecraftLauncher:
             else:
                 self.install_local_mods(pack)
 
-        tk.Button(btns, text="+", bg=COLORS['success_green'], fg="white", width=3, **btn_opts,
-                 command=browse_action).pack(side="left", padx=2)
-        
+        self._make_btn(btns, "+", style="primary", font_size=10, icon=True, width=3,
+                      command=browse_action).pack(side="left", padx=2)
+
         # Menu (⋮) - Now on Right
-        menu_btn = tk.Button(btns, text="⋮", bg=COLORS['input_bg'], fg="white", width=3, **btn_opts)
+        menu_btn = self._make_btn(btns, "⋮", style="icon", font_size=10, width=3)
         menu_btn.pack(side="left", padx=2)
-        
+
         menu = tk.Menu(menu_btn, tearoff=0, bg=COLORS['card_bg'], fg="white")
         menu.add_command(label="Open Folder", command=lambda: os.startfile(self.get_modpack_dir(pack['id'])))
         menu.add_separator()
         menu.add_command(label="Delete Modpack", command=lambda: self.delete_modpack(pack))
-        
+
         menu_btn.config(command=lambda: menu.post(menu_btn.winfo_rootx(), menu_btn.winfo_rooty() + menu_btn.winfo_height()))
+        self._bind_smooth_scroll(self.mp_canvas, card)
 
     def install_local_mods(self, pack):
         paths = filedialog.askopenfilenames(filetypes=[("Jar Files", "*.jar")])
@@ -4473,72 +6331,430 @@ class MinecraftLauncher:
         
         self.modpacks = [p for p in self.modpacks if p['id'] != pack['id']]
         self.save_modpacks()
+        
+        # Refresh both list and dropdown
         self.refresh_modpacks_list()
         self.update_active_modpack_dropdown()
+        
+        # Reset active pack selection if deleted pack was active
+        if hasattr(self, 'active_modpack_var') and self.active_modpack_var.get() == pack['name']:
+            self.active_modpack_var.set("None")
 
     def show_modpack_contents_dialog(self, pack):
         dialog = tk.Toplevel(self.root)
         dialog.title(f"Mods in {pack['name']}")
-        dialog.geometry("500x500")
+        dialog.geometry("700x600")
         dialog.config(bg=COLORS['main_bg'])
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Center on parent
+        dialog.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width()//2) - 350
+        y = self.root.winfo_y() + (self.root.winfo_height()//2) - 300
+        dialog.geometry(f"+{x}+{y}")
+        
+        # Ensure visibility
+        dialog.deiconify()
+        dialog.lift()
+        dialog_root = self._apply_custom_toplevel_chrome(dialog, f"Mods in {pack['name']}")
         
         mods_dir = os.path.join(self.get_modpack_dir(pack['id']), "mods")
         if not os.path.exists(mods_dir): os.makedirs(mods_dir)
         
-        files = [f for f in os.listdir(mods_dir) if f.endswith(".jar")]
+        # Header
+        header = tk.Frame(dialog_root, bg=COLORS['sidebar_bg'], pady=15, padx=20)
+        header.pack(fill="x")
         
-        tk.Label(dialog, text=f"Installed Mods ({len(files)})", font=("Segoe UI", 12, "bold"),
-                 bg=COLORS['main_bg'], fg="white").pack(pady=10)
+        title_frame = tk.Frame(header, bg=COLORS['sidebar_bg'])
+        title_frame.pack(fill="x")
         
-        scroll = tk.Scrollbar(dialog)
-        scroll.pack(side="right", fill="y")
+        tk.Label(title_frame, text=pack['name'], font=("Segoe UI", 16, "bold"),
+                 bg=COLORS['sidebar_bg'], fg=COLORS['text_primary']).pack(side="left")
         
-        lb = tk.Listbox(dialog, bg=COLORS['input_bg'], fg="white", font=("Segoe UI", 9),
-                       yscrollcommand=scroll.set, activestyle="dotbox")
-        lb.pack(fill="both", expand=True, padx=10, pady=5)
-        scroll.config(command=lb.yview)
+        # Action buttons in header
+        actions = tk.Frame(title_frame, bg=COLORS['sidebar_bg'])
+        actions.pack(side="right")
         
-        for f in files:
-            lb.insert("end", f)
-            
-        def delete_sel():
-            sel = lb.curselection()
-            if not sel: return
-            fname = lb.get(sel[0])
+        def open_folder():
             try:
-                os.remove(os.path.join(mods_dir, fname))
-                lb.delete(sel[0])
-                # Remove from pack meta if tracked
-                rem_meta = next((m for m in pack['mods'] if m.get('filename') == fname), None)
-                if rem_meta:
-                    pack['mods'].remove(rem_meta)
-                    self.save_modpacks()
-            except Exception as e:
-                messagebox.showerror("Error", str(e))
+                os.startfile(mods_dir)
+            except:
+                pass
+        
+        def refresh_list():
+            render_mods()
+        
+        self._make_btn(actions, "📁 Open Folder", style="secondary", font_size=9,
+                      command=open_folder).pack(side="left", padx=5)
+
+        self._make_btn(actions, "🔄 Refresh", style="secondary", font_size=9,
+                      command=refresh_list).pack(side="left")
+        
+        # Search bar
+        search_frame = tk.Frame(header, bg=COLORS['input_bg'], padx=10, pady=8)
+        search_frame.pack(fill="x", pady=(10, 0))
+        
+        tk.Label(search_frame, text="🔍", bg=COLORS['input_bg'], 
+                fg=COLORS['text_secondary']).pack(side="left")
+        
+        search_var = tk.StringVar()
+        search_entry = tk.Entry(search_frame, textvariable=search_var, 
+                               font=("Segoe UI", 10), bg=COLORS['input_bg'],
+                               fg=COLORS['text_primary'], relief="flat", 
+                               insertbackground="white")
+        search_entry.pack(side="left", fill="x", expand=True, padx=5)
+        
+        # Scrollable content area
+        content_frame = tk.Frame(dialog_root, bg=COLORS['main_bg'])
+        content_frame.pack(fill="both", expand=True)
+        
+        canvas = tk.Canvas(content_frame, bg=COLORS['main_bg'], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(content_frame, orient="vertical", 
+                                 command=canvas.yview, style="Launcher.Vertical.TScrollbar")
+        scroll_frame = tk.Frame(canvas, bg=COLORS['main_bg'])
+        canvas._nlc_scroll_enabled = False # type: ignore
+        
+        scroll_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas_window = canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+        
+        def on_canvas_configure(event):
+            canvas.itemconfig(canvas_window, width=event.width)
+            update_scrollbar_visibility()
+        
+        canvas.bind("<Configure>", on_canvas_configure)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        # Auto-hide scrollbar
+        def update_scrollbar_visibility(*args):
+            try:
+                scroll_frame.update_idletasks()
+                canvas.update_idletasks()
+                content_height = scroll_frame.winfo_reqheight()
+                canvas_height = canvas.winfo_height()
                 
-        tk.Button(dialog, text="Delete Selected", bg=COLORS['error_red'], fg="white",
-                 command=delete_sel).pack(pady=10)
+                if content_height > canvas_height:
+                    scrollbar.pack(side="right", fill="y")
+                else:
+                    scrollbar.pack_forget()
+            except:
+                pass
+        
+        scroll_frame.bind("<Configure>", lambda e: update_scrollbar_visibility())
+        
+        dialog_scroll = {"velocity": 0.0, "after_id": None}
+
+        def stop_dialog_scroll_animation():
+            after_id = dialog_scroll.get("after_id")
+            if after_id is not None:
+                try:
+                    canvas.after_cancel(after_id)
+                except Exception:
+                    pass
+            dialog_scroll["after_id"] = None
+            dialog_scroll["velocity"] = 0.0
+
+        def animate_dialog_scroll():
+            dialog_scroll["after_id"] = None
+            if not getattr(canvas, "_nlc_scroll_enabled", True):
+                stop_dialog_scroll_animation()
+                return
+            try:
+                if not canvas.winfo_exists():
+                    stop_dialog_scroll_animation()
+                    return
+            except Exception:
+                stop_dialog_scroll_animation()
+                return
+
+            velocity = float(dialog_scroll.get("velocity", 0.0))
+            if abs(velocity) < 0.25:
+                stop_dialog_scroll_animation()
+                return
+
+            bbox = canvas.bbox("all")
+            if not bbox:
+                stop_dialog_scroll_animation()
+                return
+
+            total_h = max(1, int(bbox[3] - bbox[1]))
+            view_h = max(1, int(canvas.winfo_height()))
+            if total_h <= view_h:
+                stop_dialog_scroll_animation()
+                return
+
+            top, _ = canvas.yview()
+            max_top = max(0.0, (total_h - view_h) / total_h)
+            next_top = top + (velocity / total_h)
+            if next_top < 0.0:
+                next_top = 0.0
+                velocity = 0.0
+            elif next_top > max_top:
+                next_top = max_top
+                velocity = 0.0
+
+            canvas.yview_moveto(next_top)
+            velocity *= 0.84
+            dialog_scroll["velocity"] = velocity
+            dialog_scroll["after_id"] = canvas.after(16, animate_dialog_scroll)
+
+        def on_dialog_mousewheel(event):
+            if not getattr(canvas, "_nlc_scroll_enabled", True):
+                return "break"
+            delta = int(getattr(event, "delta", 0))
+            if delta == 0:
+                return "break"
+            step = -delta / 120.0
+            if abs(step) < 0.01:
+                step = -1.0 if delta > 0 else 1.0
+            dialog_scroll["velocity"] = float(dialog_scroll.get("velocity", 0.0)) + (step * 26.0)
+            if dialog_scroll.get("after_id") is None:
+                animate_dialog_scroll()
+            return "break"
+
+        def bind_dialog_wheel(widget):
+            if not widget or not widget.winfo_exists():
+                return
+            if not getattr(widget, "_nlc_dialog_wheel_bound", False):
+                widget.bind("<MouseWheel>", on_dialog_mousewheel)
+                try:
+                    widget._nlc_dialog_wheel_bound = True  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+            for child in widget.winfo_children():
+                bind_dialog_wheel(child)
+
+        canvas.bind("<MouseWheel>", on_dialog_mousewheel)
+        content_frame.bind("<Enter>", lambda e: bind_dialog_wheel(scroll_frame))
+
+        def set_scroll_ready(ready):
+            try:
+                canvas._nlc_scroll_enabled = bool(ready) # type: ignore
+                if not ready:
+                    stop_dialog_scroll_animation()
+            except Exception:
+                pass
+        
+        # Render function
+        def render_mods():
+            set_scroll_ready(False)
+            try:
+                # Clear existing
+                for widget in scroll_frame.winfo_children():
+                    widget.destroy()
+                
+                files = [f for f in os.listdir(mods_dir) if f.endswith(".jar")]
+                search_term = search_var.get().lower()
+                
+                # Filter by search
+                if search_term:
+                    files = [f for f in files if search_term in f.lower()]
+                
+                # Count label
+                count_label = tk.Label(scroll_frame, 
+                                      text=f"{len(files)} mod{'s' if len(files) != 1 else ''} installed", 
+                                      font=("Segoe UI", 10), bg=COLORS['main_bg'],
+                                      fg=COLORS['text_secondary'])
+                count_label.pack(anchor="w", padx=20, pady=(15, 10))
+                
+                if not files:
+                    # Empty state
+                    empty_frame = tk.Frame(scroll_frame, bg=COLORS['main_bg'])
+                    empty_frame.pack(fill="both", expand=True, pady=50)
+                    
+                    tk.Label(empty_frame, text="📦", font=("Segoe UI", 48),
+                            bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack()
+                    
+                    msg = "No mods found" if not search_term else "No mods match your search"
+                    tk.Label(empty_frame, text=msg, font=("Segoe UI", 12),
+                            bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(pady=10)
+                    
+                    if not search_term:
+                        tk.Label(empty_frame, text="Use the + button to add mods", 
+                                font=("Segoe UI", 10), bg=COLORS['main_bg'],
+                                fg=COLORS['text_secondary']).pack()
+                else:
+                    canvas.update_idletasks()
+                    available_w = max(320, canvas.winfo_width() - 40)
+                    cols = max(1, min(4, available_w // 235))
+
+                    grid_wrap = tk.Frame(scroll_frame, bg=COLORS['main_bg'])
+                    grid_wrap.pack(fill="x", padx=16, pady=(0, 12))
+                    for c in range(cols):
+                        grid_wrap.grid_columnconfigure(c, weight=1, uniform="modgrid")
+
+                    for idx, filename in enumerate(sorted(files, key=str.lower)):
+                        row = idx // cols
+                        col = idx % cols
+                        create_mod_card(grid_wrap, filename, mods_dir, pack, row, col)
+            finally:
+                scroll_frame.update_idletasks()
+                canvas.configure(scrollregion=canvas.bbox("all"))
+                update_scrollbar_visibility()
+                bind_dialog_wheel(scroll_frame)
+                set_scroll_ready(True)
+        
+        def create_mod_card(parent, filename, mods_dir, pack, row, col):
+            card = tk.Frame(parent, bg=COLORS['card_bg'], padx=12, pady=10, width=220, height=128)
+            card.grid(row=row, column=col, padx=8, pady=8, sticky="nsew")
+            card.grid_propagate(False)
+            
+            # Left side - Icon/Initial + Info
+            left = tk.Frame(card, bg=COLORS['card_bg'])
+            left.pack(fill="both", expand=True)
+            
+            # Icon (first letter of filename)
+            initial = filename[0].upper() if filename else "M"
+            # Color based on first char
+            colors = ["#3498DB", "#E67E22", "#9B59B6", "#2ECC71", "#E74C3C", "#F39C12"]
+            icon_color = colors[ord(initial) % len(colors)]
+            
+            icon = tk.Label(left, text=initial, font=("Segoe UI", 14, "bold"),
+                           bg=icon_color, fg="white", width=2, height=1)
+            icon.pack(anchor="w")
+            
+            # Info
+            info = tk.Frame(left, bg=COLORS['card_bg'])
+            info.pack(fill="both", expand=True, pady=(8, 0))
+            
+            # Filename (remove .jar extension for cleaner display)
+            display_name = filename[:-4] if filename.endswith('.jar') else filename
+            tk.Label(info, text=display_name, font=("Segoe UI", 11, "bold"),
+                    bg=COLORS['card_bg'], fg=COLORS['text_primary'], anchor="w",
+                    wraplength=190, justify="left").pack(fill="x")
+            
+            # File size
+            try:
+                file_path = os.path.join(mods_dir, filename)
+                size_bytes = os.path.getsize(file_path)
+                if size_bytes < 1024:
+                    size_str = f"{size_bytes} B"
+                elif size_bytes < 1024 * 1024:
+                    size_str = f"{size_bytes / 1024:.1f} KB"
+                else:
+                    size_str = f"{size_bytes / (1024 * 1024):.1f} MB"
+                
+                tk.Label(info, text=f"📊 {size_str}", font=("Segoe UI", 9),
+                        bg=COLORS['card_bg'], fg=COLORS['text_secondary'], 
+                        anchor="w").pack(fill="x", pady=(4, 0))
+            except:
+                pass
+            
+            # Right side - Actions
+            actions = tk.Frame(card, bg=COLORS['card_bg'])
+            actions.pack(fill="x", pady=(6, 0))
+            
+            def delete_mod():
+                if custom_askyesno("Delete Mod", 
+                                  f"Are you sure you want to delete '{display_name}'?",
+                                  parent=dialog):
+                    try:
+                        os.remove(os.path.join(mods_dir, filename))
+                        # Remove from pack meta if tracked
+                        rem_meta = next((m for m in pack['mods'] 
+                                       if m.get('filename') == filename), None)
+                        if rem_meta:
+                            pack['mods'].remove(rem_meta)
+                            self.save_modpacks()
+                        render_mods()  # Refresh list
+                    except Exception as e:
+                        custom_showerror("Error", f"Failed to delete mod: {e}", 
+                                       parent=dialog)
+            
+            # Delete button
+            del_btn = tk.Button(actions, text="Remove", font=("Segoe UI", 9, "bold"),
+                               bg="#552222", fg="#F2B5B5",
+                               relief="flat", bd=0, cursor="hand2",
+                               command=delete_mod)
+            del_btn.pack(side="right")
+            
+            # Hover effect for delete button
+            def on_enter_del(e):
+                del_btn.config(bg=COLORS['error_red'], fg="white")
+            
+            def on_leave_del(e):
+                del_btn.config(bg="#552222", fg="#F2B5B5")
+            
+            del_btn.bind("<Enter>", on_enter_del)
+            del_btn.bind("<Leave>", on_leave_del)
+            
+            # Card hover effect
+            def on_enter_card(e):
+                card.config(bg="#3A3A3A")
+                left.config(bg="#3A3A3A")
+                info.config(bg="#3A3A3A")
+                actions.config(bg="#3A3A3A")
+                for child in info.winfo_children():
+                    child.config(bg="#3A3A3A") # type: ignore
+                    
+            def on_leave_card(e):
+                # Don't change delete button bg on card hover
+                if del_btn.winfo_containing(e.x_root, e.y_root) == del_btn:
+                    return
+                card.config(bg=COLORS['card_bg'])
+                left.config(bg=COLORS['card_bg'])
+                info.config(bg=COLORS['card_bg'])
+                actions.config(bg=COLORS['card_bg'])
+                for child in info.winfo_children():
+                    child.config(bg=COLORS['card_bg']) # type: ignore
+            
+            card.bind("<Enter>", on_enter_card)
+            card.bind("<Leave>", on_leave_card)
+        
+        # Initial render
+        render_mods()
+        
+        # Bind search to re-render
+        search_var.trace_add("write", lambda *args: render_mods())
 
     def show_create_modpack_dialog(self):
         dialog = tk.Toplevel(self.root)
         dialog.title("New Modpack")
-        dialog.geometry("400x300")
+        dialog.geometry("450x350")
         dialog.config(bg=COLORS['main_bg'])
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+        dialog.grab_set()
+        
+        # Center on parent
+        dialog.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width()//2) - 225
+        y = self.root.winfo_y() + (self.root.winfo_height()//2) - 175
+        dialog.geometry(f"+{x}+{y}")
+        
+        # Ensure visibility
+        dialog.deiconify()
+        dialog.lift()
+        x = self.root.winfo_x() + (self.root.winfo_width()//2) - 225
+        y = self.root.winfo_y() + (self.root.winfo_height()//2) - 175
+        dialog.geometry(f"+{x}+{y}")
+        
+        # Ensure visibility
+        dialog.deiconify()
+        dialog.lift()
+        dialog_root = self._apply_custom_toplevel_chrome(dialog, "New Modpack")
         
         # Name
-        tk.Label(dialog, text="Modpack Name", bg=COLORS['main_bg'], fg="white").pack(pady=(20,5))
+        tk.Label(dialog_root, text="Modpack Name", bg=COLORS['main_bg'], fg="white").pack(pady=(20,5))
         name_var = tk.StringVar()
-        tk.Entry(dialog, textvariable=name_var).pack()
+        tk.Entry(dialog_root, textvariable=name_var).pack()
         
         # Loader
-        tk.Label(dialog, text="Mod Loader", bg=COLORS['main_bg'], fg="white").pack(pady=(15,5))
+        tk.Label(dialog_root, text="Mod Loader", bg=COLORS['main_bg'], fg="white").pack(pady=(15,5))
         loader_var = tk.StringVar(value="fabric")
-        ttk.Combobox(dialog, textvariable=loader_var, values=["fabric", "forge"], state="readonly").pack()
+        ttk.Combobox(dialog_root, textvariable=loader_var, values=["fabric", "forge"], state="readonly").pack()
         
         # Version
-        tk.Label(dialog, text="Minecraft Version", bg=COLORS['main_bg'], fg="white").pack(pady=(15,5))
+        tk.Label(dialog_root, text="Minecraft Version", bg=COLORS['main_bg'], fg="white").pack(pady=(15,5))
         ver_var = tk.StringVar(value="Fetching...")
-        ver_cb = ttk.Combobox(dialog, textvariable=ver_var, values=[], state="disabled")
+        ver_cb = ttk.Combobox(dialog_root, textvariable=ver_var, values=[], state="disabled")
         ver_cb.pack()
         
         def fetch_vers():
@@ -4578,31 +6794,52 @@ class MinecraftLauncher:
              }
              self.modpacks.append(new_pack)
              self.save_modpacks()
-             self.refresh_modpacks_list()
-             self.update_active_modpack_dropdown() # Update dropdown in Mods tab
              self.get_modpack_dir(new_pack['id']) # Create dir
+             
+             # Close dialog first for better UX
              dialog.destroy()
              
-        tk.Button(dialog, text="Create", command=create, bg=COLORS['play_btn_green'], fg="white").pack(pady=20)
+             # Then refresh UI (use after to ensure dialog is fully closed)
+             self.root.after(50, lambda: [
+                 self.refresh_modpacks_list(),
+                 self.update_active_modpack_dropdown()
+             ])
+             
+        self._make_btn(dialog_root, "Create", style="primary", font_size=10, bold=True,
+                      command=create).pack(pady=20)
 
     def show_link_modpack_dialog(self, pack):
         dialog = tk.Toplevel(self.root)
         dialog.title(f"Link '{pack['name']}'")
-        dialog.geometry("400x400")
+        dialog.geometry("450x450")
         dialog.config(bg=COLORS['main_bg'])
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+        dialog.grab_set()
         
-        tk.Label(dialog, text="Select Installation to Link", font=("Segoe UI", 12),
+        # Center on parent
+        dialog.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width()//2) - 225
+        y = self.root.winfo_y() + (self.root.winfo_height()//2) - 225
+        dialog.geometry(f"+{x}+{y}")
+        
+        # Ensure visibility
+        dialog.deiconify()
+        dialog.lift()
+        dialog_root = self._apply_custom_toplevel_chrome(dialog, f"Link '{pack['name']}'")
+        
+        tk.Label(dialog_root, text="Select Installation to Link", font=("Segoe UI", 12),
                  bg=COLORS['main_bg'], fg="white").pack(pady=15)
                  
-        tk.Label(dialog, text=f"Requires: {pack['mc_version']} ({pack['loader']})", 
+        tk.Label(dialog_root, text=f"Requires: {pack['mc_version']} ({pack['loader']})", 
                  bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(pady=(0, 15))
                  
         # List Compatible Installs
         insts = self.get_installations().items()
         
-        scroll = tk.Scrollbar(dialog)
+        scroll = tk.Scrollbar(dialog_root)
         scroll.pack(side="right", fill="y")
-        lb = tk.Listbox(dialog, bg=COLORS['input_bg'], fg="white", yscrollcommand=scroll.set, width=40)
+        lb = tk.Listbox(dialog_root, bg=COLORS['input_bg'], fg="white", yscrollcommand=scroll.set, width=40)
         lb.pack(pady=10, fill="both", expand=True)
         scroll.config(command=lb.yview)
         
@@ -4650,14 +6887,22 @@ class MinecraftLauncher:
             # Link it
             pack['linked_installation_id'] = inst_id
             self.save_modpacks()
-            self.refresh_modpacks_list()
+            
+            # Close dialog first
             dialog.destroy()
+            
+            # Then refresh UI
+            self.root.after(50, self.refresh_modpacks_list)
         
         def create_match():
              threading.Thread(target=self._create_matching_installation_thread, args=(pack, dialog), daemon=True).start()
 
-        tk.Button(dialog, text="Create Matching Installation", command=create_match, bg=COLORS['accent_blue'], fg="white").pack(pady=(15, 5))
-        tk.Button(dialog, text="Link Selected", command=link, bg=COLORS['play_btn_green'], fg="white").pack(pady=(5, 15))
+        create_match_btn = self._make_btn(dialog, "Create Matching Installation", style="secondary",
+                                           font_size=10, bold=True, command=create_match)
+        create_match_btn.pack(pady=(15, 5), fill="x", padx=30)
+        link_btn = self._make_btn(dialog, "Link Selected", style="primary",
+                                  font_size=10, bold=True, command=link)
+        link_btn.pack(pady=(5, 15), fill="x", padx=30)
 
     def _create_matching_installation_thread(self, pack, dialog):
         try:
@@ -4694,13 +6939,15 @@ class MinecraftLauncher:
             self.save_config() # Saves installations
             self.save_modpacks() # Saves modpack link
             
-            self.root.after(0, lambda: [
-                self.refresh_installations_list(),
-                self.update_installation_dropdown(),
-                self.refresh_modpacks_list(),
-                dialog.destroy(),
+            def update_ui():
+                self.refresh_installations_list()
+                self.update_installation_dropdown()
+                self.refresh_modpacks_list()
+                if dialog.winfo_exists():
+                    dialog.destroy()
                 messagebox.showinfo("Success", f"Created installation '{new_name}' and linked it.")
-            ])
+            
+            self.root.after(0, update_ui)
             
         except Exception as e:
             print(e)
@@ -4778,12 +7025,13 @@ class MinecraftLauncher:
                 btn_mod.config(bg=COLORS['input_bg'])
                 btn_pack.config(bg=COLORS['accent_blue'])
 
-        btn_mod = tk.Button(mode_frame, text="Mods", command=lambda: switch_mode("mod"), 
-                           bg=COLORS['accent_blue'], fg="white", relief="flat", width=12)
+        btn_mod = self._make_btn(mode_frame, "Mods", style="secondary", font_size=9,
+                                  width=12, command=lambda: switch_mode("mod"))
+        btn_mod.config(bg=COLORS['accent_blue'], activebackground="#2E86C1")
         btn_mod.pack(side="left", padx=(0, 5))
-        
-        btn_pack = tk.Button(mode_frame, text="Modpacks", command=lambda: switch_mode("modpack"), 
-                            bg=COLORS['input_bg'], fg="white", relief="flat", width=12)
+
+        btn_pack = self._make_btn(mode_frame, "Modpacks", style="secondary", font_size=9,
+                                   width=12, command=lambda: switch_mode("modpack"))
         btn_pack.pack(side="left", padx=5)
         
         # Search Entry
@@ -4875,36 +7123,19 @@ class MinecraftLauncher:
         self.mods_canvas.pack(side="left", fill="both", expand=True)
         self.mods_scrollbar.pack(side="right", fill="y")
         
-        # Mousewheel for Mods Tab
+        # Smooth mousewheel for Mods Tab with infinite scroll check
         self.last_scroll_check = 0
         
-        def _on_mousewheel(event):
-            # Prevent scrolling up past top
-            if event.delta > 0 and self.mods_canvas.yview()[0] <= 0: return
-
-            self.mods_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-            
-            # Simple throttle for scroll checking (Infinite Scroll / Pagination)
+        def _mods_smooth_scroll(event):
+            self._smooth_scroll(self.mods_canvas, event)
+            # Also check for infinite scroll (pagination) on each scroll input
             now = time.time()
-
             if now - self.last_scroll_check > 0.2:
                 self.last_scroll_check = now
                 self._check_scroll_position()
         
-        def _bind_mousewheel(widget):
-            # Only bind if not already bound to avoid duplicates stack
-            # But tk binds replace usually.
-            widget.bind("<MouseWheel>", _on_mousewheel)
-            for child in widget.winfo_children():
-                _bind_mousewheel(child)
-        
-        # Bind when entering the specific frame, unbind when leaving? 
-        # Actually proper way is key bindings only when focused, but for mousewheel 
-        # usually we just bind to the widget under mouse.
-        
-        frame.bind("<Enter>", lambda e: _bind_mousewheel(self.mods_scrollable_frame))
-        self.mods_scrollable_frame.bind("<Configure>", lambda e: _bind_mousewheel(self.mods_scrollable_frame))
-        self.mods_canvas.bind("<Enter>", lambda e: _bind_mousewheel(self.mods_canvas))
+        self.mods_canvas.bind("<MouseWheel>", lambda e: _mods_smooth_scroll(e))
+        frame.bind("<Enter>", lambda e: self._bind_smooth_scroll(self.mods_canvas, self.mods_scrollable_frame))
 
         self.mod_search_timer = None
         self.cached_mod_images = {}
@@ -5032,6 +7263,7 @@ class MinecraftLauncher:
         # Update Scrollbar Region Explicitly
         self.mods_scrollable_frame.update_idletasks()
         self.mods_canvas.configure(scrollregion=self.mods_canvas.bbox("all"))
+        self._bind_smooth_scroll(self.mods_canvas, self.mods_scrollable_frame)
 
         self.mod_loading = False
 
@@ -5070,11 +7302,8 @@ class MinecraftLauncher:
         
         # INSTALL BUTTON (If pack selected or Modpack Browse)
         if mod.get('project_type') == 'modpack':
-             btn = tk.Button(btn_frame, text="Download", font=("Segoe UI", 9, "bold"), 
-                        bg=COLORS['play_btn_green'], fg="white", relief="flat", cursor="hand2")
+             btn = self._make_btn(btn_frame, "Download", style="primary", font_size=9, bold=True)
              btn.pack(side="right", padx=5)
-             # Logic to install Modpack from Modrinth
-             # We need a new method for this
              btn.config(command=lambda m=mod, b=btn: self._install_mr_modpack(m, b))
 
         else:
@@ -5086,8 +7315,6 @@ class MinecraftLauncher:
                 if pack:
                     # Check meta
                     mod_slug = mod.get('slug')
-                    # Also check filename if slug check fails or is not present? 
-                    # Meta structure: {slug: "sodium", filename: "sodium-..."}
                     if any(m.get('slug') == mod_slug for m in pack['mods']):
                         is_installed = True
                 
@@ -5095,14 +7322,12 @@ class MinecraftLauncher:
                     tk.Label(btn_frame, text="✔ Installed", font=("Segoe UI", 9, "bold"), 
                             fg=COLORS['success_green'], bg=COLORS['card_bg']).pack(side="right", padx=10)
                 else:
-                    btn = tk.Button(btn_frame, text="Install", font=("Segoe UI", 9, "bold"), 
-                            bg=COLORS['play_btn_green'], fg="white", relief="flat", cursor="hand2")
+                    btn = self._make_btn(btn_frame, "Install", style="primary", font_size=9, bold=True)
                     btn.pack(side="right", padx=5)
                     btn.config(command=lambda b=btn, m=mod, p=active_pack_name: self._install_mod_to_pack(m, p, b))
 
-        tk.Button(btn_frame, text="Web", font=("Segoe UI", 9), bg=COLORS['input_bg'], fg="white",
-                 relief="flat", cursor="hand2", 
-                 command=lambda u=f"https://modrinth.com/{mod.get('project_type', 'mod')}/{mod['slug']}": webbrowser.open(u)).pack(side="right", padx=5)
+        self._make_btn(btn_frame, "Web", style="secondary", font_size=9,
+                      command=lambda u=f"https://modrinth.com/{mod.get('project_type', 'mod')}/{mod['slug']}": webbrowser.open(u)).pack(side="right", padx=5)
 
     def _install_mod_to_pack(self, mod_data, pack_name, btn_widget):
         pack = next((p for p in self.modpacks if p['name'] == pack_name), None)
@@ -5404,43 +7629,60 @@ class MinecraftLauncher:
         
         canvas_window = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw", width=content_frame.winfo_reqwidth())
 
+        # Smooth mousewheel
+        canvas.bind("<MouseWheel>", lambda e, c=canvas: self._smooth_scroll(c, e))
+        
         def on_canvas_configure(event):
             canvas.itemconfig(canvas_window, width=event.width)
+        
         canvas.bind("<Configure>", on_canvas_configure)
-
         canvas.configure(yscrollcommand=scrollbar.set)
         
         canvas.pack(side="left", fill="both", expand=True)
-        # Scrollbar auto-hide logic could be added here, but Settings usually needs scrolling
         scrollbar.pack(side="right", fill="y")
         
-        # Mousewheel
-        def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        
-        def _bind_mousewheel(widget):
-            widget.bind("<MouseWheel>", _on_mousewheel)
-            for child in widget.winfo_children():
-                _bind_mousewheel(child)
-        
-        scrollable_frame.bind("<Configure>", lambda e: _bind_mousewheel(scrollable_frame))
-        content_frame.bind("<Enter>", lambda e: _bind_mousewheel(scrollable_frame))
+        # Bind mousewheel when entering the settings content area
+        content_frame.bind("<Enter>", lambda e: self._bind_smooth_scroll(canvas, scrollable_frame))
 
         # Scroll helper
         def scroll_to_widget(widget):
-             # Force update to get accurate coords
-             scrollable_frame.update_idletasks()
-             y = widget.winfo_y()
-             h = scrollable_frame.winfo_height()
-             if h > 0:
-                 canvas.yview_moveto(y / h)
+             try:
+                 # Force update to get accurate coords
+                 scrollable_frame.update_idletasks()
+                 canvas.update_idletasks()
+                 
+                 # Get widget position relative to scrollable_frame
+                 widget_y = widget.winfo_y()
+                 canvas_height = canvas.winfo_height()
+                 
+                 # Get total content height
+                 scrollable_frame.update_idletasks()
+                 total_height = scrollable_frame.winfo_reqheight()
+                 
+                 # Only scroll if content is taller than canvas
+                 if total_height > canvas_height:
+                     # Calculate position to show widget near top (with 20px offset)
+                     target_y = max(0, widget_y - 20)
+                     
+                     # Convert to fraction (0.0 to 1.0)
+                     scrollable_height = total_height - canvas_height
+                     if scrollable_height > 0:
+                         fraction = target_y / scrollable_height
+                         fraction = max(0.0, min(1.0, fraction))
+                         canvas.yview_moveto(fraction)
+                 else:
+                     # Content fits in view, scroll to top
+                     canvas.yview_moveto(0)
+             except Exception as e:
+                 print(f"Scroll error: {e}")
 
         # Nav Buttons logic
         def create_nav_btn(text, target_widget):
             btn = tk.Button(nav_frame, text=text, font=("Segoe UI", 10),
                            bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'],
                            relief="flat", anchor="w", padx=20, pady=8,
-                           command=lambda: scroll_to_widget(target_widget))
+                           cursor="hand2",
+                           command=lambda w=target_widget: scroll_to_widget(w))
             btn.pack(fill="x")
             
             # Hover
@@ -5493,13 +7735,11 @@ class MinecraftLauncher:
                                  relief="flat", insertbackground="white")
         self.dir_entry.pack(side="left", fill="x", expand=True, ipady=5)
         
-        tk.Button(dir_frame, text="Change", font=("Segoe UI", 9),
-                 bg=COLORS['input_bg'], fg=COLORS['text_primary'],
-                 relief="flat", command=self.change_minecraft_dir).pack(side="left", padx=(10, 0))
-                 
-        tk.Button(dir_frame, text="Open", font=("Segoe UI", 9),
-                 bg=COLORS['input_bg'], fg=COLORS['text_primary'],
-                 relief="flat", command=self.open_minecraft_dir).pack(side="left", padx=(5, 0)) # type: ignore
+        self._make_btn(dir_frame, "Change", style="secondary", font_size=9,
+                      command=self.change_minecraft_dir).pack(side="left", padx=(10, 0))
+
+        self._make_btn(dir_frame, "Open", style="secondary", font_size=9,
+                      command=self.open_minecraft_dir).pack(side="left", padx=(5, 0)) # type: ignore
 
         # Java Arguments
         tk.Label(main_container, text="Java Arguments (JVM Flags)", font=("Segoe UI", 10),
@@ -5659,17 +7899,21 @@ class MinecraftLauncher:
             if name == _current:
                 f.config(bg="white")
 
-            btn = tk.Button(f, bg=col, width=6, height=2, relief="flat", cursor="hand2",
+            btn = tk.Button(f, bg=col, width=6, height=2, relief="flat", bd=0, cursor="hand2",
                            command=lambda n=name: set_accent(n))
+            # Hover — lighten slightly
+            _hov = col
+            btn.config(activebackground=col)
+            btn.bind("<Enter>", lambda e, b=btn, c=col: b.config(relief="solid", bd=1))
+            btn.bind("<Leave>", lambda e, b=btn: b.config(relief="flat", bd=0))
             btn.pack()
 
         # Review Onboarding
         tk.Label(main_container, text="Onboarding", font=("Segoe UI", 10),
                 bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(anchor="w", pady=(10, 5))
                 
-        tk.Button(main_container, text="Review setup wizard", font=("Segoe UI", 9),
-                 bg=COLORS['input_bg'], fg=COLORS['text_primary'], relief="flat", padx=15, pady=6, cursor="hand2",
-                 command=lambda: self.show_onboarding_wizard()).pack(anchor="w")
+        self._make_btn(main_container, "Review setup wizard", style="secondary", font_size=9,
+                      command=lambda: self.show_onboarding_wizard()).pack(anchor="w")
 
         # --- LOGS ---
         lbl_logs = tk.Label(main_container, text="LAUNCHER LOGS", font=("Segoe UI", 14, "bold"),
@@ -5691,9 +7935,8 @@ class MinecraftLauncher:
         tk.Label(update_frame, text=f"Current Version: {CURRENT_VERSION}", font=("Segoe UI", 10),
                 bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(side="left", padx=(0, 20))
         
-        tk.Button(update_frame, text="Check for Updates", font=("Segoe UI", 9),
-                 bg=COLORS['input_bg'], fg=COLORS['text_primary'],
-                 relief="flat", command=self.check_for_updates).pack(side="left")
+        self._make_btn(update_frame, "Check for Updates", style="secondary", font_size=9,
+                      command=self.check_for_updates).pack(side="left")
 
         self.update_status_lbl = tk.Label(main_container, text="", font=("Segoe UI", 9),
                                          bg=COLORS['main_bg'], fg=COLORS['text_secondary'])
@@ -5710,14 +7953,11 @@ class MinecraftLauncher:
                 bg=COLORS['main_bg'], fg="#E74C3C")
         lbl_danger.pack(anchor="w", pady=(30, 15))
         
-        tk.Button(main_container, text="Reset to Defaults", font=("Segoe UI", 9, "bold"),
-                 bg="#E74C3C", fg="white", activebackground="#C0392B", activeforeground="white",
-                 relief="flat", padx=15, pady=8, cursor="hand2",
-                 command=self.reset_to_defaults).pack(anchor="w")
+        self._make_btn(main_container, "Reset to Defaults", style="danger", font_size=9, bold=True,
+                      command=self.reset_to_defaults).pack(anchor="w")
 
         # Initial binding
-        _bind_mousewheel(scrollable_frame)
-        canvas.bind("<MouseWheel>", _on_mousewheel)
+        self._bind_smooth_scroll(canvas, scrollable_frame)
         
         # Populate Nav
         create_nav_btn("General", lbl_general)
@@ -5799,18 +8039,31 @@ class MinecraftLauncher:
         
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
-
-        # Mousewheel
-        def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
         
-        def _bind_mousewheel(widget):
-            widget.bind("<MouseWheel>", _on_mousewheel)
-            for child in widget.winfo_children():
-                _bind_mousewheel(child)
+        # Auto-hide scrollbar when not needed
+        def update_scrollbar_visibility(*args):
+            try:
+                scroll_frame.update_idletasks()
+                canvas.update_idletasks()
+                content_height = scroll_frame.winfo_reqheight()
+                canvas_height = canvas.winfo_height()
+                
+                if content_height > canvas_height:
+                    scrollbar.pack(side="right", fill="y")
+                else:
+                    scrollbar.pack_forget()
+            except:
+                pass
+        
+        # Bind to canvas resize and content changes
+        canvas.bind("<Configure>", lambda e: [on_canvas_configure(e), update_scrollbar_visibility()])
+        scroll_frame.bind("<Configure>", lambda e: update_scrollbar_visibility())
 
-        # Bind enter/leave for scrolling
-        frame.bind("<Enter>", lambda e: _bind_mousewheel(scroll_frame))
+        # Smooth mousewheel
+        canvas.bind("<MouseWheel>", lambda e, c=canvas: self._smooth_scroll(c, e))
+
+        # Bind enter for scrolling
+        frame.bind("<Enter>", lambda e: self._bind_smooth_scroll(canvas, scroll_frame))
         
         # --- content ---
         content = tk.Frame(scroll_frame, bg=COLORS['main_bg'], padx=30, pady=10)
@@ -5848,9 +8101,12 @@ class MinecraftLauncher:
         self.gh_token_entry.grid(row=1, column=1, sticky="ew", padx=10, ipady=5)
         
         # Save Button
-        tk.Button(sync_frame, text="Save & Sync", command=self._save_gh_sync_settings, 
-                 bg=COLORS['accent_blue'], fg="white", font=("Segoe UI", 10), 
-                 padx=20, pady=8, relief="flat", cursor="hand2").pack(anchor="w", pady=(20, 0))
+        save_sync_btn = self._make_btn(sync_frame, "Save & Sync", style="secondary", font_size=10,
+                                       command=self._save_gh_sync_settings)
+        save_sync_btn.config(bg=COLORS['accent_blue'], activebackground="#2E86C1")
+        save_sync_btn.bind("<Enter>", lambda e: save_sync_btn.config(bg="#2E86C1"))
+        save_sync_btn.bind("<Leave>", lambda e: save_sync_btn.config(bg=COLORS['accent_blue']))
+        save_sync_btn.pack(anchor="w", pady=(20, 0))
 
         # Instructions
         info_frame = tk.Frame(content, bg=COLORS['main_bg'], pady=10)
@@ -6062,12 +8318,33 @@ How to use:
                         update_available = True
                             
                 if update_available:
-                    asset_url = None
-                    for asset in data.get("assets", []):
-                        if asset.get("name", "").endswith(".exe"):
-                            asset_url = asset.get("browser_download_url")
+                    assets = data.get("assets", [])
+                    preferred_asset = None
+
+                    # Auto-update must use the full installer so dependencies are included.
+                    for asset in assets:
+                        name = str(asset.get("name", ""))
+                        if name.lower() == "nlcsetup.exe":
+                            preferred_asset = asset
                             break
-                    self.root.after(0, lambda: self._on_update_found(latest_tag, data.get("html_url"), asset_url))
+                    if preferred_asset is None:
+                        for asset in assets:
+                            name = str(asset.get("name", "")).lower()
+                            if name.endswith(".exe") and ("setup" in name or "installer" in name):
+                                preferred_asset = asset
+                                break
+
+                    asset_url = preferred_asset.get("browser_download_url") if preferred_asset else None
+                    asset_name = preferred_asset.get("name") if preferred_asset else ""
+                    self.root.after(
+                        0,
+                        lambda: self._on_update_found(
+                            latest_tag,
+                            data.get("html_url"),
+                            asset_url,
+                            asset_name,
+                        ),
+                    )
                 else:
                      self.root.after(0, lambda: self.update_status_lbl.config(text="You are on the latest version.", fg=COLORS['success_green']))
             else:
@@ -6076,7 +8353,7 @@ How to use:
             self.root.after(0, lambda: self.update_status_lbl.config(text=f"Error checking updates", fg=COLORS['error_red']))
             print(f"Update check error: {e}")
 
-    def _on_update_found(self, version, html_url, asset_url):
+    def _on_update_found(self, version, html_url, asset_url, asset_name=""):
         self.update_status_lbl.config(text=f"New version available: {version}", fg=COLORS['accent_blue'])
         
         # Choice: Yes -> Auto Update, Manual -> Visit Page, No -> Dismiss
@@ -6097,10 +8374,19 @@ How to use:
         choice = mbox.result
         
         if choice is True:
-            if asset_url:
-                self.perform_auto_update(asset_url, version)
+            is_setup_asset = str(asset_name).lower().endswith("setup.exe") or str(asset_name).lower() == "nlcsetup.exe"
+            if asset_url and is_setup_asset:
+                try:
+                    self.root.grab_release()
+                except Exception:
+                    pass
+                self.root.after(0, lambda u=asset_url, v=version: self.perform_auto_update(u, v))
             else:
-                custom_showerror("Error", "No executable found for auto-update.\nOpening release page instead.")
+                custom_showerror(
+                    "Error",
+                    "Auto-update installer (NLCSetup.exe) was not found in this release.\n"
+                    "Opening release page instead."
+                )
                 if html_url:
                     webbrowser.open(html_url)
         elif choice == "manual":
@@ -6155,8 +8441,61 @@ How to use:
                 self.root.withdraw()
 
     def restore_window(self):
-        self.root.deiconify()
-        self.root.state('normal')
+        self._cancel_window_animation()
+        wx, wy, ww, wh = self._get_work_area()
+
+        if self._pre_minimize_was_maximized:
+            target = (wx, wy, max(1, ww), max(1, wh))
+        elif self._pre_minimize_geometry:
+            target = self._pre_minimize_geometry
+        else:
+            fallback = self._windowed_geometry if self._windowed_geometry else (wx + 80, wy + 80, 1080, 720)
+            target = (
+                int(fallback[0]),
+                int(fallback[1]),
+                max(1, int(fallback[2])),
+                max(1, int(fallback[3]))
+            )
+
+        if self._pre_minimize_anchor_geometry:
+            start = self._pre_minimize_anchor_geometry
+        else:
+            tw = max(280, int(target[2] * 0.45))
+            th = max(180, int(target[3] * 0.45))
+            tx = wx + (ww - tw) // 2
+            ty = wy + wh - th - 10
+            start = (tx, ty, tw, th)
+
+        def on_restore_done():
+            self._window_is_maximized = bool(self._pre_minimize_was_maximized)
+            if hasattr(self, 'window_max_btn'):
+                self.window_max_btn.config(text="❐" if self._window_is_maximized else "□")
+            self._update_titlebar_controls_offset()
+            self.root.lift()
+            try:
+                self.root.focus_force()
+            except Exception:
+                pass
+            self._pre_minimize_geometry = None
+            self._pre_minimize_anchor_geometry = None
+            self._pre_minimize_was_maximized = False
+
+        def finalize_restore():
+            self.root.deiconify()
+            self.root.state('normal')
+            self._set_geometry_tuple(target)
+            self._set_custom_window_chrome(True)
+            self._ensure_taskbar_visibility()
+
+        self._run_transition_with_overlay(
+            start,
+            target,
+            duration=140,
+            steps=12,
+            subtitle="Restoring window",
+            finalize=finalize_restore,
+            on_done=on_restore_done
+        )
         
     def _on_close(self):
          should_tray = False
@@ -6347,6 +8686,7 @@ How to use:
             return
 
         p = self.profiles[self.current_profile_index]
+        old_skin_path = self.skin_path
         self.skin_path = p.get("skin_path", "")
         
         # Enforce settings based on account type
@@ -6360,16 +8700,24 @@ How to use:
             self.user_entry.delete(0, tk.END)
             self.user_entry.insert(0, p.get("name", "Steve"))
         
-        if self.skin_path:
-            self.render_preview()
-        
-        # Update Model Radio var
+        # Update Model Radio var BEFORE rendering
         if hasattr(self, 'skin_model_var'):
             self.skin_model_var.set(p.get("skin_model", "classic"))
+        
+        # Only render if skin path changed or is set
+        if self.skin_path and (self.skin_path != old_skin_path or not old_skin_path):
+            self.render_preview()
+        elif not self.skin_path and hasattr(self, 'preview_canvas'):
+            self.preview_canvas.delete("all")  # Clear preview if no skin
 
         self.update_skin_indicator()
         self.update_profile_btn()
         if hasattr(self, 'update_bottom_gamertag'): self.update_bottom_gamertag()
+        
+        # Refresh skin history if on Locker tab
+        if self.current_tab == "Locker" and hasattr(self, 'locker_view') and self.locker_view.get() == "Skins":
+            if hasattr(self, 'render_skin_history'):
+                self.render_skin_history()
         
     def update_profile_btn(self):
         # Update text labels
@@ -6690,14 +9038,15 @@ How to use:
         dialog.transient(self.root)
         dialog.resizable(False, False)
         dialog.grab_set()
+        dialog_root = self._apply_custom_toplevel_chrome(dialog, "Skin Model")
         
-        tk.Label(dialog, text="Select Skin Model", font=("Segoe UI", 12, "bold"), 
+        tk.Label(dialog_root, text="Select Skin Model", font=("Segoe UI", 12, "bold"), 
                 bg=COLORS['main_bg'], fg=COLORS['text_primary']).pack(pady=15)
         
-        tk.Label(dialog, text="Does your skin have 3px (Slim) or 4px (Classic) arms?", 
+        tk.Label(dialog_root, text="Does your skin have 3px (Slim) or 4px (Classic) arms?", 
                  font=("Segoe UI", 9), bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(pady=(0, 20))
         
-        btn_frame = tk.Frame(dialog, bg=COLORS['main_bg'])
+        btn_frame = tk.Frame(dialog_root, bg=COLORS['main_bg'])
         btn_frame.pack(fill="x", padx=30)
         
         def set_classic():
@@ -6714,18 +9063,26 @@ How to use:
         
         # Classic (Steve)
         b1_bg = COLORS['success_green'] if current_model == "classic" else COLORS['card_bg']
-        b1 = tk.Button(btn_frame, text="Classic (Steve)\n4px Arms", font=("Segoe UI", 10),
-                      bg=b1_bg, fg=COLORS['text_primary'], relief="flat", padx=10, pady=10,
-                      command=set_classic, width=15)
-        if current_model == "classic": b1.config(fg="white") # Highlight text too
+        b1 = self._make_btn(btn_frame, "Classic (Steve)\n4px Arms", 
+                           style="primary" if current_model == "classic" else "secondary",
+                           font_size=10, width=15, command=set_classic)
+        b1.config(bg=b1_bg, pady=10)
+        if current_model == "classic": 
+            b1.config(fg="white")
+            b1.bind("<Enter>", lambda e: b1.config(bg="#3AA044"))
+            b1.bind("<Leave>", lambda e: b1.config(bg=COLORS['success_green']))
         b1.pack(side="left", padx=5)
         
         # Slim (Alex)
         b2_bg = COLORS['success_green'] if current_model == "slim" else COLORS['card_bg']
-        b2 = tk.Button(btn_frame, text="Slim (Alex)\n3px Arms", font=("Segoe UI", 10),
-                      bg=b2_bg, fg=COLORS['text_primary'], relief="flat", padx=10, pady=10,
-                      command=set_slim, width=15)
-        if current_model == "slim": b2.config(fg="white")
+        b2 = self._make_btn(btn_frame, "Slim (Alex)\n3px Arms",
+                           style="primary" if current_model == "slim" else "secondary",
+                           font_size=10, width=15, command=set_slim)
+        b2.config(bg=b2_bg, pady=10)
+        if current_model == "slim":
+            b2.config(fg="white")
+            b2.bind("<Enter>", lambda e: b2.config(bg="#3AA044"))
+            b2.bind("<Leave>", lambda e: b2.config(bg=COLORS['success_green']))
         b2.pack(side="right", padx=5)
         
         self.root.wait_window(dialog)
@@ -6769,9 +9126,13 @@ How to use:
 
     def render_preview(self):
         try:
+            # Check if preview canvas exists and is visible
+            if not hasattr(self, 'preview_canvas') or not self.preview_canvas.winfo_exists():
+                return
+                
             if not self.skin_path or not os.path.exists(self.skin_path): 
-                 if hasattr(self, 'preview_canvas'): self.preview_canvas.delete("all")
-                 return
+                self.preview_canvas.delete("all")
+                return
             
             # Determine model
             model = "classic"
@@ -6779,18 +9140,38 @@ How to use:
                  model = self.profiles[self.current_profile_index].get("skin_model", "classic")
 
             # Use 3D Renderer
-            if hasattr(self, 'preview_canvas'):
-                 w = self.preview_canvas.winfo_width()
-                 h = self.preview_canvas.winfo_height()
-                 # Defaults if not mapped yet
-                 if w < 50: w = 300
-                 if h < 50: h = 360
-                 
-                 rendered = SkinRenderer3D.render(self.skin_path, model, height=int(h * 0.9))
-                 if rendered:
-                     self.preview_photo = ImageTk.PhotoImage(rendered)
-                     self.preview_canvas.delete("all")
-                     self.preview_canvas.create_image(w//2, h//2, image=self.preview_photo, anchor="center")
+            w = self.preview_canvas.winfo_width()
+            h = self.preview_canvas.winfo_height()
+            # Defaults if not mapped yet
+            if w < 50: w = 300
+            if h < 50: h = 360
+            
+            # Cache key for rendered skin
+            cache_key = (self.skin_path, model, h)
+            
+            # Check if we already have this rendered (optimization)
+            if hasattr(self, '_preview_cache') and cache_key in self._preview_cache:
+                self.preview_photo = self._preview_cache[cache_key]
+                self.preview_canvas.delete("all")
+                self.preview_canvas.create_image(w//2, h//2, image=self.preview_photo, anchor="center")
+                return
+            
+            rendered = SkinRenderer3D.render(self.skin_path, model, height=int(h * 0.9))
+            if rendered:
+                self.preview_photo = ImageTk.PhotoImage(rendered)
+                
+                # Cache the rendered image
+                if not hasattr(self, '_preview_cache'):
+                    self._preview_cache = {}
+                self._preview_cache[cache_key] = self.preview_photo
+                
+                # Limit cache size
+                if len(self._preview_cache) > 10:
+                    # Remove oldest (first) entry
+                    self._preview_cache.pop(next(iter(self._preview_cache)))
+                
+                self.preview_canvas.delete("all")
+                self.preview_canvas.create_image(w//2, h//2, image=self.preview_photo, anchor="center")
         except Exception as e:
             print(f"Preview Error: {e}")
 
@@ -7019,9 +9400,16 @@ How to use:
                      custom_showinfo("Success", "Skin uploaded successfully!")
                      self.profiles[self.current_profile_index]["skin_path"] = path
                      self.profiles[self.current_profile_index]["skin_model"] = variant
-                     self.update_active_profile()
+                     
+                     # Update UI
+                     self.skin_path = path
+                     if hasattr(self, 'skin_model_var'):
+                         self.skin_model_var.set(variant)
+                     self.render_preview()
+                     self.update_skin_indicator()
+                     
+                     # Add to history and save once
                      self.add_skin_to_history(path, variant)
-                     self.save_config()
                  else:
                      custom_showerror("Error", f"Failed to upload skin.")
                      
@@ -7036,18 +9424,22 @@ How to use:
                 self.auto_download_var.set(True)
         path = filedialog.askopenfilename(filetypes=[("Image files", "*.png")])
         if path:
-            self.skin_path = path
-            
             # Ask model for offline usage too (for correct injections/rendering)
             variant = self.custom_skin_model_popup() or "classic"
             
+            self.skin_path = path
             if self.profiles and 0 <= self.current_profile_index < len(self.profiles):
                 self.profiles[self.current_profile_index]["skin_path"] = path
                 self.profiles[self.current_profile_index]["skin_model"] = variant
-                
-            self.update_active_profile()
+            
+            # Update UI
+            if hasattr(self, 'skin_model_var'):
+                self.skin_model_var.set(variant)
+            self.render_preview()
+            self.update_skin_indicator()
+            
+            # Add to history (will save config)
             self.add_skin_to_history(path, variant)
-            self.save_config()
 
     def ensure_authlib_injector(self):
         """ Ensures authlib-injector is present. Code adapted to fetch latest release from GitHub. """
@@ -7083,6 +9475,9 @@ How to use:
         return d
 
     def start_launch(self, force_update=False):
+        # Close any open menus
+        self._close_all_menus()
+        
         if not self.installations: return
         
         idx = getattr(self, 'current_installation_index', 0)

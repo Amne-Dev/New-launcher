@@ -7,7 +7,7 @@ import base64
 import time
 import os
 import urllib.parse
-from typing import Any
+from typing import Any, Optional
 
 class MicrosoftLoginHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):
@@ -54,15 +54,58 @@ class LocalSkinHandler(http.server.BaseHTTPRequestHandler):
     Minimal Yggdrasil-compatible Skin Server for Offline Mode.
     Serves the locally selected skin to the game via authlib-injector.
     """
-    skin_path = None
-    skin_model = "classic"
-    player_name = "Player"
-    player_uuid = None
+    # Class-level cache for skin data (shared across instances)
+    _skin_cache = {}
+    _cache_lock = threading.Lock()
+    
+    def __init__(self, *args, **kwargs):
+        # Instance variables (thread-safe)
+        self.skin_path: Optional[str] = None
+        self.skin_model = "classic"
+        self.player_name = "Player"
+        self.player_uuid: Optional[str] = None
+        super().__init__(*args, **kwargs)
 
     def log_message(self, format, *args):
         pass # Suppress server logs
+    
+    def _get_cached_skin_data(self, filepath) -> Optional[bytes]:
+        """Get skin data from cache or read from file."""
+        if not filepath or not os.path.exists(filepath):
+            return None
+        
+        try:
+            # Check cache with file modification time
+            mtime = os.path.getmtime(filepath)
+            cache_key = (filepath, mtime)
+            
+            with self._cache_lock:
+                if cache_key in self._skin_cache:
+                    return self._skin_cache[cache_key]
+                
+                # Read file and cache it
+                with open(filepath, 'rb') as f:
+                    data = f.read()
+                
+                # Limit cache size to prevent memory bloat
+                if len(self._skin_cache) > 20:
+                    # Remove oldest entry
+                    self._skin_cache.pop(next(iter(self._skin_cache)), None)
+                
+                self._skin_cache[cache_key] = data
+                return data
+        except Exception:
+            return None
 
     def do_POST(self):
+        # Get instance variables from server
+        if hasattr(self.server, 'skin_config'):
+            config = self.server.skin_config  # type: ignore
+            self.skin_path = config.get('skin_path')
+            self.player_name = config.get('player_name', 'Player')
+            self.player_uuid = config.get('player_uuid')
+            self.skin_model = config.get('skin_model', 'classic')
+        
         # Handle Auth/Validation requests blindly to satisfy injector
         if self.path.startswith("/authserver/") or self.path == "/authenticate":
             self.send_response(200)
@@ -86,6 +129,14 @@ class LocalSkinHandler(http.server.BaseHTTPRequestHandler):
         self.send_error(404)
 
     def do_GET(self):
+        # Get instance variables from server
+        if hasattr(self.server, 'skin_config'):
+            config = self.server.skin_config  # type: ignore
+            self.skin_path = config.get('skin_path')
+            self.player_name = config.get('player_name', 'Player')
+            self.player_uuid = config.get('player_uuid')
+            self.skin_model = config.get('skin_model', 'classic')
+        
         # Root check
         if self.path == '/':
             self.send_response(200)
@@ -107,9 +158,8 @@ class LocalSkinHandler(http.server.BaseHTTPRequestHandler):
         # Profile request: /sessionserver/session/minecraft/profile/<uuid>
         if self.path.startswith("/sessionserver/session/minecraft/profile/"):
             requested_uuid = self.path.split("/")[-1].split("?")[0]
-            # Verify UUID matches (or just serve anyway)
             
-            # Read skin file
+            # Check if skin exists
             if not self.skin_path or not os.path.exists(self.skin_path):
                 # Fallback to empty profile to prevent crash
                 p_id = requested_uuid or (self.player_uuid.replace("-", "") if self.player_uuid else "")
@@ -124,13 +174,6 @@ class LocalSkinHandler(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(json.dumps(resp).encode('utf-8'))
                 return
 
-            try:
-                # We don't read the file here, we just verify it exists
-                pass 
-            except:
-                self.send_error(500)
-                return
-
             # Construct Texture Payload
             texture_model = "default" 
             if hasattr(self, 'skin_model') and self.skin_model == 'slim':
@@ -139,18 +182,18 @@ class LocalSkinHandler(http.server.BaseHTTPRequestHandler):
             host = self.headers.get('Host')
             texture_url = f"http://{host}/textures/skin.png"
 
-            skin_data: dict[str, Any] = {
+            texture_info: dict[str, Any] = {
                 "url": texture_url
             }
             if texture_model == "slim":
-                skin_data["metadata"] = {"model": "slim"}
+                texture_info["metadata"] = {"model": "slim"}
 
             textures = {
                 "timestamp": int(time.time() * 1000),
                 "profileId": requested_uuid,
                 "profileName": self.player_name,
                 "textures": {
-                    "SKIN": skin_data
+                    "SKIN": texture_info
                 }
             }
             
@@ -176,38 +219,93 @@ class LocalSkinHandler(http.server.BaseHTTPRequestHandler):
 
         # Texture Request
         if self.path == "/textures/skin.png":
-             if not self.skin_path or not os.path.exists(self.skin_path):
+            # Use cached skin data
+            skin_data = self._get_cached_skin_data(self.skin_path)
+            if not skin_data:
                 self.send_error(404)
                 return
-             try:
-                with open(self.skin_path, "rb") as f:
-                    data = f.read()
+            
+            try:
                 self.send_response(200)
                 self.send_header('Content-type', 'image/png')
+                self.send_header('Content-Length', str(len(skin_data)))
+                self.send_header('Cache-Control', 'public, max-age=3600')  # Cache for 1 hour
                 self.end_headers()
-                self.wfile.write(data)
-             except: self.send_error(500)
-             return
+                self.wfile.write(skin_data)
+            except Exception:
+                self.send_error(500)
+            return
 
         self.send_error(404)
 
 class LocalSkinServer:
+    """Manages a local HTTP server for serving skins with proper cleanup."""
     def __init__(self, port=0):
         self.handler = LocalSkinHandler
-        # Use ThreadingTCPServer to avoid blocking constraints
-        self.httpd = socketserver.ThreadingTCPServer(("127.0.0.1", port), self.handler)
-        self.port = self.httpd.server_address[1]
-        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.httpd: Optional[socketserver.ThreadingTCPServer] = None
+        self.thread: Optional[threading.Thread] = None
+        self.port = port
+        self._running = False
 
     def start(self, skin_path, player_name, player_uuid, skin_model="classic"):
-        self.handler.skin_path = skin_path
-        self.handler.player_name = player_name
-        self.handler.player_uuid = player_uuid
-        self.handler.skin_model = skin_model
-        self.thread.start()
-        print(f"Local Skin Server started on port {self.port}")
-        return f"http://127.0.0.1:{self.port}"
+        """Start the skin server with given configuration."""
+        try:
+            # Create server instance
+            self.httpd = socketserver.ThreadingTCPServer(("127.0.0.1", self.port), self.handler)
+            self.port = self.httpd.server_address[1]
+            
+            # Store configuration in server instance (thread-safe)
+            self.httpd.skin_config = {  # type: ignore
+                'skin_path': skin_path,
+                'player_name': player_name,
+                'player_uuid': player_uuid,
+                'skin_model': skin_model
+            }
+            
+            # Start server thread
+            self.thread = threading.Thread(target=self._serve_forever, daemon=True)
+            self._running = True
+            self.thread.start()
+            
+            print(f"Local Skin Server started on port {self.port}")
+            return f"http://127.0.0.1:{self.port}"
+        except Exception as e:
+            print(f"Failed to start Local Skin Server: {e}")
+            return None
+    
+    def _serve_forever(self):
+        """Server loop with error recovery."""
+        if self.httpd:
+            try:
+                self.httpd.serve_forever()
+            except Exception as e:
+                print(f"Skin server error: {e}")
+            finally:
+                self._running = False
 
     def stop(self):
-        self.httpd.shutdown()
-        self.httpd.server_close()
+        """Properly stop the server and clean up resources."""
+        if self.httpd and self._running:
+            try:
+                self._running = False
+                self.httpd.shutdown()
+                self.httpd.server_close()
+                
+                # Wait for thread to finish (with timeout)
+                if self.thread and self.thread.is_alive():
+                    self.thread.join(timeout=2.0)
+                
+                print("Local Skin Server stopped")
+            except Exception as e:
+                print(f"Error stopping skin server: {e}")
+            finally:
+                self.httpd = None
+                self.thread = None
+    
+    def is_running(self):
+        """Check if server is currently running."""
+        return self._running and self.thread and self.thread.is_alive()
+    
+    def __del__(self):
+        """Cleanup on object destruction."""
+        self.stop()

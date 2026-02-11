@@ -5,6 +5,34 @@ import os
 import base64
 import requests
 import urllib.parse
+import hashlib
+
+# Global session for connection pooling
+_session = None
+
+def get_session():
+    """Get or create requests session with connection pooling."""
+    global _session
+    if _session is None:
+        _session = requests.Session()
+        _session.headers.update({"User-Agent": "NewLauncher-Agent"})
+    return _session
+
+def get_file_sha(filepath):
+    """Calculate SHA hash for file comparison."""
+    if not os.path.exists(filepath):
+        return None
+    try:
+        sha1 = hashlib.sha1()
+        with open(filepath, 'rb') as f:
+            while True:
+                data = f.read(65536)
+                if not data:
+                    break
+                sha1.update(data)
+        return sha1.hexdigest()
+    except Exception:
+        return None
 
 def handle_gh_skin_sync(payload):
     repo = payload.get("repo")
@@ -17,10 +45,10 @@ def handle_gh_skin_sync(payload):
     if not repo or not token or not username:
         return {"status": "error", "msg": "Missing configuration"}
 
+    session = get_session()
     headers = {
         "Authorization": f"token {token}",
-        "Accept": "application/vnd.github.v3+json",
-        "User-Agent": "NewLauncher-Agent"
+        "Accept": "application/vnd.github.v3+json"
     }
     
     if len(sys.argv) > 1:
@@ -39,69 +67,90 @@ def handle_gh_skin_sync(payload):
     try:
         # 1. Upload Current Skin if requested
         if do_upload and skin_path and os.path.exists(skin_path):
+            # Validate file size (max 1MB for skins)
+            file_size = os.path.getsize(skin_path)
+            if file_size > 1048576:  # 1MB
+                return {"status": "error", "msg": "Skin file too large (max 1MB)"}
+            
             with open(skin_path, "rb") as f:
                 content = base64.b64encode(f.read()).decode("utf-8")
             
             # Check if exists to get SHA
             sha = None
-            r_check = requests.get(api_url, headers=headers)
-            if r_check.status_code == 200:
-                sha = r_check.json().get("sha")
+            try:
+                r_check = session.get(api_url, headers=headers, timeout=10)
+                if r_check.status_code == 200:
+                    sha = r_check.json().get("sha")
+            except requests.RequestException:
+                pass  # File might not exist yet
             
             data = {
                 "message": f"Update skin for {username}",
                 "content": content,
-                "branch": "main" # Assume main
+                "branch": "main"
             }
             if sha:
                 data["sha"] = sha
                 
-            r_put = requests.put(api_url, headers=headers, json=data)
+            r_put = session.put(api_url, headers=headers, json=data, timeout=30)
             if r_put.status_code not in [200, 201]:
                 return {"status": "error", "msg": f"Upload failed: {r_put.status_code} {r_put.text}"}
 
         # 2. Download Friends' Skins
         synced_count = 0
+        skipped_count = 0
         if do_download:
-            r_list = requests.get(base_url, headers=headers)
-            if r_list.status_code == 200:
-                items = r_list.json()
-                if isinstance(items, list):
-                    for item in items:
-                        name = item.get("name")
-                        download_url = item.get("download_url")
-                        
-                        if name and download_url and name.endswith(".png"):
-                            # Skip our own skin if we just uploaded it (optional, but good for caching)
-                            # Actually we might want to download it to ensure we have the 'cloud' version
+            try:
+                r_list = session.get(base_url, headers=headers, timeout=15)
+                if r_list.status_code == 200:
+                    items = r_list.json()
+                    if isinstance(items, list):
+                        for item in items:
+                            name = item.get("name")
+                            download_url = item.get("download_url")
+                            remote_sha = item.get("sha")  # GitHub provides SHA for files
                             
-                            local_file = os.path.join(skins_cache_dir, name)
-                            
-                            # Simple optimization: If file exists, maybe skip? 
-                            # For now, let's just re-download to be safe or check SHA if we tracked it.
-                            # We'll just download for now.
-                            
-                            r_img = requests.get(download_url)
-                            if r_img.status_code == 200:
-                                with open(local_file, "wb") as f:
-                                    f.write(r_img.content)
-                                synced_count += 1
+                            if name and download_url and name.endswith(".png"):
+                                local_file = os.path.join(skins_cache_dir, name)
+                                
+                                # Optimization: Check if file already exists with same SHA
+                                if os.path.exists(local_file) and remote_sha:
+                                    local_sha = get_file_sha(local_file)
+                                    if local_sha and local_sha == remote_sha:
+                                        skipped_count += 1
+                                        continue  # Skip download, file is identical
+                                
+                                # Download file
+                                try:
+                                    r_img = session.get(download_url, timeout=15)
+                                    if r_img.status_code == 200:
+                                        # Validate it's actually a PNG
+                                        if r_img.content[:8] == b'\x89PNG\r\n\x1a\n':
+                                            with open(local_file, "wb") as f:
+                                                f.write(r_img.content)
+                                            synced_count += 1
+                                except requests.RequestException:
+                                    continue  # Skip failed downloads
+            except requests.RequestException as e:
+                return {"status": "error", "msg": f"Download failed: {str(e)}"}
 
-        return {"status": "success", "msg": f"Skin sync complete. Uploaded: {do_upload}, Downloaded: {synced_count}"}
+        return {"status": "success", "msg": f"Skin sync complete. Uploaded: {do_upload}, Downloaded: {synced_count}, Skipped: {skipped_count}"}
 
     except Exception as e:
         return {"status": "error", "msg": str(e)}
 
 def handle_search_mods(payload):
+    """Search mods on Modrinth API with proper error handling and timeout."""
     try:
         query = payload.get("query")
         limit = payload.get("limit", 20)
         offset = payload.get("offset", 0)
         facets = payload.get("facets", [])
         
+        # Build query parameters
         params = f"limit={limit}&offset={offset}"
         if query:
-            params += f"&query={query}"
+            params += f"&query={urllib.parse.quote(query)}"
         else:
             params += "&index=downloads"
 
@@ -114,14 +163,19 @@ def handle_search_mods(payload):
              params += f'&facets={enc}'
 
         url = f"https://api.modrinth.com/v2/search?{params}"
-        headers = {"User-Agent": "AmneDev/NewLauncher/1.6.4"}
+        headers = {"User-Agent": "AmneDev/NewLauncher/1.8.2"}
         
-        response = requests.get(url, headers=headers, timeout=10)
+        session = get_session()
+        response = session.get(url, headers=headers, timeout=15)
         if response.status_code == 200:
             return {"status": "success", "data": response.json()}
         else:
             return {"status": "error", "code": response.status_code, "msg": response.text}
             
+    except requests.Timeout:
+        return {"status": "error", "msg": "Request timed out"}
+    except requests.RequestException as e:
+        return {"status": "error", "msg": f"Network error: {str(e)}"}
     except Exception as e:
         return {"status": "error", "msg": str(e)}
 
