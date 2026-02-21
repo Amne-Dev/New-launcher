@@ -12,7 +12,7 @@ import winreg
 
 
 APP_NAME = "New Launcher"
-APP_VERSION = "2.1"
+APP_VERSION = "2.2"
 APP_PUBLISHER = "@amne-dev on github"
 APP_EXE = "NewLauncher.exe"
 AGENT_EXE = "agent.exe"
@@ -93,6 +93,36 @@ def is_user_admin() -> bool:
         return True
     try:
         return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def relaunch_as_admin(argv: list[str]) -> bool:
+    if os.name != "nt":
+        return False
+    if is_user_admin():
+        return True
+
+    try:
+        if getattr(sys, "frozen", False):
+            executable = os.path.abspath(sys.executable)
+            params = subprocess.list2cmdline(argv)
+            workdir = os.path.dirname(executable)
+        else:
+            script_path = os.path.abspath(__file__)
+            executable = sys.executable
+            params = subprocess.list2cmdline([script_path, *argv])
+            workdir = os.path.dirname(script_path)
+
+        result = ctypes.windll.shell32.ShellExecuteW(
+            None,
+            "runas",
+            executable,
+            params,
+            workdir,
+            1,
+        )
+        return int(result) > 32
     except Exception:
         return False
 
@@ -1184,12 +1214,25 @@ def _parse_args(argv: list[str]):
     parser.add_argument("--uninstall", action="store_true")
     parser.add_argument("--target", default="")
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--elevated", action="store_true")
     args, _ = parser.parse_known_args(argv)
     return args
 
 
 if __name__ == "__main__":
     cli = _parse_args(sys.argv[1:])
+    if os.name == "nt" and not is_user_admin():
+        if not cli.elevated:
+            launch_args = list(sys.argv[1:])
+            launch_args.append("--elevated")
+            if relaunch_as_admin(launch_args):
+                raise SystemExit(0)
+        messagebox.showerror(
+            "Administrator Required",
+            "NLC Setup requires administrator privileges.\n"
+            "Please approve the UAC prompt and try again.",
+        )
+        raise SystemExit(1)
     if cli.uninstall:
         raise SystemExit(run_uninstall(cli.target.strip(), quiet=cli.quiet))
     InstallerApp().run()

@@ -238,6 +238,7 @@ def _force_taskbar_button(window):
         SWP_NOZORDER = 0x0004
         SWP_NOACTIVATE = 0x0010
         SWP_FRAMECHANGED = 0x0020
+        SWP_SHOWWINDOW = 0x0040
 
         for hwnd in _iter_widget_hwnds(window):
             try:
@@ -245,10 +246,11 @@ def _force_taskbar_button(window):
                 new_style = (ex_style & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW
                 if new_style != ex_style:
                     set_window_long(hwnd, GWL_EXSTYLE, new_style)
-                    ctypes.windll.user32.SetWindowPos(
-                        hwnd, 0, 0, 0, 0, 0,
-                        SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED
-                    )
+                # Always commit frame change so Explorer updates taskbar grouping immediately.
+                ctypes.windll.user32.SetWindowPos(
+                    hwnd, 0, 0, 0, 0, 0,
+                    SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW
+                )
             except Exception:
                 continue
     except Exception:
@@ -263,7 +265,6 @@ def _prime_taskbar_window(window):
         try:
             if not window.winfo_exists():
                 return
-            _detach_window_owner(window)
             _force_taskbar_button(window)
         except Exception:
             pass
@@ -273,31 +274,25 @@ def _prime_taskbar_window(window):
     except Exception:
         pass
 
-    def refresh_once():
-        if getattr(window, "_nlc_taskbar_refreshed", False):
-            return
+    def schedule_prime(_event=None):
         try:
             if not window.winfo_exists():
                 return
-            state = str(window.state())
-            if state in ("withdrawn", "iconic"):
-                return
         except Exception:
             return
-        if _refresh_taskbar_registration(window):
-            try:
-                window._nlc_taskbar_refreshed = True  # type: ignore[attr-defined]
-            except Exception:
-                pass
+        window.after_idle(enforce)
+        window.after(80, enforce)
+        window.after(180, enforce)
+        window.after(320, lambda: _refresh_taskbar_registration(window))
+        window.after(650, lambda: _refresh_taskbar_registration(window))
 
     if not getattr(window, "_nlc_taskbar_hooks", False):
-        def on_window_mapped(_event=None):
-            window.after(0, enforce)
-            window.after(90, enforce)
-            window.after(40, refresh_once)
-
         try:
-            window.bind("<Map>", on_window_mapped, add="+")
+            window.bind("<Map>", schedule_prime, add="+")
+        except Exception:
+            pass
+        try:
+            window.bind("<FocusIn>", lambda _event=None: window.after(40, enforce), add="+")
         except Exception:
             pass
         try:
@@ -305,14 +300,7 @@ def _prime_taskbar_window(window):
         except Exception:
             pass
 
-    window.after(0, enforce)
-    window.after(35, enforce)
-    window.after(120, enforce)
-    window.after(260, enforce)
-    window.after(520, enforce)
-    window.after(70, refresh_once)
-    window.after(220, refresh_once)
-    window.after(420, refresh_once)
+    schedule_prime()
 
 
 def _refresh_taskbar_registration(window):
@@ -320,15 +308,22 @@ def _refresh_taskbar_registration(window):
         return False
     try:
         user32 = ctypes.windll.user32
-        SW_HIDE = 0
-        SW_SHOWNA = 8
+        SWP_NOSIZE = 0x0001
+        SWP_NOMOVE = 0x0002
+        SWP_NOZORDER = 0x0004
+        SWP_NOACTIVATE = 0x0010
+        SWP_FRAMECHANGED = 0x0020
+        RDW_INVALIDATE = 0x0001
+        RDW_UPDATENOW = 0x0100
+        RDW_FRAME = 0x0400
         did_refresh = False
         for hwnd in _iter_widget_hwnds(window):
             try:
-                if not user32.IsWindowVisible(hwnd):
-                    continue
-                user32.ShowWindow(hwnd, SW_HIDE)
-                user32.ShowWindow(hwnd, SW_SHOWNA)
+                user32.SetWindowPos(
+                    hwnd, 0, 0, 0, 0, 0,
+                    SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED
+                )
+                user32.RedrawWindow(hwnd, None, None, RDW_INVALIDATE | RDW_UPDATENOW | RDW_FRAME)
                 did_refresh = True
             except Exception:
                 continue
@@ -819,13 +814,13 @@ class CustomMessagebox(tk.Toplevel):
         self._drag_start_y = 0
         self._drag_win_x = 0
         self._drag_win_y = 0
-        try: 
-            self.attributes('-topmost', True)
-            # Add subtle shadow effect on Windows
+        try:
+            # Keep a short fade-in for Windows without forcing topmost.
             if os.name == 'nt':
                 self.attributes('-alpha', 0.0)
                 self.after(10, lambda: self.attributes('-alpha', 1.0))
-        except: pass
+        except Exception:
+            pass
         use_custom_chrome = (os.name == 'nt')
         if use_custom_chrome:
             try:
@@ -837,6 +832,17 @@ class CustomMessagebox(tk.Toplevel):
         target_parent = parent
         self._target_parent = target_parent
         self._parent_focus_bind_id = None
+        self._dialog_manager = None
+        try:
+            manager = getattr(target_parent, "_nlc_app", None) if target_parent is not None else None
+            if manager is None:
+                default_root = getattr(tk, "_default_root", None)
+                manager = getattr(default_root, "_nlc_app", None) if default_root is not None else None
+            if manager is not None:
+                self._dialog_manager = manager
+                manager._register_dialog_window(self)
+        except Exception:
+            self._dialog_manager = None
         _ensure_window_icon(self, owner=target_parent)
         _prime_taskbar_window(self)
         
@@ -969,10 +975,10 @@ class CustomMessagebox(tk.Toplevel):
                 self._parent_focus_bind_id = target_parent.bind("<FocusIn>", self._on_parent_focus, add="+")
             except Exception:
                 self._parent_focus_bind_id = None
-        self.bind("<Map>", self._on_map_restore_focus, add="+")
         if os.name != "nt":
+            self.bind("<Map>", self._on_map_restore_focus, add="+")
             self.grab_set()
-        self.after(0, self._restore_modal_focus)
+            self.after(0, self._restore_modal_focus)
         self.wait_window()
 
     def _drag_start(self, event):
@@ -1012,6 +1018,12 @@ class CustomMessagebox(tk.Toplevel):
         if target_parent and bind_id:
             try:
                 target_parent.unbind("<FocusIn>", bind_id)
+            except Exception:
+                pass
+        manager = getattr(self, "_dialog_manager", None)
+        if manager is not None:
+            try:
+                manager._unregister_dialog_window(self)
             except Exception:
                 pass
         self.result = None
@@ -1160,6 +1172,10 @@ class MinecraftLauncher:
             self.root.iconbitmap(resource_path("logo.ico"))
         except Exception:
             pass
+        try:
+            self.root._nlc_app = self  # type: ignore[attr-defined]
+        except Exception:
+            pass
         _ensure_window_icon(self.root, owner=self.root)
             
         # Center Window
@@ -1210,10 +1226,19 @@ class MinecraftLauncher:
         self._onboarding_wizard = None
         self._onboarding_overlay = None
         self._onboarding_focus_bindings = []
+        self._dialog_windows = []
+        self._dialog_focus_bindings = []
+        self._dialog_raise_scheduled = False
+        self._dialog_raise_after_id = None
+        self._dialog_last_raise_ts = 0.0
+        self._dialog_raise_min_interval = 0.12
         self.window_shell = None
         self.window_content = self.root
         self._update_in_progress = False
         self._update_shutdown_started = False
+        self._config_save_after_id = None
+        self._config_save_delay_ms = 250
+        self._config_sync_ui_pending = False
         
         # Download Queue State
         self.download_tasks = {} # id -> {ui_elements, data}
@@ -2148,6 +2173,7 @@ class MinecraftLauncher:
     def _prepare_dialog_window(self, win, owner=None):
         owner_win = owner if owner is not None else self.root
         _ensure_window_icon(win, owner=owner_win)
+        self._register_dialog_window(win)
         if os.name == 'nt':
             try:
                 win.transient(None)
@@ -2158,6 +2184,14 @@ class MinecraftLauncher:
             except Exception:
                 pass
             _prime_taskbar_window(win)
+            try:
+                win.after(140, lambda w=win: _prime_taskbar_window(w) if w.winfo_exists() else None)
+            except Exception:
+                pass
+            try:
+                win.after(20, lambda w=win: (w.lift(), w.focus_force()) if w.winfo_exists() else None)
+            except Exception:
+                pass
 
     def _apply_custom_toplevel_chrome(self, win, title_text, close_command=None):
         if not (self.custom_titlebar_enabled and os.name == 'nt'):
@@ -2259,6 +2293,159 @@ class MinecraftLauncher:
         for widget in content_root.winfo_children():
             widget.destroy()
         return content_root
+
+    def _clear_dialog_focus_bindings(self):
+        pending_after = getattr(self, "_dialog_raise_after_id", None)
+        if pending_after is not None:
+            try:
+                self.root.after_cancel(pending_after)
+            except Exception:
+                pass
+            self._dialog_raise_after_id = None
+        self._dialog_raise_scheduled = False
+        for seq, bind_id in getattr(self, "_dialog_focus_bindings", []):
+            try:
+                self.root.unbind(seq, bind_id)
+            except Exception:
+                pass
+        self._dialog_focus_bindings = []
+
+    def _cleanup_dialog_windows(self):
+        cleaned = []
+        for win in getattr(self, "_dialog_windows", []):
+            try:
+                if win is not None and win.winfo_exists():
+                    cleaned.append(win)
+            except Exception:
+                continue
+        self._dialog_windows = cleaned
+
+    def _register_dialog_window(self, win):
+        if win is None:
+            return
+        self._cleanup_dialog_windows()
+        if win not in self._dialog_windows:
+            self._dialog_windows.append(win)
+            try:
+                win.bind("<Destroy>", lambda _e, w=win: self._unregister_dialog_window(w), add="+")
+            except Exception:
+                pass
+            try:
+                win.bind("<FocusIn>", self._schedule_dialog_raise, add="+")
+            except Exception:
+                pass
+        try:
+            if not hasattr(win, "_nlc_force_above_launcher"):
+                win._nlc_force_above_launcher = True  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        self._bind_dialog_focus_tracking()
+        self._schedule_dialog_raise()
+
+    def _unregister_dialog_window(self, win):
+        if getattr(self, "_dialog_windows", None):
+            self._dialog_windows = [w for w in self._dialog_windows if w is not win]
+        if not self._dialog_windows:
+            self._clear_dialog_focus_bindings()
+
+    def _is_dialog_above_root(self, win):
+        try:
+            return bool(int(win.tk.call("wm", "stackorder", str(win), "isabove", str(self.root))))
+        except Exception:
+            return False
+
+    def _raise_single_dialog_above_launcher(self, win):
+        if os.name != "nt":
+            try:
+                win.transient(self.root)
+            except Exception:
+                pass
+            if self._is_dialog_above_root(win):
+                return
+            try:
+                win.lift(self.root)
+            except Exception:
+                win.lift()
+            return
+
+        try:
+            win.lift(self.root)
+        except Exception:
+            try:
+                win.lift()
+            except Exception:
+                return
+
+        # Windows sometimes ignores plain lift() for custom/override windows.
+        # Briefly toggling topmost forces z-order update, then immediately reverts.
+        try:
+            if not bool(getattr(win, "_nlc_force_above_launcher", False)):
+                return
+            now = time.time()
+            last = float(getattr(win, "_nlc_last_topmost_bump", 0.0))
+            if now - last < 0.35:
+                return
+            win._nlc_last_topmost_bump = now  # type: ignore[attr-defined]
+            win.attributes("-topmost", True)
+            win.after(
+                35,
+                lambda w=win: (w.winfo_exists() and w.attributes("-topmost", False))
+            )
+        except Exception:
+            pass
+
+    def _raise_dialogs_above_launcher(self):
+        self._dialog_raise_scheduled = False
+        self._dialog_raise_after_id = None
+        self._dialog_last_raise_ts = time.time()
+        try:
+            if str(self.root.state()) in ("iconic", "withdrawn"):
+                return
+        except Exception:
+            return
+
+        self._cleanup_dialog_windows()
+        if not self._dialog_windows:
+            self._clear_dialog_focus_bindings()
+            return
+
+        for win in self._dialog_windows:
+            try:
+                if str(win.state()) in ("iconic", "withdrawn"):
+                    continue
+                self._raise_single_dialog_above_launcher(win)
+            except Exception:
+                continue
+
+    def _schedule_dialog_raise(self, _event=None):
+        if self._dialog_raise_scheduled:
+            return
+        now = time.time()
+        elapsed = now - float(getattr(self, "_dialog_last_raise_ts", 0.0))
+        min_interval = float(getattr(self, "_dialog_raise_min_interval", 0.12))
+        wait_s = max(0.0, min_interval - elapsed)
+        delay_ms = int(wait_s * 1000)
+        self._dialog_raise_scheduled = True
+        try:
+            if delay_ms <= 0:
+                self.root.after_idle(self._raise_dialogs_above_launcher)
+            else:
+                self._dialog_raise_after_id = self.root.after(delay_ms, self._raise_dialogs_above_launcher)
+        except Exception:
+            self._dialog_raise_scheduled = False
+            self._dialog_raise_after_id = None
+
+    def _bind_dialog_focus_tracking(self):
+        self._clear_dialog_focus_bindings()
+        bindings = []
+        for seq in ("<FocusIn>", "<Map>", "<Activate>"):
+            try:
+                bind_id = self.root.bind(seq, self._schedule_dialog_raise, add="+")
+                if bind_id:
+                    bindings.append((seq, bind_id))
+            except Exception:
+                pass
+        self._dialog_focus_bindings = bindings
 
     def _clear_onboarding_focus_bindings(self):
         for seq, bind_id in getattr(self, "_onboarding_focus_bindings", []):
@@ -6243,6 +6430,7 @@ class MinecraftLauncher:
                 pass
         
         win = tk.Toplevel(self.root)
+        self._register_dialog_window(win)
         win.title("Add Account")
         win.geometry("450x350")
         win.config(bg=COLORS['main_bg'])
@@ -6263,6 +6451,7 @@ class MinecraftLauncher:
         win.lift()
         win.geometry(f"+{x}+{y}")
         win_root = self._apply_custom_toplevel_chrome(win, "Add Account")
+        self._schedule_dialog_raise()
 
         tk.Label(win_root, text="Add a new account", font=("Segoe UI", 16, "bold"),
                 bg=COLORS['main_bg'], fg=COLORS['text_primary']).pack(pady=(30, 20))
@@ -6281,6 +6470,11 @@ class MinecraftLauncher:
                       width=25, command=lambda: self.show_offline_login(win)).pack(pady=5, ipady=4)
 
     def show_microsoft_login(self, parent):
+        self._register_dialog_window(parent)
+        try:
+            parent._nlc_force_above_launcher = True  # type: ignore[attr-defined]
+        except Exception:
+            pass
         parent.title("Microsoft Login - Device Flow")
         self._apply_custom_toplevel_chrome(parent, "Microsoft Login")
         content_root = self._clear_toplevel_content(parent)
@@ -6291,6 +6485,7 @@ class MinecraftLauncher:
         x = self.root.winfo_x() + (self.root.winfo_width()//2) - 275
         y = self.root.winfo_y() + (self.root.winfo_height()//2) - 250
         parent.geometry(f"+{x}+{y}")
+        self._schedule_dialog_raise()
         
         tk.Label(content_root, text="Microsoft Login", font=("Segoe UI", 16, "bold"), 
                 bg=COLORS['main_bg'], fg=COLORS['text_primary']).pack(pady=(20, 10))
@@ -6452,6 +6647,7 @@ class MinecraftLauncher:
         parent.title("Ely.by Login")
         self._apply_custom_toplevel_chrome(parent, "Ely.by Login")
         content_root = self._clear_toplevel_content(parent)
+        self._schedule_dialog_raise()
         
         tk.Label(content_root, text="Ely.by Login", font=("Segoe UI", 16, "bold"),
                 bg=COLORS['main_bg'], fg=COLORS['text_primary']).pack(pady=(20, 10))
@@ -6509,6 +6705,7 @@ class MinecraftLauncher:
         parent.title("Offline Account")
         self._apply_custom_toplevel_chrome(parent, "Offline Account")
         content_root = self._clear_toplevel_content(parent)
+        self._schedule_dialog_raise()
         
         tk.Label(content_root, text="Offline Account", font=("Segoe UI", 16, "bold"),
                 bg=COLORS['main_bg'], fg=COLORS['text_primary']).pack(pady=(30, 10))
@@ -6801,9 +6998,9 @@ class MinecraftLauncher:
         def on_canvas_configure(event):
             canvas.itemconfig(canvas_window, width=event.width)
             update_scrollbar_visibility()
+            maybe_load_more()
         
         canvas.bind("<Configure>", on_canvas_configure)
-        canvas.configure(yscrollcommand=scrollbar.set)
         
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
@@ -6822,6 +7019,18 @@ class MinecraftLauncher:
                     scrollbar.pack_forget()
             except:
                 pass
+
+        def on_canvas_yview(first, last):
+            scrollbar.set(first, last)
+            update_scrollbar_visibility()
+            maybe_load_more()
+
+        def on_scrollbar_move(*args):
+            canvas.yview(*args)
+            maybe_load_more()
+
+        canvas.configure(yscrollcommand=on_canvas_yview)
+        scrollbar.configure(command=on_scrollbar_move)
         
         scroll_frame.bind("<Configure>", lambda e: update_scrollbar_visibility())
         
@@ -6879,6 +7088,7 @@ class MinecraftLauncher:
             canvas.yview_moveto(next_top)
             velocity *= 0.84
             dialog_scroll["velocity"] = velocity
+            maybe_load_more()
             dialog_scroll["after_id"] = canvas.after(16, animate_dialog_scroll)
 
         def on_dialog_mousewheel(event):
@@ -6917,21 +7127,83 @@ class MinecraftLauncher:
                     stop_dialog_scroll_animation()
             except Exception:
                 pass
+
+        lazy_state = {
+            "files": [],
+            "loaded_count": 0,
+            "cols": 1,
+            "batch_size": 24,
+            "grid_wrap": None,
+            "is_loading": False
+        }
+
+        def compute_grid_columns():
+            try:
+                canvas.update_idletasks()
+                available_w = max(320, canvas.winfo_width() - 40)
+                return max(1, min(4, available_w // 235))
+            except Exception:
+                return 3
+
+        def load_next_mod_batch():
+            if lazy_state["is_loading"]:
+                return
+            files = lazy_state["files"]
+            start = int(lazy_state["loaded_count"])
+            if start >= len(files):
+                return
+            grid_wrap = lazy_state.get("grid_wrap")
+            if grid_wrap is None or not grid_wrap.winfo_exists():
+                return
+
+            lazy_state["is_loading"] = True
+            try:
+                cols = max(1, int(lazy_state["cols"]))
+                end = min(len(files), start + int(lazy_state["batch_size"]))
+                for idx in range(start, end):
+                    filename = files[idx]
+                    row = idx // cols
+                    col = idx % cols
+                    create_mod_card(grid_wrap, filename, mods_dir, pack, row, col)
+                lazy_state["loaded_count"] = end
+            finally:
+                lazy_state["is_loading"] = False
+                scroll_frame.update_idletasks()
+                canvas.configure(scrollregion=canvas.bbox("all"))
+                update_scrollbar_visibility()
+                bind_dialog_wheel(scroll_frame)
+
+        def maybe_load_more(_event=None):
+            if lazy_state["loaded_count"] >= len(lazy_state["files"]):
+                return
+            try:
+                _, bottom = canvas.yview()
+            except Exception:
+                return
+            if bottom >= 0.82:
+                load_next_mod_batch()
         
         # Render function
         def render_mods():
             set_scroll_ready(False)
+            stop_dialog_scroll_animation()
             try:
                 # Clear existing
                 for widget in scroll_frame.winfo_children():
                     widget.destroy()
                 
-                files = [f for f in os.listdir(mods_dir) if f.endswith(".jar")]
+                files = sorted([f for f in os.listdir(mods_dir) if f.endswith(".jar")], key=str.lower)
                 search_term = search_var.get().lower()
                 
                 # Filter by search
                 if search_term:
                     files = [f for f in files if search_term in f.lower()]
+
+                lazy_state["files"] = files
+                lazy_state["loaded_count"] = 0
+                lazy_state["cols"] = compute_grid_columns()
+                lazy_state["batch_size"] = max(24, int(lazy_state["cols"]) * 10)
+                lazy_state["grid_wrap"] = None
                 
                 # Count label
                 count_label = tk.Label(scroll_frame, 
@@ -6957,25 +7229,20 @@ class MinecraftLauncher:
                                 font=("Segoe UI", 10), bg=COLORS['main_bg'],
                                 fg=COLORS['text_secondary']).pack()
                 else:
-                    canvas.update_idletasks()
-                    available_w = max(320, canvas.winfo_width() - 40)
-                    cols = max(1, min(4, available_w // 235))
-
                     grid_wrap = tk.Frame(scroll_frame, bg=COLORS['main_bg'])
                     grid_wrap.pack(fill="x", padx=16, pady=(0, 12))
-                    for c in range(cols):
+                    for c in range(lazy_state["cols"]):
                         grid_wrap.grid_columnconfigure(c, weight=1, uniform="modgrid")
-
-                    for idx, filename in enumerate(sorted(files, key=str.lower)):
-                        row = idx // cols
-                        col = idx % cols
-                        create_mod_card(grid_wrap, filename, mods_dir, pack, row, col)
+                    lazy_state["grid_wrap"] = grid_wrap
+                    load_next_mod_batch()
             finally:
                 scroll_frame.update_idletasks()
                 canvas.configure(scrollregion=canvas.bbox("all"))
                 update_scrollbar_visibility()
                 bind_dialog_wheel(scroll_frame)
+                canvas.yview_moveto(0.0)
                 set_scroll_ready(True)
+                dialog.after(30, maybe_load_more)
         
         def create_mod_card(parent, filename, mods_dir, pack, row, col):
             card = tk.Frame(parent, bg=COLORS['card_bg'], padx=12, pady=10, width=220, height=128)
@@ -7087,8 +7354,27 @@ class MinecraftLauncher:
         # Initial render
         render_mods()
         
-        # Bind search to re-render
-        search_var.trace_add("write", lambda *args: render_mods())
+        # Bind search to debounced re-render
+        search_state = {"after_id": None}
+
+        def run_search_render():
+            search_state["after_id"] = None
+            render_mods()
+
+        def schedule_search_render(*_args):
+            after_id = search_state.get("after_id")
+            if after_id is not None:
+                try:
+                    dialog.after_cancel(after_id)
+                except Exception:
+                    pass
+            try:
+                search_state["after_id"] = dialog.after(180, run_search_render) # type: ignore
+            except Exception:
+                search_state["after_id"] = None
+                render_mods()
+
+        search_var.trace_add("write", schedule_search_render)
 
     def show_create_modpack_dialog(self):
         dialog = tk.Toplevel(self.root)
@@ -8878,19 +9164,24 @@ How to use:
         )
         
     def _on_close(self):
-         should_tray = False
-         if hasattr(self, 'minimize_to_tray_var'):
-             should_tray = self.minimize_to_tray_var.get()
-         else:
-             should_tray = getattr(self, 'minimize_to_tray', False)
+        try:
+            self.save_config(sync_ui=True, immediate=True)
+        except Exception:
+            pass
 
-         if should_tray and hasattr(self, 'tray_icon') and self.tray_icon:
-             self.root.withdraw()
-         else:
-             if hasattr(self, 'tray_icon') and self.tray_icon:
-                 self.tray_icon.stop()
-             self.root.destroy()
-             os._exit(0)
+        should_tray = False
+        if hasattr(self, 'minimize_to_tray_var'):
+            should_tray = self.minimize_to_tray_var.get()
+        else:
+            should_tray = getattr(self, 'minimize_to_tray', False)
+
+        if should_tray and hasattr(self, 'tray_icon') and self.tray_icon:
+            self.root.withdraw()
+        else:
+            if hasattr(self, 'tray_icon') and self.tray_icon:
+                self.tray_icon.stop()
+            self.root.destroy()
+            os._exit(0)
 
     # --- LOGIC ---
     def setup_logging(self):
@@ -9283,40 +9574,47 @@ How to use:
                      threading.Thread(target=self._startup_ms_skin_check, daemon=True).start()
             except: pass
 
-    def save_config(self, *args, sync_ui=True):
-        print(f"Saving config to: {self.config_file}")
-        # Update current profile info before saving
+    def _build_config_payload(self, sync_ui=True):
         if sync_ui and self.profiles and 0 <= self.current_profile_index < len(self.profiles):
             self.profiles[self.current_profile_index]["skin_path"] = self.skin_path
-            # Sync username from entry if available
             if hasattr(self, 'user_entry'):
-                 name = self.user_entry.get().strip()
-                 if name:
+                name = self.user_entry.get().strip()
+                if name:
                     self.profiles[self.current_profile_index]["name"] = name
-        
-        # Update java args from entry if it exists
+
         if sync_ui and hasattr(self, 'java_args_entry'):
-             self.java_args = self.java_args_entry.get().strip()
-             
-        # Get RPC settings
+            self.java_args = self.java_args_entry.get().strip()
 
         rpc_mode = "Show Version"
-        if hasattr(self, 'rpc_detail_mode_var'): rpc_mode = self.rpc_detail_mode_var.get()
-        if hasattr(self, 'auto_update_var'): self.auto_update_check = self.auto_update_var.get()
-        
-        # Map mode to old bools for compat or runtime usage
+        if hasattr(self, 'rpc_detail_mode_var'):
+            rpc_mode = self.rpc_detail_mode_var.get()
+        if hasattr(self, 'auto_update_var'):
+            self.auto_update_check = self.auto_update_var.get()
+
         self.rpc_show_version = (rpc_mode == "Show Version")
         self.rpc_show_server = (rpc_mode == "Show Server IP")
-        
-        config = {
+
+        close_launcher_val = getattr(self, 'close_launcher', True)
+        if hasattr(self, 'close_launcher_var'):
+            close_launcher_val = self.close_launcher_var.get()
+
+        minimize_to_tray_val = getattr(self, 'minimize_to_tray', False)
+        if hasattr(self, 'minimize_to_tray_var'):
+            minimize_to_tray_val = self.minimize_to_tray_var.get()
+
+        show_console_val = getattr(self, 'show_console', False)
+        if hasattr(self, 'show_console_var'):
+            show_console_val = self.show_console_var.get()
+
+        return {
             "first_run_completed": not self.first_run,
             "accent_color": getattr(self, "accent_color_name", "Green"),
             "profiles": self.profiles,
             "installations": self.installations,
             "current_profile_index": self.current_profile_index,
             "current_installation_index": getattr(self, 'current_installation_index', 0),
-            "loader": self.loader_var.get(), 
-            "auto_download_mod": self.auto_download_mod, 
+            "loader": self.loader_var.get() if hasattr(self, 'loader_var') else "Vanilla",
+            "auto_download_mod": self.auto_download_mod,
             "ram_allocation": self.ram_allocation,
             "java_args": self.java_args,
             "minecraft_dir": self.minecraft_dir,
@@ -9325,24 +9623,62 @@ How to use:
             "rpc_show_version": self.rpc_show_version,
             "rpc_show_server": self.rpc_show_server,
             "auto_update_check": self.auto_update_check,
-            # Features / Downloads
             "max_concurrent_packs": getattr(self, 'max_concurrent_packs', 1),
             "max_concurrent_mods": getattr(self, 'max_concurrent_mods', 3),
             "limit_download_speed_enabled": getattr(self, 'limit_download_speed_enabled', False),
             "max_download_speed": getattr(self, 'max_download_speed', 2048),
             "enable_modrinth": getattr(self, 'enable_modrinth', True),
-            # UI State
-            "close_launcher": getattr(self, 'close_launcher_var', tk.BooleanVar(value=True)).get(),
-            "minimize_to_tray": getattr(self, 'minimize_to_tray_var', tk.BooleanVar(value=False)).get(),
-            "show_console": getattr(self, 'show_console_var', tk.BooleanVar(value=False)).get(),
+            "close_launcher": close_launcher_val,
+            "minimize_to_tray": minimize_to_tray_val,
+            "show_console": show_console_val,
             "current_wallpaper": getattr(self, 'current_wallpaper', None),
             "addons": getattr(self, "addons_config", {})
         }
+
+    def _write_config_payload(self, config):
+        tmp_path = f"{self.config_file}.tmp"
         try:
-            with open(self.config_file, "w", encoding="utf-8") as f: json.dump(config, f, indent=4)
-            print("Config saved successfully")
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(config, f, indent=4)
+            os.replace(tmp_path, self.config_file)
         except Exception as e:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
             print(f"Failed to save config: {e}")
+
+    def _flush_pending_config_save(self):
+        self._config_save_after_id = None
+        sync_ui = bool(getattr(self, "_config_sync_ui_pending", False))
+        self._config_sync_ui_pending = False
+        self._write_config_payload(self._build_config_payload(sync_ui=sync_ui))
+
+    def save_config(self, *args, sync_ui=True, immediate=False):
+        self._config_sync_ui_pending = bool(getattr(self, "_config_sync_ui_pending", False) or bool(sync_ui))
+
+        if immediate:
+            if getattr(self, "_config_save_after_id", None) is not None:
+                try:
+                    self.root.after_cancel(self._config_save_after_id)
+                except Exception:
+                    pass
+                self._config_save_after_id = None
+            self._flush_pending_config_save()
+            return
+
+        delay = max(50, int(getattr(self, "_config_save_delay_ms", 250)))
+        if self._config_save_after_id is not None:
+            try:
+                self.root.after_cancel(self._config_save_after_id)
+            except Exception:
+                pass
+        try:
+            self._config_save_after_id = self.root.after(delay, self._flush_pending_config_save)
+        except Exception:
+            self._config_save_after_id = None
+            self._flush_pending_config_save()
 
     def create_default_profile(self):
         self.profiles = [{"name": DEFAULT_USERNAME, "type": "offline", "skin_path": "", "uuid": ""}]

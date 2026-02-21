@@ -1,6 +1,6 @@
 # Config and Constants for New Launcher
 
-CURRENT_VERSION = "2.1"
+CURRENT_VERSION = "2.2"
 
 # MICROSOFT AUTH CONFIGURATION
 # MSA_CLIENT_ID = "00000000402b5328" # Official Launcher - Does not support Device Code Flow
