@@ -23,3 +23,5 @@ NewLauncher-1.4-x86_64.AppImage
 /venv_build
 /addons/p3_menu/.gradle
 /addons/p3_menu/build_manual
+/NewLauncher.CSharpUI
+New-launcher.sln

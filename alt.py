@@ -141,6 +141,201 @@ def normalize_version_text(value):
         return ""
     return value.replace(INSTALL_MARK, "").strip()
 
+
+def _get_widget_hwnd(widget):
+    if os.name != "nt":
+        return 0
+    try:
+        return int(widget.winfo_id())
+    except Exception:
+        return 0
+
+
+def _iter_widget_hwnds(widget):
+    if os.name != "nt":
+        return []
+    try:
+        user32 = ctypes.windll.user32
+        base_hwnd = int(widget.winfo_id())
+    except Exception:
+        return []
+
+    try:
+        root_hwnd = int(user32.GetAncestor(base_hwnd, 2))  # GA_ROOT
+    except Exception:
+        root_hwnd = 0
+    if root_hwnd > 0:
+        return [root_hwnd]
+    if base_hwnd > 0:
+        return [base_hwnd]
+    return []
+
+
+def _ensure_window_icon(window, owner=None):
+    try:
+        icon_ico = resource_path("logo.ico")
+        if os.path.exists(icon_ico):
+            window.iconbitmap(icon_ico)
+    except Exception:
+        pass
+
+    try:
+        shared_photo = None
+        if owner is not None:
+            shared_photo = getattr(owner, "_nlc_icon_photo", None)
+        if shared_photo is None:
+            shared_photo = getattr(window, "_nlc_icon_photo", None)
+        if shared_photo is None:
+            icon_png = resource_path("logo.png")
+            if os.path.exists(icon_png):
+                shared_photo = tk.PhotoImage(file=icon_png)
+        if shared_photo is not None:
+            window._nlc_icon_photo = shared_photo
+            window.iconphoto(True, shared_photo)
+    except Exception:
+        pass
+
+
+def _detach_window_owner(window):
+    if os.name != "nt":
+        return
+    try:
+        set_window_long = getattr(ctypes.windll.user32, "SetWindowLongPtrW", ctypes.windll.user32.SetWindowLongW)
+        GWL_HWNDPARENT = -8
+        SWP_NOSIZE = 0x0001
+        SWP_NOMOVE = 0x0002
+        SWP_NOZORDER = 0x0004
+        SWP_NOACTIVATE = 0x0010
+        SWP_FRAMECHANGED = 0x0020
+
+        for hwnd in _iter_widget_hwnds(window):
+            try:
+                set_window_long(hwnd, GWL_HWNDPARENT, 0)
+                ctypes.windll.user32.SetWindowPos(
+                    hwnd, 0, 0, 0, 0, 0,
+                    SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED
+                )
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+
+def _force_taskbar_button(window):
+    if os.name != "nt":
+        return
+    try:
+        _detach_window_owner(window)
+
+        get_window_long = getattr(ctypes.windll.user32, "GetWindowLongPtrW", ctypes.windll.user32.GetWindowLongW)
+        set_window_long = getattr(ctypes.windll.user32, "SetWindowLongPtrW", ctypes.windll.user32.SetWindowLongW)
+
+        GWL_EXSTYLE = -20
+        WS_EX_TOOLWINDOW = 0x00000080
+        WS_EX_APPWINDOW = 0x00040000
+        SWP_NOSIZE = 0x0001
+        SWP_NOMOVE = 0x0002
+        SWP_NOZORDER = 0x0004
+        SWP_NOACTIVATE = 0x0010
+        SWP_FRAMECHANGED = 0x0020
+
+        for hwnd in _iter_widget_hwnds(window):
+            try:
+                ex_style = int(get_window_long(hwnd, GWL_EXSTYLE))
+                new_style = (ex_style & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW
+                if new_style != ex_style:
+                    set_window_long(hwnd, GWL_EXSTYLE, new_style)
+                    ctypes.windll.user32.SetWindowPos(
+                        hwnd, 0, 0, 0, 0, 0,
+                        SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED
+                    )
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+
+def _prime_taskbar_window(window):
+    if os.name != "nt":
+        return
+
+    def enforce():
+        try:
+            if not window.winfo_exists():
+                return
+            _detach_window_owner(window)
+            _force_taskbar_button(window)
+        except Exception:
+            pass
+
+    try:
+        window.wm_attributes("-toolwindow", False)
+    except Exception:
+        pass
+
+    def refresh_once():
+        if getattr(window, "_nlc_taskbar_refreshed", False):
+            return
+        try:
+            if not window.winfo_exists():
+                return
+            state = str(window.state())
+            if state in ("withdrawn", "iconic"):
+                return
+        except Exception:
+            return
+        if _refresh_taskbar_registration(window):
+            try:
+                window._nlc_taskbar_refreshed = True  # type: ignore[attr-defined]
+            except Exception:
+                pass
+
+    if not getattr(window, "_nlc_taskbar_hooks", False):
+        def on_window_mapped(_event=None):
+            window.after(0, enforce)
+            window.after(90, enforce)
+            window.after(40, refresh_once)
+
+        try:
+            window.bind("<Map>", on_window_mapped, add="+")
+        except Exception:
+            pass
+        try:
+            window._nlc_taskbar_hooks = True  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+    window.after(0, enforce)
+    window.after(35, enforce)
+    window.after(120, enforce)
+    window.after(260, enforce)
+    window.after(520, enforce)
+    window.after(70, refresh_once)
+    window.after(220, refresh_once)
+    window.after(420, refresh_once)
+
+
+def _refresh_taskbar_registration(window):
+    if os.name != "nt":
+        return False
+    try:
+        user32 = ctypes.windll.user32
+        SW_HIDE = 0
+        SW_SHOWNA = 8
+        did_refresh = False
+        for hwnd in _iter_widget_hwnds(window):
+            try:
+                if not user32.IsWindowVisible(hwnd):
+                    continue
+                user32.ShowWindow(hwnd, SW_HIDE)
+                user32.ShowWindow(hwnd, SW_SHOWNA)
+                did_refresh = True
+            except Exception:
+                continue
+        return did_refresh
+    except Exception:
+        return False
+
 class SkinRenderer3D:
     @staticmethod
     def render(skin_path, model="classic", height=360):
@@ -640,6 +835,10 @@ class CustomMessagebox(tk.Toplevel):
         
         self.result = None
         target_parent = parent
+        self._target_parent = target_parent
+        self._parent_focus_bind_id = None
+        _ensure_window_icon(self, owner=target_parent)
+        _prime_taskbar_window(self)
         
         # Styles
         bg_col = COLORS['card_bg']
@@ -763,8 +962,17 @@ class CustomMessagebox(tk.Toplevel):
             except: pass
             
         self.geometry(f"{w}x{h}+{int(x)}+{int(y)}")
-        self.transient(target_parent)
-        self.grab_set()
+        if os.name != "nt" and target_parent and target_parent.winfo_exists():
+            self.transient(target_parent)
+        if os.name != "nt" and target_parent and target_parent.winfo_exists():
+            try:
+                self._parent_focus_bind_id = target_parent.bind("<FocusIn>", self._on_parent_focus, add="+")
+            except Exception:
+                self._parent_focus_bind_id = None
+        self.bind("<Map>", self._on_map_restore_focus, add="+")
+        if os.name != "nt":
+            self.grab_set()
+        self.after(0, self._restore_modal_focus)
         self.wait_window()
 
     def _drag_start(self, event):
@@ -777,27 +985,86 @@ class CustomMessagebox(tk.Toplevel):
         dx = event.x_root - self._drag_start_x
         dy = event.y_root - self._drag_start_y
         self.geometry(f"+{self._drag_win_x + dx}+{self._drag_win_y + dy}")
+
+    def _restore_modal_focus(self):
+        try:
+            if not self.winfo_exists():
+                return
+            if self.grab_current() == self:
+                self.lift()
+                self.focus_force()
+        except Exception:
+            pass
+
+    def _on_parent_focus(self, _event=None):
+        self.after(0, self._restore_modal_focus)
+
+    def _on_map_restore_focus(self, _event=None):
+        self.after(0, self._restore_modal_focus)
         
     def on_click(self, val):
         self.result = val
         self.destroy()
         
     def on_close(self):
+        target_parent = getattr(self, "_target_parent", None)
+        bind_id = getattr(self, "_parent_focus_bind_id", None)
+        if target_parent and bind_id:
+            try:
+                target_parent.unbind("<FocusIn>", bind_id)
+            except Exception:
+                pass
         self.result = None
         self.destroy()
 
-def custom_showinfo(title, message, parent=None):
+def _parse_messagebox_args(args, kwargs):
+    title = kwargs.get("title")
+    message = kwargs.get("message")
+    parent = kwargs.get("parent")
+
+    if len(args) >= 1 and title is None:
+        title = args[0]
+    if len(args) >= 2 and message is None:
+        message = args[1]
+
+    if title is None:
+        title = "Message"
+    if message is None:
+        message = ""
+
+    return str(title), str(message), parent
+
+
+def custom_showinfo(*args, **kwargs):
+    title, message, parent = _parse_messagebox_args(args, kwargs)
     CustomMessagebox(title, message, type="info", parent=parent)
+    return "ok"
 
-def custom_showwarning(title, message, parent=None):
+
+def custom_showwarning(*args, **kwargs):
+    title, message, parent = _parse_messagebox_args(args, kwargs)
     CustomMessagebox(title, message, type="warning", parent=parent)
+    return "ok"
 
-def custom_showerror(title, message, parent=None):
+
+def custom_showerror(*args, **kwargs):
+    title, message, parent = _parse_messagebox_args(args, kwargs)
     CustomMessagebox(title, message, type="error", parent=parent)
+    return "ok"
 
-def custom_askyesno(title, message, parent=None):
+
+def custom_askyesno(*args, **kwargs):
+    title, message, parent = _parse_messagebox_args(args, kwargs)
     mbox = CustomMessagebox(title, message, type="yesno", parent=parent)
-    return mbox.result
+    return bool(mbox.result)
+
+
+# Route all tkinter messagebox calls through custom dialogs so every prompt
+# gets the same custom chrome + taskbar icon behavior.
+messagebox.showinfo = custom_showinfo # type: ignore[assignment]
+messagebox.showwarning = custom_showwarning # type: ignore[assignment]
+messagebox.showerror = custom_showerror # type: ignore[assignment]
+messagebox.askyesno = custom_askyesno # type: ignore[assignment]
 
 # --- Main App ---
 class DownloadManager:
@@ -893,6 +1160,7 @@ class MinecraftLauncher:
             self.root.iconbitmap(resource_path("logo.ico"))
         except Exception:
             pass
+        _ensure_window_icon(self.root, owner=self.root)
             
         # Center Window
         w, h = 1080, 720
@@ -944,6 +1212,8 @@ class MinecraftLauncher:
         self._onboarding_focus_bindings = []
         self.window_shell = None
         self.window_content = self.root
+        self._update_in_progress = False
+        self._update_shutdown_started = False
         
         # Download Queue State
         self.download_tasks = {} # id -> {ui_elements, data}
@@ -1875,8 +2145,23 @@ class MinecraftLauncher:
         except Exception:
             return 0
 
+    def _prepare_dialog_window(self, win, owner=None):
+        owner_win = owner if owner is not None else self.root
+        _ensure_window_icon(win, owner=owner_win)
+        if os.name == 'nt':
+            try:
+                win.transient(None)
+            except Exception:
+                pass
+            try:
+                win.grab_release()
+            except Exception:
+                pass
+            _prime_taskbar_window(win)
+
     def _apply_custom_toplevel_chrome(self, win, title_text, close_command=None):
         if not (self.custom_titlebar_enabled and os.name == 'nt'):
+            self._prepare_dialog_window(win)
             return win
         existing_content = getattr(win, "_custom_content_root", None)
         if existing_content and existing_content.winfo_exists():
@@ -1886,11 +2171,13 @@ class MinecraftLauncher:
                     title_label.config(text=title_text)
                 except Exception:
                     pass
+            self._prepare_dialog_window(win)
             return existing_content
 
         try:
             win.overrideredirect(True)
         except Exception:
+            self._prepare_dialog_window(win)
             return win
 
         shell = tk.Frame(win, bg="#141414", highlightthickness=0, bd=0)
@@ -1958,6 +2245,7 @@ class MinecraftLauncher:
             win._custom_title_label = title_lbl  # type: ignore[attr-defined]
         except Exception:
             pass
+        self._prepare_dialog_window(win)
         return body
 
     def _get_toplevel_content_root(self, parent):
@@ -2000,12 +2288,19 @@ class MinecraftLauncher:
             if str(wizard.state()) == "withdrawn":
                 wizard.deiconify()
 
-            wizard.transient(self.root)
-            wizard.lift(self.root)
-            try:
-                wizard.attributes("-topmost", True)
-            except Exception:
-                pass
+            if os.name != "nt":
+                wizard.transient(self.root)
+                wizard.lift(self.root)
+                try:
+                    wizard.attributes("-topmost", True)
+                except Exception:
+                    pass
+            else:
+                wizard.lift()
+                try:
+                    wizard.focus_force()
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -2358,6 +2653,10 @@ class MinecraftLauncher:
             self.save_config()
 
     def perform_auto_update(self, asset_url, version):
+        if self._update_in_progress:
+            return
+        self._update_in_progress = True
+
         # 1. Download
         self.update_status_lbl.config(text=f"Downloading update {version}...", fg=COLORS['accent_blue'])
         
@@ -2431,6 +2730,7 @@ class MinecraftLauncher:
             # Determine filename
             filename = "NewLauncher_Update.exe"
             path = os.path.join(updates_dir, filename)
+            part_path = path + ".part"
             
             self.root.after(0, lambda: self.update_progress_label.config(text="Connecting to update server...") if hasattr(self, "update_progress_label") else None)
 
@@ -2442,7 +2742,7 @@ class MinecraftLauncher:
                 wrote = 0
                 last_ui_tick = 0.0
 
-                with open(path, 'wb') as f:
+                with open(part_path, 'wb') as f:
                     for data in r.iter_content(block_size):
                         if not data:
                             continue
@@ -2467,6 +2767,16 @@ class MinecraftLauncher:
                 # Final UI update to 100% for known-size downloads.
                 if total_size > 0:
                     self.root.after(0, lambda c=wrote, t=total_size: self.update_download_progress(c, t))
+
+            if wrote <= 0:
+                raise RuntimeError("Downloaded file is empty.")
+
+            with open(part_path, "rb") as f:
+                mz = f.read(2)
+            if mz != b"MZ":
+                raise RuntimeError("Downloaded update is not a valid Windows executable.")
+
+            os.replace(part_path, path)
             
             # On Finish
             self.root.after(0, self.hide_update_progress)
@@ -2475,7 +2785,13 @@ class MinecraftLauncher:
             
         except Exception as e:
             print(f"Update download failed: {e}")
+            try:
+                if 'part_path' in locals() and os.path.exists(part_path): # type: ignore
+                    os.remove(part_path) # type: ignore
+            except Exception:
+                pass
             self.root.after(0, self.hide_update_progress)
+            self.root.after(0, self._reset_update_state)
             self.root.after(0, lambda err=str(e): self.update_status_lbl.config(text=f"Update failed: {err}", fg=COLORS['error_red']))
 
     def _on_download_complete(self, path):
@@ -2492,23 +2808,73 @@ class MinecraftLauncher:
         result = mbox.result
 
         if result is True:
-            try:
-                # Launch new executable
-                if path.endswith(".exe"):
-                    # Detached process to avoid locking parent directory
-                    if os.name == 'nt':
-                        # Use shell execution to handle UAC better and potentially resolve context issues
-                        os.startfile(path)
-                    else:
-                        subprocess.Popen([path], close_fds=True)
-                        
-                    self.root.quit()
-                else:
-                    custom_showinfo("Manual Install", f"Update saved to:\n{path}\nPlease run it manually.")
-            except Exception as e:
-                custom_showerror("Error", f"Could not launch update: {e}")
+            if path.endswith(".exe"):
+                self._launch_updater_and_exit(path)
+            else:
+                custom_showinfo("Manual Install", f"Update saved to:\n{path}\nPlease run it manually.")
+                self._reset_update_state()
         elif result == "manual":
              webbrowser.open("https://github.com/Amne-Dev/New-launcher/releases/latest")
+             self._reset_update_state()
+        else:
+            self._reset_update_state()
+
+    def _reset_update_state(self):
+        self._update_in_progress = False
+
+    def _launch_updater_and_exit(self, path):
+        try:
+            if not os.path.isfile(path):
+                raise FileNotFoundError(path)
+
+            self.update_status_lbl.config(text="Launching installer...", fg=COLORS['accent_blue'])
+            self.root.after(0, self.hide_update_progress)
+
+            launched = False
+            if os.name == 'nt':
+                try:
+                    creationflags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                    subprocess.Popen([path], cwd=os.path.dirname(path), close_fds=True, creationflags=creationflags)
+                    launched = True
+                except Exception:
+                    # Fallback, e.g. if creation flags fail in specific environments.
+                    os.startfile(path)
+                    launched = True
+            else:
+                subprocess.Popen([path], cwd=os.path.dirname(path), close_fds=True)
+                launched = True
+
+            if launched:
+                self._begin_update_shutdown()
+            else:
+                raise RuntimeError("Failed to start updater.")
+        except Exception as e:
+            custom_showerror("Error", f"Could not launch update: {e}")
+            self._reset_update_state()
+
+    def _begin_update_shutdown(self):
+        if self._update_shutdown_started:
+            return
+        self._update_shutdown_started = True
+
+        def _shutdown():
+            try:
+                self.stop_agent_process()
+            except Exception:
+                pass
+            try:
+                if hasattr(self, 'tray_icon') and self.tray_icon:
+                    self.tray_icon.stop()
+            except Exception:
+                pass
+            try:
+                self.root.destroy()
+            except Exception:
+                pass
+            os._exit(0)
+
+        # Small delay lets spawned updater initialize before process exit.
+        self.root.after(160, _shutdown)
 
     def show_onboarding_wizard(self):
         """Shows the First Run Wizard — modern redesign with step indicators and smooth transitions."""
@@ -2520,7 +2886,8 @@ class MinecraftLauncher:
                         existing_wizard.deiconify()
                     self._schedule_onboarding_raise()
                     existing_wizard.focus_force()
-                    existing_wizard.grab_set()
+                    if os.name != "nt":
+                        existing_wizard.grab_set()
                     return
             except Exception:
                 self._onboarding_wizard = None
@@ -2547,7 +2914,8 @@ class MinecraftLauncher:
             wizard.withdraw()
             wizard.title("Welcome")
             wizard.configure(bg=COLORS['main_bg'])
-            wizard.transient(self.root)
+            if os.name != "nt":
+                wizard.transient(self.root)
             wizard.resizable(False, False)
 
             wiz_w, wiz_h = 660, 520
@@ -2556,9 +2924,10 @@ class MinecraftLauncher:
             wizard.geometry(f"{wiz_w}x{wiz_h}+{x}+{y}")
 
             wizard.deiconify()
-            wizard.lift(self.root)
+            wizard.lift()
             wizard.focus_force()
-            wizard.grab_set()
+            if os.name != "nt":
+                wizard.grab_set()
             self._onboarding_wizard = wizard
 
             def cleanup_onboarding_state(*_):
@@ -3341,9 +3710,11 @@ class MinecraftLauncher:
         dialog.title("Enable Mod Support")
         dialog.geometry("450x300")
         dialog.config(bg=COLORS['main_bg'])
-        dialog.transient(self.root)
+        if os.name != "nt":
+            dialog.transient(self.root)
         dialog.resizable(False, False)
-        dialog.grab_set()
+        if os.name != "nt":
+            dialog.grab_set()
         
         # Center on parent
         dialog.update_idletasks()
@@ -4555,9 +4926,11 @@ class MinecraftLauncher:
         win.title(title)
         win.geometry("700x650")
         win.configure(bg="#1e1e1e")
-        win.transient(self.root)
+        if os.name != "nt":
+            win.transient(self.root)
         win.resizable(True, True) # Allow resizing to help fit content
-        win.grab_set()
+        if os.name != "nt":
+            win.grab_set()
         
         # Center on parent
         win.update_idletasks()
@@ -5873,9 +6246,11 @@ class MinecraftLauncher:
         win.title("Add Account")
         win.geometry("450x350")
         win.config(bg=COLORS['main_bg'])
-        win.transient(self.root)
+        if os.name != "nt":
+            win.transient(self.root)
         win.resizable(False, False)
-        win.grab_set()
+        if os.name != "nt":
+            win.grab_set()
         
         # Center on parent
         win.update_idletasks()
@@ -6345,8 +6720,9 @@ class MinecraftLauncher:
         dialog.title(f"Mods in {pack['name']}")
         dialog.geometry("700x600")
         dialog.config(bg=COLORS['main_bg'])
-        dialog.transient(self.root)
-        dialog.grab_set()
+        if os.name != "nt":
+            dialog.transient(self.root)
+            dialog.grab_set()
         
         # Center on parent
         dialog.update_idletasks()
@@ -6719,9 +7095,11 @@ class MinecraftLauncher:
         dialog.title("New Modpack")
         dialog.geometry("450x350")
         dialog.config(bg=COLORS['main_bg'])
-        dialog.transient(self.root)
+        if os.name != "nt":
+            dialog.transient(self.root)
         dialog.resizable(False, False)
-        dialog.grab_set()
+        if os.name != "nt":
+            dialog.grab_set()
         
         # Center on parent
         dialog.update_idletasks()
@@ -6813,9 +7191,11 @@ class MinecraftLauncher:
         dialog.title(f"Link '{pack['name']}'")
         dialog.geometry("450x450")
         dialog.config(bg=COLORS['main_bg'])
-        dialog.transient(self.root)
+        if os.name != "nt":
+            dialog.transient(self.root)
         dialog.resizable(False, False)
-        dialog.grab_set()
+        if os.name != "nt":
+            dialog.grab_set()
         
         # Center on parent
         dialog.update_idletasks()
@@ -6897,10 +7277,10 @@ class MinecraftLauncher:
         def create_match():
              threading.Thread(target=self._create_matching_installation_thread, args=(pack, dialog), daemon=True).start()
 
-        create_match_btn = self._make_btn(dialog, "Create Matching Installation", style="secondary",
+        create_match_btn = self._make_btn(dialog_root, "Create Matching Installation", style="secondary",
                                            font_size=10, bold=True, command=create_match)
         create_match_btn.pack(pady=(15, 5), fill="x", padx=30)
-        link_btn = self._make_btn(dialog, "Link Selected", style="primary",
+        link_btn = self._make_btn(dialog_root, "Link Selected", style="primary",
                                   font_size=10, bold=True, command=link)
         link_btn.pack(pady=(5, 15), fill="x", padx=30)
 
@@ -9035,9 +9415,11 @@ How to use:
             y = self.root.winfo_y() + (self.root.winfo_height() // 2) - 125
             dialog.geometry(f"+{x}+{y}")
         except: pass
-        dialog.transient(self.root)
+        if os.name != "nt":
+            dialog.transient(self.root)
         dialog.resizable(False, False)
-        dialog.grab_set()
+        if os.name != "nt":
+            dialog.grab_set()
         dialog_root = self._apply_custom_toplevel_chrome(dialog, "Skin Model")
         
         tk.Label(dialog_root, text="Select Skin Model", font=("Segoe UI", 12, "bold"), 
