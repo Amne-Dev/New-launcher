@@ -1,7 +1,6 @@
-# 🚀 New Launcher
-
-**The Better Way to Play Minecraft.**
-Simple. Fast. Customizable.
+# NLC (neo) A Minecraft launcher designed to be lightweight
+   
+Its Simple. Fast. Customizable.
 
 ## ✨ What does it do?
 *   **Play Everything**: Supports **Vanilla**, **Fabric**, and **Forge**.
