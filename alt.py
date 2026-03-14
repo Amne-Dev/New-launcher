@@ -854,7 +854,7 @@ class CustomMessagebox(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         content_root = self
         if use_custom_chrome:
-            chrome = tk.Frame(self, bg="#141414", highlightthickness=0, bd=0)
+            chrome = tk.Frame(self, bg=COLORS.get('sidebar_bg', '#141414'), highlightthickness=0, bd=0)
             chrome.pack(fill="both", expand=True)
 
             titlebar = tk.Frame(chrome, bg=COLORS.get('tab_bar_bg', '#252526'), height=34)
@@ -925,7 +925,7 @@ class CustomMessagebox(tk.Toplevel):
         for text, val, style in buttons:
             b_bg = accent_col if style == "primary" else "#555555"
             b_fg = "white"
-            b_hover_bg = "#3AA044" if style == "primary" else "#666666"
+            b_hover_bg = COLORS.get('play_btn_green', '#2D8F36') if style == "primary" else "#666666"
             
             btn = tk.Button(btn_inner, text=text, bg=b_bg, fg=b_fg, 
                            font=("Segoe UI", 9, "bold"), relief="flat",
@@ -1188,7 +1188,10 @@ class MinecraftLauncher:
         
         self.root.configure(bg=COLORS['main_bg'])
         self.minecraft_dir = get_minecraft_dir()
-        self.custom_titlebar_enabled = (os.name == 'nt')
+        self.custom_titlebar_enabled = True # Will be overridden by config, but default to true on windows
+        self.neo_style_enabled = True # Will be overridden by config
+        if os.name != 'nt':
+            self.custom_titlebar_enabled = False
         self._custom_chrome_applied = False
         self._window_is_maximized = False
         self.root.update_idletasks()
@@ -1268,13 +1271,29 @@ class MinecraftLauncher:
             self.config_file = os.path.join(self.config_dir, "launcher_config.json")
             print(f"Using global config: {self.config_file}")
         
-        # --- Pre-load Accent Color ---
+        # --- Pre-load Accent Color & Custom Titlebar ---
         self.accent_color_name = "Green"
         try:
             if os.path.exists(self.config_file):
                 with open(self.config_file, "r", encoding="utf-8") as f:
                     _d = json.load(f)
                     self.accent_color_name = _d.get("accent_color", "Green")
+                    
+                    # Pre-load custom titlebar setting BEFORE window creation
+                    if "custom_titlebar_enabled" in _d:
+                        self.custom_titlebar_enabled = _d["custom_titlebar_enabled"] and os.name == 'nt'
+                    
+                    self.neo_style_enabled = _d.get("neo_style_enabled", True)
+                    if self.neo_style_enabled:
+                        # Apply OLED Black Neo Style
+                        COLORS['sidebar_bg'] = '#000000'
+                        COLORS['main_bg'] = '#050505'
+                        COLORS['tab_bar_bg'] = '#050505'
+                        COLORS['bottom_bar_bg'] = '#000000'
+                        COLORS['card_bg'] = '#111111'
+                        COLORS['input_bg'] = '#1A1A1A'
+                        COLORS['input_border'] = '#333333'
+                        COLORS['separator'] = '#1F1F1F'
                     
                     _colors = {
                         "Green": "#2D8F36",
@@ -1354,9 +1373,14 @@ class MinecraftLauncher:
         # Start Background Agent
         self.start_agent_process()
             
-        # Onboarding Trigger
+        # Onboarding / What's New Trigger
         if self.first_run:
+            self.last_version = CURRENT_VERSION
             self.root.after(500, self.show_onboarding_wizard)
+        elif getattr(self, "last_version", "") and self.last_version != CURRENT_VERSION:
+            self.root.after(1000, lambda: self.show_whats_new(CURRENT_VERSION))
+            self.last_version = CURRENT_VERSION
+            self.save_config()
 
     def load_modpacks(self):
         self.modpacks = []
@@ -1589,12 +1613,31 @@ class MinecraftLauncher:
         if self._window_is_maximized or str(self.root.state()) == "zoomed":
             ratio = (event.x_root - self.root.winfo_x()) / max(1, self.root.winfo_width())
             ratio = min(max(ratio, 0.1), 0.9)
-            self._toggle_window_maximize()
-            self.root.update_idletasks()
-            nw = self.root.winfo_width()
-            x = int(event.x_root - (nw * ratio))
+            
+            # Instantly unmaximize without animation so dragging isn't interrupted
+            self.root.state("normal")
+            target = getattr(self, '_windowed_geometry', None) or getattr(self, '_last_nonmax_geometry', None)
+            if not target:
+                target = self._build_default_windowed_geometry()
+            
+            w = target[2]
+            h = target[3]
+            
+            self._window_is_maximized = False
+            if hasattr(self, 'window_max_btn'):
+                self.window_max_btn.config(text="□")
+            try:
+                self._update_titlebar_controls_offset()
+                self._set_custom_window_chrome(True)
+                self._ensure_taskbar_visibility()
+            except Exception:
+                pass
+            
+            x = int(event.x_root - (w * ratio))
             y = max(0, event.y_root - 12)
-            self.root.geometry(f"+{x}+{y}")
+            self.root.geometry(f"{max(1, int(w))}x{max(1, int(h))}+{int(x)}+{int(y)}")
+            self.root.update_idletasks()
+
         self._drag_start_x = event.x_root
         self._drag_start_y = event.y_root
         self._drag_win_x = self.root.winfo_x()
@@ -2088,7 +2131,7 @@ class MinecraftLauncher:
 
         shell = tk.Frame(
             self.root,
-            bg="#141414",
+            bg=COLORS.get('sidebar_bg', '#141414'),
             highlightthickness=0,
             bd=0
         )
@@ -2214,7 +2257,7 @@ class MinecraftLauncher:
             self._prepare_dialog_window(win)
             return win
 
-        shell = tk.Frame(win, bg="#141414", highlightthickness=0, bd=0)
+        shell = tk.Frame(win, bg=COLORS.get('sidebar_bg', '#141414'), highlightthickness=0, bd=0)
         shell.pack(fill="both", expand=True)
 
         titlebar = tk.Frame(shell, bg=COLORS.get('tab_bar_bg', '#252526'), height=34)
@@ -2534,7 +2577,9 @@ class MinecraftLauncher:
     def create_layout(self):
         root_parent = self.window_content if self.window_content is not None else self.root
         # 1. Sidebar (Left) - width 250px for proper menu
-        self.sidebar = tk.Frame(root_parent, bg=COLORS['sidebar_bg'], width=200)
+        neo_mode = getattr(self, 'neo_style_enabled', True)
+        sb_width = 240 if neo_mode else 200
+        self.sidebar = tk.Frame(root_parent, bg=COLORS['sidebar_bg'], width=sb_width)
         self.sidebar.pack(side="left", fill="y")
         self.sidebar.pack_propagate(False)
         
@@ -2563,59 +2608,100 @@ class MinecraftLauncher:
         self.sidebar_acct_type.pack(fill="x")
         self.sidebar_acct_type.bind("<Button-1>", lambda e: self.toggle_profile_menu())
 
-        tk.Frame(self.sidebar, bg="#454545", height=1).pack(fill="x", padx=10, pady=(0, 20)) # Separator
+        tk.Frame(self.sidebar, bg=COLORS.get('separator', '#454545'), height=1).pack(fill="x", padx=10, pady=(0, 20)) # Separator
 
         # --- Sidebar Menu Items ---
         self.sidebar_items = []
+        self.nav_buttons = {}
 
-        # Minecraft: Java Edition (Highlighted)
-        java_btn_frame = tk.Frame(self.sidebar, bg="#3A3B3C", cursor="hand2", padx=10, pady=10) # Lighter grey highlight
-        java_btn_frame.pack(fill="x", padx=5)
-        self.sidebar_items.append(java_btn_frame)
-        self.minecraft_btn_frame = java_btn_frame # Store ref
-        java_btn_frame.is_active = True # type: ignore # Default active
-        
-        def on_minecraft_click(e):
-            self.set_active_sidebar(java_btn_frame)
-            self.show_tab("Play")
+        if neo_mode:
+            # Unified Navigation for Neo Mode
+            self.sidebar_nav_frame = tk.Frame(self.sidebar, bg=COLORS['sidebar_bg'])
+            self.sidebar_nav_frame.pack(fill="both", expand=True)
 
-        java_btn_frame.bind("<Button-1>", on_minecraft_click)
+            def _neo_nav(parent, text, tab_name, icon_name=None, action=None):
+                frame = tk.Frame(parent, bg=COLORS['sidebar_bg'], cursor="hand2", padx=15, pady=8)
+                frame.pack(fill="x")
+                self.sidebar_items.append(frame)
 
-        # Small icon (simple square for now or reused logo)
-        try:
-             # Just a small colored block or simple emoji
-            l1 = tk.Label(java_btn_frame, text="Java", bg="#2D8F36", fg="white", font=("Segoe UI", 8, "bold"), width=4)
-            l1.pack(side="left", padx=(0,10))
-            l1.bind("<Button-1>", on_minecraft_click)
-        except: pass
+                if icon_name:
+                    icon_path = f"icons/{icon_name}" if not icon_name.startswith("icons/") else icon_name
+                    img = getattr(self, "get_icon_image", lambda x, y: None)(icon_path, (20, 20))
+                    if img:
+                        lbl_img = tk.Label(frame, image=img, bg=COLORS['sidebar_bg'], cursor="hand2")
+                        lbl_img.image = img # type: ignore
+                        lbl_img.pack(side="left", padx=(0, 10))
+                    else:
+                        tk.Label(frame, text="*", font=("Segoe UI", 12), bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'], cursor="hand2").pack(side="left", padx=(0, 10))
+                
+                lbl = tk.Label(frame, text=text, font=("Segoe UI", 10, "bold"), bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'], cursor="hand2")
+                lbl.pack(side="left")
 
-        l2 = tk.Label(java_btn_frame, text="Minecraft", font=("Segoe UI", 10, "bold"),
-                bg="#3A3B3C", fg="white")
-        l2.pack(side="left")
-        l2.bind("<Button-1>", on_minecraft_click)
-        
-        # Add hover effect
-        self._attach_sidebar_hover(java_btn_frame)
+                def on_click(e):
+                    if action:
+                        action()
+                        self.set_active_sidebar(frame)
+                        return
+                    self.set_active_sidebar(frame)
+                    if tab_name == "Mods" and not getattr(self, 'enable_modrinth', False):
+                        self.show_modrinth_enable_dialog()
+                    else:
+                        self.show_tab(tab_name)
 
-        # --- Sidebar Links ---
-        # Spacer
-        tk.Frame(self.sidebar, bg=COLORS['sidebar_bg'], height=10).pack()
+                frame.bind("<Button-1>", on_click)
+                lbl.bind("<Button-1>", on_click)
+                for c in frame.winfo_children():
+                    c.bind("<Button-1>", on_click)
 
-        # Modrinth Link
-        def on_modrinth_click():
-             if getattr(self, 'enable_modrinth', False):
-                 self.show_tab("Mods")
-             else:
-                 self.show_modrinth_enable_dialog()
+                self._attach_sidebar_hover(frame)
 
-        self._create_sidebar_link("Modrinth", on_modrinth_click, indicator_text="Mods", is_action=True)
-        
-        # Addons Link
-        self._create_sidebar_link("Addons", lambda: self.show_tab("Addons"), indicator_text="Agent", indicator_color="#E67E22", is_action=True)
+                if tab_name == "Play":
+                    self.minecraft_btn_frame = frame # type: ignore
+                    frame.is_active = True # type: ignore
+                    lbl.config(fg="white")
 
-        # Bottom spacer
-        tk.Frame(self.sidebar, bg=COLORS['sidebar_bg'], height=10).pack(side="bottom")
+            def build_main_sidebar():
+                for widget in self.sidebar_nav_frame.winfo_children():
+                    widget.destroy()
+                self.sidebar_items = [item for item in getattr(self, 'sidebar_items', []) if item.winfo_exists() and item.master != self.sidebar_nav_frame]
+                
+                tk.Label(self.sidebar_nav_frame, text="GAMES", font=("Segoe UI", 8, "bold"), fg="#505050", bg=COLORS['sidebar_bg']).pack(anchor="w", padx=15, pady=(0,5))
+                _neo_nav(self.sidebar_nav_frame, "Minecraft Java", "Play", "grass_block_side.png")
+                _neo_nav(self.sidebar_nav_frame, "Installations", "Installations", "crafting_table_front.png")
+                _neo_nav(self.sidebar_nav_frame, "Modpacks", "Modpacks", "shulker_box.png")
 
+                tk.Label(self.sidebar_nav_frame, text="DISCOVER", font=("Segoe UI", 8, "bold"), fg="#505050", bg=COLORS['sidebar_bg']).pack(anchor="w", padx=15, pady=(15,5))
+                _neo_nav(self.sidebar_nav_frame, "Modrinth", "Modrinth", "crafting_table_top.png", action=build_modrinth_sidebar)
+                _neo_nav(self.sidebar_nav_frame, "Addons", "Addons", "beacon.png")
+                _neo_nav(self.sidebar_nav_frame, "Locker", "Locker", "enchanting_table_side.png")
+
+            def build_modrinth_sidebar():
+                for widget in self.sidebar_nav_frame.winfo_children():
+                    widget.destroy()
+                self.sidebar_items = [item for item in getattr(self, 'sidebar_items', []) if item.winfo_exists() and item.master != self.sidebar_nav_frame]
+                
+                _neo_nav(self.sidebar_nav_frame, "← Back", "Back", None, action=build_main_sidebar)
+                
+                tk.Label(self.sidebar_nav_frame, text="MODRINTH NETWORK", font=("Segoe UI", 8, "bold"), fg="#505050", bg=COLORS['sidebar_bg']).pack(anchor="w", padx=15, pady=(10,5))
+                
+                def nav_modrinth(mode):
+                    def _action():
+                        self.show_tab("Mods")
+                        if hasattr(self, 'switch_modrinth_mode'):
+                            self.switch_modrinth_mode(mode)
+                    return _action
+
+                _neo_nav(self.sidebar_nav_frame, "Mods", "Mods", "comparator_on.png", action=nav_modrinth("mod"))
+                _neo_nav(self.sidebar_nav_frame, "Resource Packs", "Resource Packs", "painting.png", action=nav_modrinth("resourcepack"))
+                _neo_nav(self.sidebar_nav_frame, "Modpacks", "Modpacks", "shulker_box.png", action=nav_modrinth("modpack"))
+                _neo_nav(self.sidebar_nav_frame, "Shaders", "Shaders", "glowstone.png", action=nav_modrinth("shader"))
+
+            build_main_sidebar()
+
+        else:
+            # Classic Navigation
+            # Minecraft: Java Edition (Highlighted)
+            java_btn_frame = tk.Frame(self.sidebar, bg=COLORS.get('hover_bg', '#3A3B3C'), cursor="hand2", padx=10, pady=10) # Lighter grey highlight
         # Settings Link (Gear) - Packed to bottom first to be at the very bottom
         self._create_sidebar_link("Settings", lambda: self.open_global_settings(), is_action=True, pack_side="bottom", icon="⚙")
 
@@ -2629,17 +2715,18 @@ class MinecraftLauncher:
         self.content_area = tk.Frame(root_parent, bg=COLORS['main_bg'])
         self.content_area.pack(side="right", fill="both", expand=True)
         
-        # 3. Top Navigation Bar
-        self.nav_bar = tk.Frame(self.content_area, bg=COLORS['tab_bar_bg'], height=60)
-        self.nav_bar.pack(fill="x", side="top")
-        self.nav_bar.pack_propagate(False)
-        
-        self.nav_buttons = {}
-        # Tabs: Play, Installations, Locker
-        self.create_nav_btn("Play", lambda: self.show_tab("Play"))
-        self.create_nav_btn("Installations", lambda: self.show_tab("Installations"))
-        self.create_nav_btn("Modpacks", lambda: self.show_tab("Modpacks"))
-        self.create_nav_btn("Locker", lambda: self.show_tab("Locker"))
+        # 3. Top Navigation Bar (Only for Classic)
+        if not neo_mode:
+            self.nav_bar = tk.Frame(self.content_area, bg=COLORS['tab_bar_bg'], height=60)
+            self.nav_bar.pack(fill="x", side="top")
+            self.nav_bar.pack_propagate(False)
+            
+            self.create_nav_btn("Play", lambda: self.show_tab("Play"))
+            self.create_nav_btn("Installations", lambda: self.show_tab("Installations"))
+            self.create_nav_btn("Modpacks", lambda: self.show_tab("Modpacks"))
+            self.create_nav_btn("Locker", lambda: self.show_tab("Locker"))
+        else:
+            self.nav_bar = None # Clear it
 
         # 4. Tab Container
         self.tab_container = tk.Frame(self.content_area, bg=COLORS['main_bg'])
@@ -2656,6 +2743,9 @@ class MinecraftLauncher:
         self.create_settings_tab()
         self.create_addons_tab()
         
+        # Trigger play selection
+        if neo_mode and hasattr(self, 'minecraft_btn_frame'):
+             self.set_active_sidebar(self.minecraft_btn_frame) # type: ignore
         self.show_tab("Play")
 
     def create_download_queue_ui(self):
@@ -3062,6 +3152,72 @@ class MinecraftLauncher:
 
         # Small delay lets spawned updater initialize before process exit.
         self.root.after(160, _shutdown)
+
+    def show_whats_new(self, version):
+        """Fetches the changelog for the current version and displays it on first launch after update."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("What's New")
+        dialog.geometry("600x480")
+        dialog.config(bg=COLORS['main_bg'])
+        try:
+            x = self.root.winfo_x() + (self.root.winfo_width() // 2) - 300
+            y = self.root.winfo_y() + (self.root.winfo_height() // 2) - 240
+            dialog.geometry(f"+{x}+{y}")
+        except: pass
+        if os.name != "nt":
+            dialog.transient(self.root)
+        
+        dialog_root = self._apply_custom_toplevel_chrome(dialog, f"What's New in v{version}")
+        
+        # Header
+        header = tk.Frame(dialog_root, bg=COLORS['sidebar_bg'], pady=15, padx=20)
+        header.pack(fill="x")
+        tk.Label(header, text="✨ Launcher Updated! ✨", font=("Segoe UI", 16, "bold"), 
+                 bg=COLORS['sidebar_bg'], fg=COLORS['accent_blue']).pack(anchor="center")
+        tk.Label(header, text=f"You are now running version {version}", font=("Segoe UI", 10), 
+                 bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary']).pack(anchor="center")
+        
+        # Content
+        content_frame = tk.Frame(dialog_root, bg=COLORS['main_bg'], padx=20, pady=20)
+        content_frame.pack(fill="both", expand=True)
+
+        text_area = scrolledtext.ScrolledText(content_frame, font=("Segoe UI", 10), bg=COLORS['input_bg'], fg=COLORS['text_primary'],
+                                              relief="flat", wrap="word", state="normal")
+        text_area.pack(fill="both", expand=True)
+        text_area.insert("1.0", "Fetching release notes from GitHub...\n\n")
+        text_area.config(state="disabled")
+
+        # Footer
+        footer = tk.Frame(dialog_root, bg=COLORS['sidebar_bg'], pady=15)
+        footer.pack(fill="x", side="bottom")
+        self._make_btn(footer, "Awesome, Let's Game!", style="primary", font_size=10, 
+                       command=dialog.destroy).pack(anchor="center")
+
+        def fetch_changelog():
+            try:
+                # We specifically load the changelog for this version tag.
+                url = f"https://api.github.com/repos/Amne-Dev/New-launcher/releases/tags/v{version}"
+                r = requests.get(url, timeout=5)
+                if r.status_code == 200:
+                    data = r.json()
+                    body = data.get("body", "No description provided for this release.")
+                    
+                    self.root.after(0, lambda b=body: update_text(b))
+                else:
+                    self.root.after(0, lambda: update_text(f"Could not load release notes automatically (Status {r.status_code}).\nCheck out the GitHub releases page!"))
+            except Exception as e:
+                self.root.after(0, lambda: update_text(f"Failed to fetch release notes: {e}"))
+
+        def update_text(msg):
+            try:
+                if text_area.winfo_exists():
+                    text_area.config(state="normal")
+                    text_area.delete("1.0", "end")
+                    text_area.insert("1.0", msg)
+                    text_area.config(state="disabled")
+            except: pass
+
+        threading.Thread(target=fetch_changelog, daemon=True).start()
 
     def show_onboarding_wizard(self):
         """Shows the First Run Wizard — modern redesign with step indicators and smooth transitions."""
@@ -3985,7 +4141,7 @@ class MinecraftLauncher:
         
         tk.Button(btn_frame, text="Yes, Enable", bg=COLORS['success_green'], fg="white", 
                  font=("Segoe UI", 10, "bold"), relief="flat", padx=15, pady=6, bd=0,
-                 cursor="hand2", activebackground="#3AA044", activeforeground="white",
+                 cursor="hand2", activebackground=COLORS.get('play_btn_green', '#2D8F36'), activeforeground="white",
                  command=enable).pack(side="right", padx=5)
                  
         tk.Button(btn_frame, text="No", bg="#404040", fg="#E0E0E0", 
@@ -3996,13 +4152,13 @@ class MinecraftLauncher:
     def set_active_sidebar(self, active_frame):
         for frame in getattr(self, 'sidebar_items', []):
             if frame == active_frame:
-                frame.config(bg="#3A3B3C")
+                frame.config(bg=COLORS.get('hover_bg', '#3A3B3C'))
                 frame.is_active = True
                 for child in frame.winfo_children():
                     if isinstance(child, tk.Label):
                         txt = child.cget("text")
                         if txt not in ["Mods", "Java", "Agent"]:
-                            child.config(bg="#3A3B3C", fg=COLORS['text_primary'])
+                            child.config(bg=COLORS.get('hover_bg', '#3A3B3C'), fg=COLORS['text_primary'])
             else:
                 frame.config(bg=COLORS['sidebar_bg'])
                 frame.is_active = False
@@ -4014,10 +4170,12 @@ class MinecraftLauncher:
 
     def _attach_sidebar_hover(self, frame):
         def on_enter(e):
-            frame.config(bg="#3A3B3C")
+            frame.config(bg=COLORS.get('hover_bg', '#3A3B3C'))
             for child in frame.winfo_children():
                 if isinstance(child, tk.Label):
                     txt = child.cget("text")
+                    if txt not in ["Mods", "Java", "Agent"]:
+                        child.config(bg=COLORS.get('hover_bg', '#3A3B3C'), fg=COLORS['text_primary'])
                     if txt not in ["Mods", "Java", "Agent"]:
                         child.config(bg="#3A3B3C", fg=COLORS['text_primary'])
         
@@ -4173,8 +4331,8 @@ class MinecraftLauncher:
         """
         weight = "bold" if bold else ""
         cfg = {
-            "primary":   {"bg": COLORS.get('success_green', '#2D8F36'), "fg": "white",
-                          "hover": "#3AA044", "active_fg": "white"},
+            "primary":   {"bg": COLORS.get('play_btn_green', '#2D8F36'), "fg": "white",
+                          "hover": COLORS.get('play_btn_green', '#2D8F36'), "active_fg": "white"},
             "secondary": {"bg": "#404040", "fg": "#E0E0E0",
                           "hover": "#525252", "active_fg": "white"},
             "danger":    {"bg": "#C0392B", "fg": "white",
@@ -4305,7 +4463,7 @@ class MinecraftLauncher:
         def wrapped_command():
             # Automatically set Minecraft as active sidebar when top nav is clicked
             if hasattr(self, 'minecraft_btn_frame'):
-                self.set_active_sidebar(self.minecraft_btn_frame)
+                self.set_active_sidebar(self.minecraft_btn_frame) # type: ignore
             command()
 
         btn = tk.Button(self.nav_bar, text=text.upper(), font=("Segoe UI", 11, "bold"),
@@ -4456,7 +4614,7 @@ class MinecraftLauncher:
         self.launch_btn.bind("<Leave>", lambda e: self.launch_btn.config(bg=COLORS['play_btn_green']))
         
         # Divider line
-        tk.Frame(self.play_container, width=1, bg="#2D8F36").pack(side="left", fill="y")
+        self.launch_sep = tk.Frame(self.play_container, width=1, bg=COLORS.get('play_btn_green', '#2D8F36')); self.launch_sep.pack(side="left", fill="y")
 
         self.launch_opts_btn = tk.Button(self.play_container, text="▼", font=("Segoe UI", 10),
                                         bg=COLORS['play_btn_green'], fg="white",
@@ -4738,7 +4896,8 @@ class MinecraftLauncher:
                 # Try finding it
                 path = resource_path(icon_identifier)
                 if os.path.exists(path):
-                    img = Image.open(path)
+                    img = Image.open(path).convert("RGBA")
+                    # For perfectly sharp pixel art scaling, convert back after mode change isn't strictly necessary, RGBA resizes fine
                     img = img.resize(size, RESAMPLE_NEAREST)
                     photo = ImageTk.PhotoImage(img)
                     self.icon_cache[key] = photo
@@ -4800,7 +4959,7 @@ class MinecraftLauncher:
         folder_btn.pack(side="left", padx=5)
                  
         # Edit/Menu
-        menu_btn = self._make_btn(actions, "...", style="icon")
+        menu_btn = self._make_btn(actions, "⋮", style="icon", font_size=10, width=3)
         menu_btn.config(command=lambda b=menu_btn, i=idx: self.open_installation_menu(i, b))
         menu_btn.pack(side="left", padx=5)
 
@@ -7202,7 +7361,7 @@ class MinecraftLauncher:
                 lazy_state["files"] = files
                 lazy_state["loaded_count"] = 0
                 lazy_state["cols"] = compute_grid_columns()
-                lazy_state["batch_size"] = max(24, int(lazy_state["cols"]) * 10)
+                lazy_state["batch_size"] = max(12, int(lazy_state["cols"]) * 4) # Optimized for faster rendering
                 lazy_state["grid_wrap"] = None
                 
                 # Count label
@@ -7352,7 +7511,8 @@ class MinecraftLauncher:
             card.bind("<Leave>", on_leave_card)
         
         # Initial render
-        render_mods()
+        # Optimize: schedule render_mods slightly after the dialog appears so it doesn't block the UI from opening
+        dialog.after(50, render_mods)
         
         # Bind search to debounced re-render
         search_state = {"after_id": None}
@@ -7678,19 +7838,34 @@ class MinecraftLauncher:
         self.browse_mode_var = tk.StringVar(value="mod")
         
         mode_frame = tk.Frame(top_bar, bg=COLORS['main_bg'])
-        mode_frame.pack(side="top", fill="x", pady=(0, 10))
-        
+        if not getattr(self, 'neo_style_enabled', True):
+            mode_frame.pack(side="top", fill="x", pady=(0, 10))
+
         def switch_mode(m):
             self.browse_mode_var.set(m)
             self.search_mods_thread(reset=True)
-            # visual update
-            if m == "mod":
-                btn_mod.config(bg=COLORS['accent_blue'])
-                btn_pack.config(bg=COLORS['input_bg'])
+            
+            # Hide or show the modpack selection
+            if m in ["modpack", "shader", "resourcepack"]:
+                mp_frame.pack_forget()
             else:
-                btn_mod.config(bg=COLORS['input_bg'])
-                btn_pack.config(bg=COLORS['accent_blue'])
+                mp_frame.pack(side="top", fill="x", pady=(0, 10), before=mode_frame if not getattr(self, 'neo_style_enabled', True) else search_line)
 
+            # visual update only if mode frame is packed
+            if not getattr(self, 'neo_style_enabled', True):
+                btn_mod.config(bg=COLORS['input_bg'])
+                btn_pack.config(bg=COLORS['input_bg'])
+                btn_rp.config(bg=COLORS['input_bg'])
+
+                if m == "mod":
+                    btn_mod.config(bg=COLORS['accent_blue'])
+                elif m == "modpack":
+                    btn_pack.config(bg=COLORS['accent_blue'])
+                elif m == "resourcepack":
+                    btn_rp.config(bg=COLORS['accent_blue'])
+
+        # Expose the method globally
+        self.switch_modrinth_mode = switch_mode
         btn_mod = self._make_btn(mode_frame, "Mods", style="secondary", font_size=9,
                                   width=12, command=lambda: switch_mode("mod"))
         btn_mod.config(bg=COLORS['accent_blue'], activebackground="#2E86C1")
@@ -7699,6 +7874,10 @@ class MinecraftLauncher:
         btn_pack = self._make_btn(mode_frame, "Modpacks", style="secondary", font_size=9,
                                    width=12, command=lambda: switch_mode("modpack"))
         btn_pack.pack(side="left", padx=5)
+
+        btn_rp = self._make_btn(mode_frame, "Resource Packs", style="secondary", font_size=9,
+                                   width=14, command=lambda: switch_mode("resourcepack"))
+        btn_rp.pack(side="left", padx=5)
         
         # Search Entry
         search_line = tk.Frame(top_bar, bg=COLORS['main_bg'])
@@ -7885,7 +8064,7 @@ class MinecraftLauncher:
              p_type = self.browse_mode_var.get()
         payload["facets"].append(f'project_type:{p_type}')
 
-        if loader:
+        if loader and p_type not in ["resourcepack", "shader"]:
             payload["facets"].append(f'categories:{loader}')
         if version_facet:
             payload["facets"].append(f'versions:{version_facet}')
@@ -7965,12 +8144,19 @@ class MinecraftLauncher:
         # Buttons
         btn_frame = tk.Frame(card, bg=COLORS['card_bg'])
         btn_frame.pack(side="right")
-        
+
+        project_type = mod.get('project_type', 'mod')
+
         # INSTALL BUTTON (If pack selected or Modpack Browse)
-        if mod.get('project_type') == 'modpack':
+        if project_type == 'modpack':
              btn = self._make_btn(btn_frame, "Download", style="primary", font_size=9, bold=True)
              btn.pack(side="right", padx=5)
              btn.config(command=lambda m=mod, b=btn: self._install_mr_modpack(m, b))
+             
+        elif project_type in ['resourcepack', 'shader']:
+             btn = self._make_btn(btn_frame, "Install", style="primary", font_size=9, bold=True)
+             btn.pack(side="right", padx=5)
+             btn.config(command=lambda m=mod, b=btn: self._install_global_resource(m, b))
 
         else:
             active_pack_name = self.active_modpack_var.get()
@@ -8014,7 +8200,11 @@ class MinecraftLauncher:
                 self.root.after(0, lambda: self.update_download_task(task_id, 0, detail="Fetching versions..."))
                 
                 # version request
-                v_url = f"https://api.modrinth.com/v2/project/{mod_id}/version?loaders=[%22{pack['loader']}%22]&game_versions=[%22{pack['mc_version']}%22]"
+                if mod_data.get('project_type') == 'resourcepack':
+                    v_url = f"https://api.modrinth.com/v2/project/{mod_id}/version?game_versions=[%22{pack['mc_version']}%22]"
+                else:
+                    v_url = f"https://api.modrinth.com/v2/project/{mod_id}/version?loaders=[%22{pack['loader']}%22]&game_versions=[%22{pack['mc_version']}%22]"
+                
                 r = requests.get(v_url, timeout=10)
                 if r.status_code != 200:
                     raise Exception(f"Failed to fetch versions: {r.status_code}")
@@ -8035,7 +8225,11 @@ class MinecraftLauncher:
                 size = primary_file.get('size', 0)
                 
                 # Download
-                target_dir = os.path.join(self.get_modpack_dir(pack['id']), "mods")
+                if mod_data.get('project_type') == 'resourcepack':
+                    target_dir = os.path.join(self.minecraft_dir, "resourcepacks")
+                else:
+                    target_dir = os.path.join(self.get_modpack_dir(pack['id']), "mods")
+                
                 if not os.path.exists(target_dir): os.makedirs(target_dir)
                 
                 target_path = os.path.join(target_dir, filename)
@@ -8096,6 +8290,61 @@ class MinecraftLauncher:
                     btn_widget.config(state="normal", text="Install", bg=COLORS['play_btn_green'])
             
             self.root.after(0, finish)
+        
+        self.download_manager.queue_mod(run_install, task_id)
+
+    def _install_global_resource(self, mod_data, btn_widget):
+        btn_widget.config(state="disabled", text="Queued...", bg=COLORS['text_secondary'])
+        item_type = mod_data.get('project_type', 'shader')
+        task_id = self.add_download_task(mod_data.get('title', 'Resource'), item_type)
+
+        def run_install():
+            self.root.after(0, lambda: btn_widget.config(text="Installing..."))
+            try:
+                mod_id = mod_data['slug']
+                self.root.after(0, lambda: self.update_download_task(task_id, 0, detail="Fetching versions..."))
+                
+                v_url = f"https://api.modrinth.com/v2/project/{mod_id}/version"
+                r = requests.get(v_url, timeout=10)
+                if r.status_code != 200:
+                    raise Exception(f"Failed to fetch versions: {r.status_code}")
+                    
+                versions = r.json()
+                if not versions:
+                    raise Exception("No versions found.")
+                    
+                best_ver = versions[0]
+                files = best_ver.get('files', [])
+                if not files:
+                    raise Exception("No files in version.")
+                
+                primary_file = next((f for f in files if f.get('primary', False)), files[0])
+                download_url = primary_file['url']
+                filename = primary_file['filename']
+                
+                target_dir = os.path.join(self.minecraft_dir, "shaderpacks" if item_type == "shader" else "resourcepacks")
+                if not os.path.exists(target_dir): os.makedirs(target_dir)
+                target_path = os.path.join(target_dir, filename)
+                
+                self.root.after(0, lambda: self.update_download_task(task_id, 0, detail=f"Downloading {filename}..."))
+                
+                with requests.get(download_url, stream=True) as d_r:
+                    d_r.raise_for_status()
+                    total_downloaded = 0
+                    with open(target_path, 'wb') as f:
+                        for chunk in d_r.iter_content(chunk_size=8192):
+                            if task_id in self.download_tasks and self.download_tasks[task_id]["cancel_event"].is_set():
+                                raise Exception("Cancelled")
+                            if chunk: f.write(chunk)
+                
+                self.root.after(0, lambda: self.complete_download_task(task_id))
+                self.root.after(0, lambda: btn_widget.config(text="✔ Installed", bg=COLORS['success_green'], fg="white"))
+                
+            except Exception as e:
+                msg = str(e)
+                if msg != "Cancelled":
+                    self.root.after(0, lambda: self.update_download_task(task_id, status="Error", detail=msg))
+                self.root.after(0, lambda: btn_widget.config(state="normal", text="Retry", bg=COLORS['error_red']))
         
         self.download_manager.queue_mod(run_install, task_id)
 
@@ -8264,6 +8513,263 @@ class MinecraftLauncher:
         threading.Thread(target=fetch, daemon=True).start()
 
     def create_settings_tab(self):
+        if getattr(self, 'neo_style_enabled', True):
+            self._create_neo_settings_tab()
+        else:
+            self._create_classic_settings_tab()
+
+    def _create_neo_settings_tab(self):
+        container = tk.Frame(self.tab_container, bg=COLORS['main_bg'])
+        self.tabs["Settings"] = container
+        
+        # Top Header & Nav
+        header_frame = tk.Frame(container, bg=COLORS['sidebar_bg'], height=60)
+        header_frame.pack(side="top", fill="x")
+        
+        title = tk.Label(header_frame, text="SETTINGS", font=("Segoe UI", 14, "bold"), 
+                         bg=COLORS['sidebar_bg'], fg=COLORS['text_primary'])
+        title.pack(side="left", padx=30, pady=15)
+
+        nav_frame = tk.Frame(header_frame, bg=COLORS['sidebar_bg'])
+        nav_frame.pack(side="right", padx=30, pady=15)
+
+        content_container = tk.Frame(container, bg=COLORS['main_bg'])
+        content_container.pack(side="top", fill="both", expand=True)
+        
+        # We need a scrollable area for each tab if it overflows, or just let neo be scrollable overall?
+        # Actually, let's just make the whole container scrollable, but using anchors in a top nav!
+        # Wait, if it's cards, we just use a unified smooth-scrolling wrapper like classic, but NO left nav, and put the cards in a responsive-like grid or wide cards centering!
+        
+        # Content Canvas
+        canvas = tk.Canvas(content_container, bg=COLORS['main_bg'], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(content_container, orient="vertical", command=canvas.yview, style="Launcher.Vertical.TScrollbar")
+        
+        scrollable_frame = tk.Frame(canvas, bg=COLORS['main_bg'])
+        scrollable_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        
+        # Center the content slightly
+        canvas_window = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw", width=content_container.winfo_reqwidth())
+
+        canvas.bind("<MouseWheel>", lambda e, c=canvas: self._smooth_scroll(c, e))
+        
+        def on_canvas_configure(event):
+            # Center content if wide enough, else fill
+            w = max(event.width, 600)
+            canvas.itemconfig(canvas_window, width=w)
+            
+        canvas.bind("<Configure>", on_canvas_configure)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        content_container.bind("<Enter>", lambda e: self._bind_smooth_scroll(canvas, scrollable_frame))
+
+        # Main wrapper to hold cards
+        main_wrapper = tk.Frame(scrollable_frame, bg=COLORS['main_bg'])
+        main_wrapper.pack(fill="both", expand=True, padx=40, pady=30)
+        
+        def scroll_to_widget(widget):
+             try:
+                 scrollable_frame.update_idletasks()
+                 canvas.update_idletasks()
+                 widget_y = widget.winfo_y()
+                 canvas_height = canvas.winfo_height()
+                 total_height = scrollable_frame.winfo_reqheight()
+                 if total_height > canvas_height:
+                     target_y = max(0, widget_y - 20)
+                     fraction = max(0.0, min(1.0, target_y / (total_height - canvas_height)))
+                     canvas.yview_moveto(fraction)
+                 else:
+                     canvas.yview_moveto(0)
+             except: pass
+
+        def create_top_nav_btn(text, target_widget):
+            btn = tk.Button(nav_frame, text=text.upper(), font=("Segoe UI", 9, "bold"),
+                           bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'],
+                           relief="flat", cursor="hand2", command=lambda w=target_widget: scroll_to_widget(w))
+            btn.pack(side="left", padx=10)
+            btn.bind("<Enter>", lambda e, b=btn: b.config(fg="white"))
+            btn.bind("<Leave>", lambda e, b=btn: b.config(fg=COLORS['text_secondary']))
+
+        # Helper to make neat cards
+        def create_card(parent, title_text):
+            card = tk.Frame(parent, bg=COLORS['card_bg'], padx=25, pady=25)
+            card.pack(fill="x", pady=(0, 20))
+            lbl = tk.Label(card, text=title_text, font=("Segoe UI", 12, "bold"),
+                          bg=COLORS['card_bg'], fg=COLORS['text_primary'])
+            lbl.pack(anchor="w", pady=(0, 15))
+            return card, lbl
+            
+        def card_check(card, text, var, cmd=None):
+            cmd = cmd or self.save_config
+            cb = tk.Checkbutton(card, text=text, variable=var,
+                          bg=COLORS['card_bg'], fg=COLORS['text_primary'],
+                          selectcolor=COLORS['card_bg'], activebackground=COLORS['card_bg'],
+                          command=cmd)
+            cb.pack(anchor="w", pady=(0, 8))
+            
+        def card_label(card, text):
+            tk.Label(card, text=text, font=("Segoe UI", 10), bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(anchor="w", pady=(10, 5))
+
+        # --- Cards ---
+        
+        # GENERAL
+        card_gen, lbl_gen = create_card(main_wrapper, "GENERAL")
+        create_top_nav_btn("General", card_gen)
+        
+        self.close_launcher_var = tk.BooleanVar(value=getattr(self, 'close_launcher', True))
+        card_check(card_gen, "Close launcher when game starts", self.close_launcher_var)
+        self.minimize_to_tray_var = tk.BooleanVar(value=getattr(self, 'minimize_to_tray', False))
+        card_check(card_gen, "Minimize to tray on close", self.minimize_to_tray_var)
+        self.show_console_var = tk.BooleanVar(value=getattr(self, 'show_console', False))
+        card_check(card_gen, "Keep output console open (Debug)", self.show_console_var)
+
+        # APPEARANCE
+        card_app, lbl_app = create_card(main_wrapper, "APPEARANCE")
+        create_top_nav_btn("Appearance", card_app)
+        
+        self.custom_titlebar_var = tk.BooleanVar(value=getattr(self, 'custom_titlebar_enabled', True))
+        def on_titlebar_toggle():
+             val = self.custom_titlebar_var.get(); self.custom_titlebar_enabled = val; self.save_config()
+             if hasattr(self, 'root'): custom_showinfo("Restart Required", "Restart to apply titlebar changes.")
+        card_check(card_app, "Use Custom Titlebar (Windows only)", self.custom_titlebar_var, on_titlebar_toggle)
+
+        self.neo_style_var = tk.BooleanVar(value=getattr(self, 'neo_style_enabled', True))
+        def on_neo_toggle():
+             val = self.neo_style_var.get(); self.neo_style_enabled = val; self.save_config()
+             if hasattr(self, 'root'): custom_showinfo("Restart Required", "Restart to apply Neo Style changes.")
+        card_check(card_app, "Use Neo Style (OLED Black Theme)", self.neo_style_var, on_neo_toggle)
+
+        card_label(card_app, "Accent Color")
+        accent_frame = tk.Frame(card_app, bg=COLORS['card_bg'])
+        accent_frame.pack(fill="x", pady=(0, 10))
+        
+        _current = getattr(self, "accent_color_name", "Green")
+        _attrs = [("Green", "#2D8F36"), ("Blue", "#3498DB"), ("Orange", "#E67E22"), ("Purple", "#9B59B6"), ("Red", "#E74C3C")]
+        
+        for name, col in _attrs:
+            f = tk.Frame(accent_frame, bg=COLORS['card_bg'], padx=3, pady=3)
+            f.pack(side="left", padx=5)
+            if name == _current: f.config(bg="gray")
+            btn = tk.Button(f, bg=col, width=6, height=2, relief="flat", bd=0, cursor="hand2",
+                           command=lambda n=name: self.apply_accent_color(n))
+            btn.config(activebackground=col)
+            btn.pack()
+
+        # JAVA
+        card_java, lbl_java = create_card(main_wrapper, "JAVA & DIRECTORY")
+        create_top_nav_btn("Java", card_java)
+
+        card_label(card_java, "Minecraft Directory")
+        dir_frame = tk.Frame(card_java, bg=COLORS['card_bg'])
+        dir_frame.pack(fill="x", pady=(0, 10))
+        self.dir_entry = tk.Entry(dir_frame, font=("Segoe UI", 10), bg=COLORS['input_bg'], fg=COLORS['text_primary'], relief="flat", insertbackground="white")
+        self.dir_entry.pack(side="left", fill="x", expand=True, ipady=6)
+        self._make_btn(dir_frame, "Change", style="secondary", font_size=9, command=self.change_minecraft_dir).pack(side="left", padx=(10, 0))
+        self._make_btn(dir_frame, "Open", style="secondary", font_size=9, command=self.open_minecraft_dir).pack(side="left", padx=(5, 0)) # type: ignore
+        
+        card_label(card_java, "Java Arguments (JVM Flags)")
+        self.java_args_entry = tk.Entry(card_java, font=("Segoe UI", 10), bg=COLORS['input_bg'], fg=COLORS['text_primary'], relief="flat", insertbackground="white")
+        self.java_args_entry.pack(fill="x", pady=(0, 10), ipady=6)
+        self.java_args_entry.bind("<FocusOut>", self.save_config)
+
+        card_label(card_java, "Allocated Memory (MB)")
+        self.ram_var = tk.IntVar(value=DEFAULT_RAM)
+        self.ram_entry_var = tk.StringVar(value=str(DEFAULT_RAM))
+        self.ram_entry_var.trace_add("write", self._on_ram_entry_change)
+        
+        ram_row = tk.Frame(card_java, bg=COLORS['card_bg'])
+        ram_row.pack(fill="x", pady=(0, 10))
+        tk.Scale(ram_row, from_=1024, to=16384, orient="horizontal", resolution=512, variable=self.ram_var, showvalue=0, bg=COLORS['card_bg'], fg=COLORS['text_primary'], troughcolor=COLORS['input_bg'], highlightthickness=0, command=self._on_ram_slider_change).pack(side="left", fill="x", expand=True) # type: ignore
+        tk.Entry(ram_row, textvariable=self.ram_entry_var, width=8, bg=COLORS['input_bg'], fg=COLORS['text_primary'], relief="flat", insertbackground="white").pack(side="left", padx=(10, 0), ipady=4)
+
+        # DOWNLOADS & FEATURES
+        card_down, lbl_down = create_card(main_wrapper, "DOWNLOADS")
+        create_top_nav_btn("Downloads", card_down)
+
+        self.enable_modrinth_var = tk.BooleanVar(value=getattr(self, 'enable_modrinth', True))
+        def on_modrinth_toggle():
+             val = self.enable_modrinth_var.get(); self.enable_modrinth = val; self.save_config()
+             custom_showinfo("Restart Required", "Restart to apply Modrinth changes.")
+        card_check(card_down, "Enable Modrinth Integration (Mods Tab)", self.enable_modrinth_var, on_modrinth_toggle)
+        
+        card_label(card_down, "Download Limits")
+        lim_frame = tk.Frame(card_down, bg=COLORS['card_bg'])
+        lim_frame.pack(fill="x", pady=(0, 10))
+        
+        def update_limits(*args):
+             try: self.max_concurrent_packs = int(self.limit_packs_var.get()); self.max_concurrent_mods = int(self.limit_mods_var.get()); self.save_config(sync_ui=False)
+             except: pass
+
+        tk.Label(lim_frame, text="Max Modpacks:", bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(side="left")
+        self.limit_packs_var = tk.StringVar(value=str(getattr(self, 'max_concurrent_packs', 1)))
+        self.limit_packs_var.trace_add("write", update_limits)
+        tk.Entry(lim_frame, textvariable=self.limit_packs_var, width=5, bg=COLORS['input_bg'], fg="white", relief="flat").pack(side="left", padx=(5, 15))
+
+        tk.Label(lim_frame, text="Max Mods:", bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(side="left")
+        self.limit_mods_var = tk.StringVar(value=str(getattr(self, 'max_concurrent_mods', 3)))
+        self.limit_mods_var.trace_add("write", update_limits)
+        tk.Entry(lim_frame, textvariable=self.limit_mods_var, width=5, bg=COLORS['input_bg'], fg="white", relief="flat").pack(side="left", padx=5)
+
+        card_label(card_down, "Speed Limit (KB/s)")
+        speed_frame = tk.Frame(card_down, bg=COLORS['card_bg'])
+        speed_frame.pack(fill="x", pady=0)
+        self.limit_speed_enc_var = tk.BooleanVar(value=getattr(self, 'limit_download_speed_enabled', False))
+        tk.Checkbutton(speed_frame, text="Limit Speed", variable=self.limit_speed_enc_var, bg=COLORS['card_bg'], fg=COLORS['text_primary'], selectcolor=COLORS['card_bg'], activebackground=COLORS['card_bg'], command=lambda: [setattr(self, 'limit_download_speed_enabled', self.limit_speed_enc_var.get()), self.save_config(sync_ui=False)]).pack(side="left")
+        self.limit_speed_val_var = tk.StringVar(value=str(getattr(self, 'max_download_speed', 2048)))
+        def update_speed(*args):
+             try: self.max_download_speed = int(self.limit_speed_val_var.get()); self.save_config(sync_ui=False)
+             except: pass
+        self.limit_speed_val_var.trace_add("write", update_speed)
+        tk.Entry(speed_frame, textvariable=self.limit_speed_val_var, width=8, bg=COLORS['input_bg'], fg="white", relief="flat").pack(side="left", padx=(10, 5))
+
+        # DISCORD & ACCOUNT
+        card_rpc, lbl_rpc = create_card(main_wrapper, "ACCOUNT & RPC")
+        create_top_nav_btn("Account", card_rpc)
+        
+        card_label(card_rpc, "Account Username")
+        self.user_entry = tk.Entry(card_rpc, font=("Segoe UI", 11), bg=COLORS['input_bg'], fg=COLORS['text_primary'], relief="flat", insertbackground="white")
+        self.user_entry.pack(fill="x", pady=(0, 15), ipady=8)
+        self.user_entry.bind("<FocusOut>", self.save_config)
+
+        self.rpc_var = tk.BooleanVar(value=True)
+        self.rpc_detail_mode_var = tk.StringVar(value="Show Version")
+        card_check(card_rpc, "Enable Discord Rich Presence", self.rpc_var, self._on_rpc_toggle)
+        
+        card_label(card_rpc, "RPC Second Line Detail")
+        rpc_combo = ttk.Combobox(card_rpc, textvariable=self.rpc_detail_mode_var, state="readonly", values=["Show Version", "Show Server IP", "Hidden"], style="Launcher.TCombobox", width=30)
+        rpc_combo.pack(anchor="w", pady=(0, 10))
+        rpc_combo.bind("<<ComboboxSelected>>", lambda e: self.save_config())
+
+        # LOGS & UPDATES
+        card_sys, lbl_sys = create_card(main_wrapper, "SYSTEM & LOGS")
+        create_top_nav_btn("System", card_sys)
+        
+        update_frame = tk.Frame(card_sys, bg=COLORS['card_bg'])
+        update_frame.pack(fill="x", pady=(0, 10))
+        tk.Label(update_frame, text=f"Current Version: {CURRENT_VERSION}", font=("Segoe UI", 10), bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(side="left", padx=(0, 20))
+        self._make_btn(update_frame, "Check Updates", style="secondary", font_size=9, command=self.check_for_updates).pack(side="left")
+        
+        self.update_status_lbl = tk.Label(card_sys, text="", font=("Segoe UI", 9), bg=COLORS['card_bg'], fg=COLORS['text_secondary'])
+        self.update_status_lbl.pack(anchor="w")
+        
+        self.auto_update_var = tk.BooleanVar(value=self.auto_update_check)
+        card_check(card_sys, "Auto-check updates on startup", self.auto_update_var)
+        
+        card_label(card_sys, "Launcher Logs")
+        self.log_area = scrolledtext.ScrolledText(card_sys, height=6, bg=COLORS['input_bg'], fg=COLORS['text_secondary'], font=("Consolas", 9), relief="flat")
+        self.log_area.pack(fill="x")
+
+        # DANGER ZONE
+        card_danger, lbl_danger = create_card(main_wrapper, "DANGER ZONE")
+        lbl_danger.config(fg="#E74C3C")
+        self._make_btn(card_danger, "Review Onboarding", style="secondary", font_size=9, command=lambda: self.show_onboarding_wizard()).pack(anchor="w", pady=(0, 10))
+        self._make_btn(card_danger, "Reset to Defaults", style="danger", font_size=9, bold=True, command=self.reset_to_defaults).pack(anchor="w")
+        
+        self._bind_smooth_scroll(canvas, scrollable_frame)
+
+    def _create_classic_settings_tab(self):
         container = tk.Frame(self.tab_container, bg=COLORS['main_bg'])
         self.tabs["Settings"] = container
         
@@ -8384,10 +8890,79 @@ class MinecraftLauncher:
                       selectcolor=COLORS['main_bg'], activebackground=COLORS['main_bg'],
                       command=self.save_config).pack(anchor="w", pady=(0, 15))
 
+        # --- APPEARANCE ---
+        lbl_appear = tk.Label(main_container, text="LAUNCHER APPEARANCE", font=("Segoe UI", 14, "bold"),
+                bg=COLORS['main_bg'], fg=COLORS['text_primary'])
+        lbl_appear.pack(anchor="w", pady=(10, 15))
+        
+        self.custom_titlebar_var = tk.BooleanVar(value=getattr(self, 'custom_titlebar_enabled', True))
+        def on_titlebar_toggle():
+             # Requires restart
+             val = self.custom_titlebar_var.get()
+             self.custom_titlebar_enabled = val
+             self.save_config()
+             if hasattr(self, 'root'):
+                 custom_showinfo("Restart Required", "Please restart the launcher to apply changes to the titlebar.")
+
+        tk.Checkbutton(main_container, text="Use Custom Titlebar (Windows only)", variable=self.custom_titlebar_var,
+                      bg=COLORS['main_bg'], fg=COLORS['text_primary'],
+                      selectcolor=COLORS['main_bg'], activebackground=COLORS['main_bg'],
+                      command=on_titlebar_toggle).pack(anchor="w", pady=(0, 5))
+
+        self.neo_style_var = tk.BooleanVar(value=getattr(self, 'neo_style_enabled', True))
+        def on_neo_toggle():
+             val = self.neo_style_var.get()
+             self.neo_style_enabled = val
+             self.save_config()
+             if hasattr(self, 'root'):
+                 custom_showinfo("Restart Required", "Please restart the launcher to apply Neo Style changes.")
+
+        tk.Checkbutton(main_container, text="Use Neo Style (OLED Black Theme)", variable=self.neo_style_var,
+                      bg=COLORS['main_bg'], fg=COLORS['text_primary'],
+                      selectcolor=COLORS['main_bg'], activebackground=COLORS['main_bg'],
+                      command=on_neo_toggle).pack(anchor="w", pady=(0, 15))
+        
+        # Accent Color
+        tk.Label(main_container, text="Accent Color", font=("Segoe UI", 10),
+                bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(anchor="w")
+        
+        accent_frame = tk.Frame(main_container, bg=COLORS['main_bg'])
+        accent_frame.pack(fill="x", pady=(5, 10))
+        
+        def set_accent(name):
+            self.apply_accent_color(name)
+
+        _current = getattr(self, "accent_color_name", "Green")
+        _attrs = [("Green", "#2D8F36"), ("Blue", "#3498DB"), ("Orange", "#E67E22"), ("Purple", "#9B59B6"), ("Red", "#E74C3C")]
+        
+        for name, col in _attrs:
+            f = tk.Frame(accent_frame, bg=COLORS['main_bg'], padx=2, pady=2)
+            f.pack(side="left", padx=5)
+            
+            # Indicator border if selected
+            if name == _current:
+                f.config(bg="white")
+
+            btn = tk.Button(f, bg=col, width=6, height=2, relief="flat", bd=0, cursor="hand2",
+                           command=lambda n=name: set_accent(n))
+            # Hover — lighten slightly
+            _hov = col
+            btn.config(activebackground=col)
+            btn.bind("<Enter>", lambda e, b=btn, c=col: b.config(relief="solid", bd=1))
+            btn.bind("<Leave>", lambda e, b=btn: b.config(relief="flat", bd=0))
+            btn.pack()
+
+        # Review Onboarding
+        tk.Label(main_container, text="Onboarding", font=("Segoe UI", 10),
+                bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(anchor="w", pady=(10, 5))
+                
+        self._make_btn(main_container, "Review setup wizard", style="secondary", font_size=9,
+                      command=lambda: self.show_onboarding_wizard()).pack(anchor="w")
+
         # --- JAVA SETTINGS ---
         lbl_java = tk.Label(main_container, text="JAVA SETTINGS", font=("Segoe UI", 14, "bold"),
                 bg=COLORS['main_bg'], fg=COLORS['text_primary'])
-        lbl_java.pack(anchor="w", pady=(10, 15))
+        lbl_java.pack(anchor="w", pady=(30, 15))
         
         # Minecraft Directory
         tk.Label(main_container, text="Minecraft Directory", font=("Segoe UI", 10),
@@ -8539,49 +9114,6 @@ class MinecraftLauncher:
         self.user_entry.pack(fill="x", pady=(5, 0), ipady=8)
         self.user_entry.bind("<FocusOut>", self.save_config)
 
-        # --- APPEARANCE ---
-        lbl_appear = tk.Label(main_container, text="LAUNCHER APPEARANCE", font=("Segoe UI", 14, "bold"),
-                bg=COLORS['main_bg'], fg=COLORS['text_primary'])
-        lbl_appear.pack(anchor="w", pady=(30, 15))
-        
-        # Accent Color
-        tk.Label(main_container, text="Accent Color", font=("Segoe UI", 10),
-                bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(anchor="w")
-        
-        accent_frame = tk.Frame(main_container, bg=COLORS['main_bg'])
-        accent_frame.pack(fill="x", pady=(5, 10))
-        
-        def set_accent(name):
-            self.apply_accent_color(name)
-
-        _current = getattr(self, "accent_color_name", "Green")
-        _attrs = [("Green", "#2D8F36"), ("Blue", "#3498DB"), ("Orange", "#E67E22"), ("Purple", "#9B59B6"), ("Red", "#E74C3C")]
-        
-        for name, col in _attrs:
-            f = tk.Frame(accent_frame, bg=COLORS['main_bg'], padx=2, pady=2)
-            f.pack(side="left", padx=5)
-            
-            # Indicator border if selected
-            if name == _current:
-                f.config(bg="white")
-
-            btn = tk.Button(f, bg=col, width=6, height=2, relief="flat", bd=0, cursor="hand2",
-                           command=lambda n=name: set_accent(n))
-            # Hover — lighten slightly
-            _hov = col
-            btn.config(activebackground=col)
-            btn.bind("<Enter>", lambda e, b=btn, c=col: b.config(relief="solid", bd=1))
-            btn.bind("<Leave>", lambda e, b=btn: b.config(relief="flat", bd=0))
-            btn.pack()
-
-        # Review Onboarding
-        tk.Label(main_container, text="Onboarding", font=("Segoe UI", 10),
-                bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(anchor="w", pady=(10, 5))
-                
-        self._make_btn(main_container, "Review setup wizard", style="secondary", font_size=9,
-                      command=lambda: self.show_onboarding_wizard()).pack(anchor="w")
-
-        # --- LOGS ---
         lbl_logs = tk.Label(main_container, text="LAUNCHER LOGS", font=("Segoe UI", 14, "bold"),
                 bg=COLORS['main_bg'], fg=COLORS['text_primary'])
         lbl_logs.pack(anchor="w", pady=(30, 15))
@@ -9504,6 +10036,8 @@ How to use:
                     self.rpc_show_version = (self.rpc_detail_mode_var.get() == "Show Version")
                     self.rpc_show_server = (self.rpc_detail_mode_var.get() == "Show Server IP")
                     self.auto_update_check = data.get("auto_update_check", True)
+                    self.custom_titlebar_enabled = data.get("custom_titlebar_enabled", True)
+                    self.neo_style_enabled = data.get("neo_style_enabled", True)
                     self.close_launcher = data.get("close_launcher", True)
                     self.minimize_to_tray = data.get("minimize_to_tray", False)
                     self.show_console = data.get("show_console", False)
@@ -9607,6 +10141,7 @@ How to use:
             show_console_val = self.show_console_var.get()
 
         return {
+            "last_version": getattr(self, "last_version", ""),
             "first_run_completed": not self.first_run,
             "accent_color": getattr(self, "accent_color_name", "Green"),
             "profiles": self.profiles,
@@ -9623,6 +10158,8 @@ How to use:
             "rpc_show_version": self.rpc_show_version,
             "rpc_show_server": self.rpc_show_server,
             "auto_update_check": self.auto_update_check,
+            "custom_titlebar_enabled": getattr(self, 'custom_titlebar_enabled', True),
+            "neo_style_enabled": getattr(self, 'neo_style_enabled', True),
             "max_concurrent_packs": getattr(self, 'max_concurrent_packs', 1),
             "max_concurrent_mods": getattr(self, 'max_concurrent_mods', 3),
             "limit_download_speed_enabled": getattr(self, 'limit_download_speed_enabled', False),
@@ -9787,7 +10324,7 @@ How to use:
         b1.config(bg=b1_bg, pady=10)
         if current_model == "classic": 
             b1.config(fg="white")
-            b1.bind("<Enter>", lambda e: b1.config(bg="#3AA044"))
+            b1.bind("<Enter>", lambda e: b1.config(bg=COLORS.get('play_btn_green', '#2D8F36')))
             b1.bind("<Leave>", lambda e: b1.config(bg=COLORS['success_green']))
         b1.pack(side="left", padx=5)
         
@@ -9799,7 +10336,7 @@ How to use:
         b2.config(bg=b2_bg, pady=10)
         if current_model == "slim":
             b2.config(fg="white")
-            b2.bind("<Enter>", lambda e: b2.config(bg="#3AA044"))
+            b2.bind("<Enter>", lambda e: b2.config(bg=COLORS.get('play_btn_green', '#2D8F36')))
             b2.bind("<Leave>", lambda e: b2.config(bg=COLORS['success_green']))
         b2.pack(side="right", padx=5)
         
@@ -10469,8 +11006,6 @@ How to use:
                                  os.rename(mods_dir, mods_backup_path)
                              
                              # Copy pack mods to live folder
-                             # Using copytree can be slow. Symlink if possible?
-                             # Windows requires Admin for symlinks usually. Copy is safer.
                              shutil.copytree(pack_mods_dir, mods_dir)
                              self.log("Swapped mods folder for modpack.")
             except Exception as e:
@@ -10535,6 +11070,8 @@ How to use:
             err_msg = str(e)
             if "launchermeta.mojang.com" in err_msg or "getaddrinfo failed" in err_msg:
                  err_msg = "Network Error: Could not connect to Mojang servers.\nPlease check your internet connection."
+            elif "SSL" in err_msg or "DECRYPTION_FAILED" in err_msg:
+                 err_msg = "Network connection interrupted (SSL error).\nThis is usually a temporary hiccup or antivirus block.\n\nPlease try clicking PLAY again."
             
             self.root.after(0, lambda: custom_showerror("Launch Error", err_msg))
             self.root.after(0, lambda: self.update_rpc("Idle", "In Launcher"))
@@ -10564,5 +11101,72 @@ How to use:
 
 if __name__ == "__main__":
     root = tk.Tk()
-    app = MinecraftLauncher(root)
+    root.withdraw()
+
+    splash = tk.Toplevel(root)
+    splash.overrideredirect(True)
+    
+    # Make background transparent if possible (Windows)
+    try:
+        splash.attributes("-transparentcolor", "#050505")
+    except Exception:
+        pass
+    splash.configure(bg="#050505")
+    
+    splash_width = 300
+    splash_height = 300
+    x = (root.winfo_screenwidth() // 2) - (splash_width // 2)
+    y = (root.winfo_screenheight() // 2) - (splash_height // 2)
+    splash.geometry(f"{splash_width}x{splash_height}+{x}+{y}")
+    
+    try:
+        from PIL import Image, ImageTk
+        # Make logo bigger (e.g. 256x256)
+        img = Image.open(resource_path("logo.png")).resize((256, 256), Image.Resampling.LANCZOS)
+        splash_logo = ImageTk.PhotoImage(img)
+        logo_lbl = tk.Label(splash, image=splash_logo, bg="#050505")
+        logo_lbl.image = splash_logo # type: ignore
+        logo_lbl.pack(expand=True)
+    except Exception:
+        tk.Label(splash, text="NLC", font=("Segoe UI", 48, "bold"), fg="white", bg="#050505").pack(expand=True)
+        
+    alpha = 0.0
+    fading_in = True
+    splash.attributes("-alpha", alpha)
+    
+    def pulsate_splash():
+        global alpha, fading_in
+        if not splash.winfo_exists():
+            return
+        
+        if fading_in:
+            alpha += 0.05
+            if alpha >= 1.0:
+                alpha = 1.0
+                fading_in = False
+        else:
+            alpha -= 0.05
+            if alpha <= 0.3:
+                alpha = 0.3
+                fading_in = True
+                
+        splash.attributes("-alpha", alpha)
+        splash.after(40, pulsate_splash)
+
+    def finish_loading():
+        splash.destroy()
+        root.deiconify()
+
+    # Start the pulsation
+    pulsate_splash()
+
+    # Initialize the app in the background so it doesn't wait
+    def init_app():
+        app = MinecraftLauncher(root)
+        # Once initialization is done, give it a bit of time then show
+        root.after(1000, finish_loading)
+        
+    # Schedule app init slightly so UI handles splash first
+    root.after(100, init_app)
+    
     root.mainloop()
