@@ -48,6 +48,16 @@ from utils import (resource_path, get_minecraft_dir, is_version_installed,
                    RESAMPLE_NEAREST, FLIP_LEFT_RIGHT, AFFINE)
 from handlers import MicrosoftLoginHandler, LocalSkinServer
 from auth import ElyByAuth
+from agent import (
+    addon_add_saved_server,
+    addon_delete_screenshot,
+    addon_list_screenshot_files,
+    addon_normalize_config,
+    addon_record_play_session,
+    addon_remove_saved_server,
+    addon_reset_playtime_tracker,
+    addon_set_streamer_mode,
+)
 
 try:
     from pypresence import Presence # type: ignore
@@ -161,6 +171,120 @@ def normalize_version_text(value):
     if not value:
         return ""
     return value.replace(INSTALL_MARK, "").strip()
+
+
+def _get_lib_name_without_version(lib):
+    return ":".join(str(lib.get("name", "")).split(":")[:-1])
+
+
+def _safe_inherit_json(original_data, path):
+    inherit_version = original_data["inheritsFrom"]
+
+    with open(os.path.join(path, "versions", inherit_version, inherit_version + ".json"), encoding="utf-8") as f:
+        new_data = json.load(f)
+
+    original_libs = {}
+    for current_lib in original_data.get("libraries", []):
+        lib_name = _get_lib_name_without_version(current_lib)
+        original_libs[lib_name] = True
+
+    lib_list = original_data.get("libraries", [])
+    for current_lib in new_data.get("libraries", []):
+        lib_name = _get_lib_name_without_version(current_lib)
+        if lib_name not in original_libs:
+            lib_list.append(current_lib)
+
+    new_data["libraries"] = lib_list
+
+    for key, value in original_data.items():
+        if key == "libraries":
+            continue
+
+        if isinstance(value, list) and isinstance(new_data.get(key), list):
+            new_data[key] = value + new_data[key]
+        elif isinstance(value, dict) and isinstance(new_data.get(key), dict):
+            target_dict = new_data[key]
+            for child_key, child_value in value.items():
+                if isinstance(child_value, list):
+                    existing_list = target_dict.get(child_key, [])
+                    if not isinstance(existing_list, list):
+                        existing_list = []
+                    target_dict[child_key] = existing_list + child_value
+                else:
+                    target_dict[child_key] = child_value
+        else:
+            new_data[key] = value
+
+    return new_data
+
+
+def _safe_get_minecraft_arguments(data, version_data, path, options, classpath):
+    arglist = []
+    version_id = version_data.get("id", "<unknown>")
+
+    for entry in data:
+        if isinstance(entry, str):
+            arglist.append(
+                minecraft_launcher_lib.command.replace_arguments(
+                    entry, version_data, path, options, classpath
+                )
+            )
+            continue
+
+        if "compatibilityRules" in entry and not minecraft_launcher_lib.command.parse_rule_list(entry["compatibilityRules"], options):
+            continue
+
+        if "rules" in entry and not minecraft_launcher_lib.command.parse_rule_list(entry["rules"], options):
+            continue
+
+        if "value" not in entry:
+            logging.warning(
+                "Skipping malformed launch argument without 'value' for version %s: %s",
+                version_id,
+                entry,
+            )
+            continue
+
+        argument_value = entry.get("value")
+        if isinstance(argument_value, str):
+            arglist.append(
+                minecraft_launcher_lib.command.replace_arguments(
+                    argument_value, version_data, path, options, classpath
+                )
+            )
+            continue
+
+        if isinstance(argument_value, list):
+            for value in argument_value:
+                arglist.append(
+                    minecraft_launcher_lib.command.replace_arguments(
+                        value, version_data, path, options, classpath
+                    )
+                )
+            continue
+
+        logging.warning(
+            "Skipping malformed launch argument value for version %s: %r",
+            version_id,
+            argument_value,
+        )
+
+    return arglist
+
+
+def _patch_minecraft_launcher_launch_helpers():
+    try:
+        minecraft_launcher_lib.command.inherit_json = _safe_inherit_json
+        minecraft_launcher_lib.command.get_arguments = _safe_get_minecraft_arguments
+    except Exception:
+        logging.exception("Failed to patch minecraft-launcher-lib command helpers")
+
+
+_patch_minecraft_launcher_launch_helpers()
+
+
+def _get_streamer_hidden_name():
+    return "Hidden Account"
 
 
 def _get_widget_hwnd(widget):
@@ -1541,6 +1665,8 @@ class MinecraftLauncher:
         }
         self.screenshot_thumbnail_cache = {}
         self.quick_join_installation_labels = {}
+        self.third_party_addons = []
+        self.third_party_addon_input_vars = {}
         
         # Agent / Background Process
         self.agent_process = None
@@ -5000,7 +5126,7 @@ class MinecraftLauncher:
         # Update the small gamertag in the bottom right corner
         if hasattr(self, 'bottom_gamertag') and self.profiles:
              p = self.profiles[self.current_profile_index]
-             self.bottom_gamertag.config(text=p.get("name", ""))
+             self.bottom_gamertag.config(text=self._get_streamer_safe_name(p.get("name", "")))
 
     def _update_hero_layout(self, event):
         w, h = event.width, event.height
@@ -6857,7 +6983,8 @@ class MinecraftLauncher:
         if not self.profiles or idx < 0 or idx >= len(self.profiles): return
         
         p_name = self.profiles[idx].get("name", "Account")
-        if custom_askyesno("Remove Account", f"Are you sure you want to remove account '{p_name}'?"):
+        display_name = self._get_streamer_safe_name(p_name)
+        if custom_askyesno("Remove Account", f"Are you sure you want to remove account '{display_name}'?"):
             del self.profiles[idx]
             
             # Reset index if needed
@@ -6891,7 +7018,7 @@ class MinecraftLauncher:
         lbl_icon.image = head # type: ignore # keep ref
         lbl_icon.pack(side="left", padx=(0, 10))
         
-        tk.Label(frame, text=profile.get("name", "Unknown"), font=("Segoe UI", 10, "bold"),
+        tk.Label(frame, text=self._get_streamer_safe_name(profile.get("name", "Unknown")), font=("Segoe UI", 10, "bold"),
                 bg=bg, fg=COLORS['text_primary']).pack(side="left")
         
         # Delete Button
@@ -9122,6 +9249,7 @@ class MinecraftLauncher:
         
         card_label(card_rpc, "Account Username")
         self.user_entry = tk.Entry(card_rpc, font=("Segoe UI", 11), bg=COLORS['input_bg'], fg=COLORS['text_primary'], relief="flat", insertbackground="white")
+        self.user_entry.config(show="*" if self._is_streamer_mode_enabled() else "")
         self.user_entry.pack(fill="x", pady=(0, 15), ipady=8)
         self.user_entry.bind("<FocusOut>", self.save_config)
 
@@ -9490,6 +9618,7 @@ class MinecraftLauncher:
         self.user_entry = tk.Entry(main_container, font=("Segoe UI", 11),
                                   bg=COLORS['input_bg'], fg=COLORS['text_primary'],
                                   relief="flat", insertbackground="white")
+        self.user_entry.config(show="*" if self._is_streamer_mode_enabled() else "")
         self.user_entry.pack(fill="x", pady=(5, 0), ipady=8)
         self.user_entry.bind("<FocusOut>", self.save_config)
 
@@ -9636,20 +9765,27 @@ class MinecraftLauncher:
         canvas.bind("<Configure>", lambda e: [on_canvas_configure(e), update_scrollbar_visibility()])
         scroll_frame.bind("<Configure>", lambda e: update_scrollbar_visibility())
 
+        self.addons_canvas = canvas
+        self.addons_scroll_frame = scroll_frame
+        self._addons_update_scrollbar_visibility = update_scrollbar_visibility
+
         # Smooth mousewheel
         self._bind_wheel_events(canvas, lambda e, c=canvas: self._smooth_scroll(c, e), f"direct_{id(canvas)}")
 
-        # Bind enter for scrolling
-        frame.bind("<Enter>", lambda e: self._bind_smooth_scroll(canvas, scroll_frame))
+        # Keep wheel scrolling active anywhere over the Addons page content.
+        for bind_target in (frame, canvas, scroll_frame):
+            bind_target.bind("<Enter>", lambda e, c=canvas, sf=scroll_frame: self._bind_smooth_scroll(c, sf))
         
         # --- content ---
         content = tk.Frame(scroll_frame, bg=COLORS['main_bg'], padx=30, pady=10)
         content.pack(fill="x")
+        content.bind("<Enter>", lambda e, c=canvas, ct=content: self._bind_smooth_scroll(c, ct))
+        self.addons_content_frame = content
 
         if not hasattr(self, '_addons_collapsible_state'):
             self._addons_collapsible_state = {}
 
-        def create_collapsible_card(parent, title, subtitle, state_key, default_open=True):
+        def create_collapsible_card(parent, title, subtitle, state_key, default_open=True, title_badge_text=None, title_badge_fg=None):
             card = tk.Frame(parent, bg=COLORS['card_bg'], padx=20, pady=20)
             card.pack(fill="x", pady=(0, 20))
 
@@ -9678,8 +9814,22 @@ class MinecraftLauncher:
             )
             chevron.pack(anchor="ne")
 
-            title_lbl = tk.Label(text_wrap, text=title, font=("Segoe UI", 16, "bold"), bg=COLORS['card_bg'], fg=COLORS['text_primary'], anchor="w", cursor="hand2")
-            title_lbl.pack(anchor="w")
+            title_row = tk.Frame(text_wrap, bg=COLORS['card_bg'])
+            title_row.pack(anchor="w", fill="x")
+            title_lbl = tk.Label(title_row, text=title, font=("Segoe UI", 16, "bold"), bg=COLORS['card_bg'], fg=COLORS['text_primary'], anchor="w", cursor="hand2")
+            title_lbl.pack(side="left", anchor="w")
+            badge_lbl = None
+            if title_badge_text:
+                badge_lbl = tk.Label(
+                    title_row,
+                    text=title_badge_text,
+                    font=("Segoe UI", 15, "bold"),
+                    bg=COLORS['card_bg'],
+                    fg=title_badge_fg or COLORS['accent_blue'],
+                    anchor="w",
+                    cursor="hand2",
+                )
+                badge_lbl.pack(side="left", padx=(8, 0), anchor="w")
             subtitle_lbl = tk.Label(text_wrap, text=subtitle, font=("Segoe UI", 10), bg=COLORS['card_bg'], fg=COLORS['text_secondary'], anchor="w", cursor="hand2")
             subtitle_lbl.pack(anchor="w", pady=(4, 0))
 
@@ -9692,13 +9842,18 @@ class MinecraftLauncher:
                 else:
                     body.pack_forget()
 
-            for widget in (header, text_wrap, icon_wrap, title_lbl, subtitle_lbl, chevron):
+            bind_widgets = [header, text_wrap, title_row, icon_wrap, title_lbl, subtitle_lbl, chevron]
+            if badge_lbl is not None:
+                bind_widgets.append(badge_lbl)
+            for widget in bind_widgets:
                 widget.bind("<Button-1>", toggle_section)
 
             if is_open:
                 body.pack(fill="x", pady=(15, 0))
 
             return card, body
+
+        self._addons_create_collapsible_card = create_collapsible_card
 
         # Playtime Tracker
         playtime_frame = tk.Frame(content, bg=COLORS['card_bg'], padx=20, pady=20)
@@ -9716,6 +9871,75 @@ class MinecraftLauncher:
 
         self.playtime_list_frame = tk.Frame(playtime_frame, bg=COLORS['card_bg'])
         self.playtime_list_frame.pack(fill="x")
+
+        # GitHub Skin Sync
+        _sync_card, sync_frame = create_collapsible_card(
+            content,
+            "GitHub Skin Sync",
+            "Link a GitHub repository to sync skins with your friends.",
+            "github_skin_sync",
+            default_open=False,
+        )
+
+        # Enable Toggle
+        self.gh_sync_enabled = tk.BooleanVar(value=self.addons_config.get("gh_sync_enabled", False))
+        tk.Checkbutton(sync_frame, text="Enable Skin Sync", variable=self.gh_sync_enabled,
+                      bg=COLORS['card_bg'], fg=COLORS['text_primary'],
+                      selectcolor=COLORS['card_bg'], activebackground=COLORS['card_bg'],
+                      command=self._save_addons_config).pack(anchor="w", pady=(0, 15))
+
+        # Inputs Grid
+        grid_frame = tk.Frame(sync_frame, bg=COLORS['card_bg'])
+        grid_frame.pack(fill="x")
+        grid_frame.columnconfigure(1, weight=1)
+
+        # Repo
+        tk.Label(grid_frame, text="Repository (user/repo):", font=("Segoe UI", 10), bg=COLORS['card_bg'], fg=COLORS['text_secondary']).grid(row=0, column=0, sticky="w", pady=5)
+        self.gh_repo_entry = tk.Entry(grid_frame, font=("Segoe UI", 10), bg=COLORS['input_bg'], fg="white", relief="flat")
+        self.gh_repo_entry.grid(row=0, column=1, sticky="ew", padx=10, ipady=5)
+
+        # Token
+        tk.Label(grid_frame, text="Access Token (PAT):", font=("Segoe UI", 10), bg=COLORS['card_bg'], fg=COLORS['text_secondary']).grid(row=1, column=0, sticky="w", pady=5)
+        self.gh_token_entry = tk.Entry(grid_frame, font=("Segoe UI", 10), bg=COLORS['input_bg'], fg="white", relief="flat", show="*")
+        self.gh_token_entry.grid(row=1, column=1, sticky="ew", padx=10, ipady=5)
+        
+        # Save Button
+        save_sync_btn = self._make_btn(sync_frame, "Save & Sync", style="secondary", font_size=10,
+                                       command=self._save_gh_sync_settings)
+        save_sync_btn.config(bg=COLORS['accent_blue'], activebackground="#2E86C1")
+        save_sync_btn.bind("<Enter>", lambda e: save_sync_btn.config(bg="#2E86C1"))
+        save_sync_btn.bind("<Leave>", lambda e: save_sync_btn.config(bg=COLORS['accent_blue']))
+        save_sync_btn.pack(anchor="w", pady=(20, 0))
+
+        # Streamer Mode
+        _streamer_card, streamer_frame = create_collapsible_card(
+            content,
+            "Streamer Mode",
+            "Hide your account name across launcher-controlled surfaces while keeping the real server username.",
+            "streamer_mode",
+            default_open=False,
+        )
+
+        self.streamer_mode_var = tk.BooleanVar(value=bool(self.addons_config.get("streamer_mode_enabled", False)))
+        tk.Checkbutton(
+            streamer_frame,
+            text="Hide my username locally in the launcher and game-adjacent overlays",
+            variable=self.streamer_mode_var,
+            bg=COLORS['card_bg'],
+            fg=COLORS['text_primary'],
+            selectcolor=COLORS['card_bg'],
+            activebackground=COLORS['card_bg'],
+            command=self._save_streamer_mode_settings,
+        ).pack(anchor="w")
+        tk.Label(
+            streamer_frame,
+            text="This masks launcher UI, local logs, and Discord/status surfaces we control. Your real username is still used for launches and servers.",
+            font=("Segoe UI", 9),
+            bg=COLORS['card_bg'],
+            fg=COLORS['text_secondary'],
+            wraplength=760,
+            justify="left",
+        ).pack(anchor="w", pady=(8, 0))
 
         # Server Quick Join
         _server_card, server_frame = create_collapsible_card(
@@ -9771,44 +9995,45 @@ class MinecraftLauncher:
         self.screenshot_grid_frame = tk.Frame(screenshot_frame, bg=COLORS['card_bg'])
         self.screenshot_grid_frame.pack(fill="x")
 
-        # GitHub Skin Sync
-        _sync_card, sync_frame = create_collapsible_card(
-            content,
-            "GitHub Skin Sync",
-            "Link a GitHub repository to sync skins with your friends.",
-            "github_skin_sync",
-            default_open=False,
+        third_party_top = tk.Frame(content, bg=COLORS['main_bg'])
+        third_party_top.pack(fill="x", pady=(0, 8))
+        self.third_party_addons_status_lbl = tk.Label(
+            third_party_top,
+            text="",
+            font=("Segoe UI", 9),
+            bg=COLORS['main_bg'],
+            fg=COLORS['text_secondary'],
         )
+        self.third_party_addons_status_lbl.pack(side="left")
+        self._make_btn(
+            third_party_top,
+            "Refresh",
+            style="secondary",
+            font_size=9,
+            command=self.refresh_third_party_addons,
+        ).pack(side="right")
+        self._make_btn(
+            third_party_top,
+            "Open Folder",
+            style="secondary",
+            font_size=9,
+            command=self.open_third_party_addons_folder,
+        ).pack(side="right", padx=(0, 8))
 
-        # Enable Toggle
-        self.gh_sync_enabled = tk.BooleanVar(value=self.addons_config.get("gh_sync_enabled", False))
-        tk.Checkbutton(sync_frame, text="Enable Skin Sync", variable=self.gh_sync_enabled,
-                      bg=COLORS['card_bg'], fg=COLORS['text_primary'],
-                      selectcolor=COLORS['card_bg'], activebackground=COLORS['card_bg'],
-                      command=self._save_addons_config).pack(anchor="w", pady=(0, 15))
+        self.third_party_addons_path_lbl = tk.Label(
+            content,
+            text="",
+            font=("Consolas", 8),
+            bg=COLORS['main_bg'],
+            fg=COLORS['text_secondary'],
+            anchor="w",
+            justify="left",
+            wraplength=760,
+        )
+        self.third_party_addons_path_lbl.pack(fill="x", pady=(0, 12))
 
-        # Inputs Grid
-        grid_frame = tk.Frame(sync_frame, bg=COLORS['card_bg'])
-        grid_frame.pack(fill="x")
-        grid_frame.columnconfigure(1, weight=1)
-
-        # Repo
-        tk.Label(grid_frame, text="Repository (user/repo):", font=("Segoe UI", 10), bg=COLORS['card_bg'], fg=COLORS['text_secondary']).grid(row=0, column=0, sticky="w", pady=5)
-        self.gh_repo_entry = tk.Entry(grid_frame, font=("Segoe UI", 10), bg=COLORS['input_bg'], fg="white", relief="flat")
-        self.gh_repo_entry.grid(row=0, column=1, sticky="ew", padx=10, ipady=5)
-
-        # Token
-        tk.Label(grid_frame, text="Access Token (PAT):", font=("Segoe UI", 10), bg=COLORS['card_bg'], fg=COLORS['text_secondary']).grid(row=1, column=0, sticky="w", pady=5)
-        self.gh_token_entry = tk.Entry(grid_frame, font=("Segoe UI", 10), bg=COLORS['input_bg'], fg="white", relief="flat", show="*")
-        self.gh_token_entry.grid(row=1, column=1, sticky="ew", padx=10, ipady=5)
-        
-        # Save Button
-        save_sync_btn = self._make_btn(sync_frame, "Save & Sync", style="secondary", font_size=10,
-                                       command=self._save_gh_sync_settings)
-        save_sync_btn.config(bg=COLORS['accent_blue'], activebackground="#2E86C1")
-        save_sync_btn.bind("<Enter>", lambda e: save_sync_btn.config(bg="#2E86C1"))
-        save_sync_btn.bind("<Leave>", lambda e: save_sync_btn.config(bg=COLORS['accent_blue']))
-        save_sync_btn.pack(anchor="w", pady=(20, 0))
+        self.third_party_addons_cards_frame = tk.Frame(content, bg=COLORS['main_bg'])
+        self.third_party_addons_cards_frame.pack(fill="x")
 
         # Instructions
         info_frame = tk.Frame(content, bg=COLORS['main_bg'], pady=10)
@@ -9823,41 +10048,93 @@ How to use:
         """
         tk.Label(info_frame, text=info_text, font=("Segoe UI", 9), justify="left", bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(anchor="w")
 
+        self._bind_smooth_scroll(canvas, scroll_frame)
+        self._bind_smooth_scroll(canvas, content)
+        update_scrollbar_visibility()
         self.refresh_addons_tab_state()
 
     def _ensure_addons_config_defaults(self):
-        if not isinstance(self.addons_config, dict):
-            self.addons_config = {}
-        self.addons_config.setdefault("p3_reload_menu", False)
-        self.addons_config.setdefault("gh_sync_enabled", False)
-        self.addons_config.setdefault("gh_repo", "")
-        self.addons_config.setdefault("gh_token", "")
-        if not isinstance(self.addons_config.get("playtime_tracker"), dict):
-            self.addons_config["playtime_tracker"] = {}
-        if not isinstance(self.addons_config.get("saved_servers"), list):
-            self.addons_config["saved_servers"] = []
-        normalized_servers = []
-        for server in self.addons_config.get("saved_servers", []):
-            if not isinstance(server, dict):
-                continue
-            address = str(server.get("address", "")).strip()
-            if not address:
-                continue
-            port = server.get("port", 25565)
-            try:
-                port = int(port)
-            except Exception:
-                port = 25565
-            normalized_servers.append({
-                "id": str(server.get("id") or uuid.uuid4()),
-                "name": str(server.get("name") or address),
-                "address": address,
-                "port": port,
-            })
-        self.addons_config["saved_servers"] = normalized_servers
+        self.addons_config = addon_normalize_config(getattr(self, "addons_config", {}))
+
+    def _refresh_addons_scroll_bindings(self):
+        canvas = getattr(self, "addons_canvas", None)
+        scroll_frame = getattr(self, "addons_scroll_frame", None)
+        content = getattr(self, "addons_content_frame", None)
+        if not canvas or not scroll_frame or not content:
+            return
+
+        try:
+            self._bind_wheel_events(canvas, lambda e, c=canvas: self._smooth_scroll(c, e), f"direct_{id(canvas)}")
+            self._bind_smooth_scroll(canvas, scroll_frame)
+            self._bind_smooth_scroll(canvas, content)
+            update_scrollbar_visibility = getattr(self, "_addons_update_scrollbar_visibility", None)
+            if callable(update_scrollbar_visibility):
+                update_scrollbar_visibility()
+        except Exception:
+            pass
 
     def _get_installation_display_label(self, inst):
         return f"{inst.get('name', 'Unnamed')} • {inst.get('loader', 'Vanilla')} {inst.get('version', 'latest-release')}"
+
+    def _is_streamer_mode_enabled(self):
+        return bool(getattr(self, "addons_config", {}).get("streamer_mode_enabled", False))
+
+    def _get_streamer_safe_name(self, name=None):
+        if not self._is_streamer_mode_enabled():
+            return str(name or "Steve")
+        return _get_streamer_hidden_name()
+
+    def _mask_streamer_text(self, text):
+        if not self._is_streamer_mode_enabled():
+            return text
+        masked_text = str(text)
+        for profile in getattr(self, "profiles", []):
+            name = str(profile.get("name", "")).strip()
+            if name:
+                masked_text = masked_text.replace(name, _get_streamer_hidden_name())
+        return masked_text
+
+    def _apply_streamer_mode_ui(self):
+        try:
+            if hasattr(self, 'user_entry') and self.user_entry.winfo_exists():
+                self.user_entry.config(show="*" if self._is_streamer_mode_enabled() else "")
+        except Exception:
+            pass
+
+        try:
+            self.update_profile_btn()
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, 'update_bottom_gamertag'):
+                self.update_bottom_gamertag()
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, 'profile_menu') and self.profile_menu and self.profile_menu.winfo_exists():
+                self.profile_menu.destroy()
+                self.profile_menu = None
+        except Exception:
+            pass
+
+        try:
+            if getattr(self, "rpc_connected", False) and getattr(self, "rpc", None):
+                self.update_rpc(
+                    getattr(self, "_last_rpc_state", "Idle"),
+                    getattr(self, "_last_rpc_details", "In Launcher"),
+                    getattr(self, "_last_rpc_start", None),
+                )
+        except Exception:
+            pass
+
+    def _save_streamer_mode_settings(self):
+        self._ensure_addons_config_defaults()
+        enabled = bool(self.streamer_mode_var.get()) if hasattr(self, 'streamer_mode_var') else False
+        self.addons_config = addon_set_streamer_mode(self.addons_config, enabled)
+        self._apply_streamer_mode_ui()
+        self.save_config(sync_ui=False)
 
     def _refresh_quick_join_installation_values(self):
         if not hasattr(self, 'quick_join_install_combo'):
@@ -9932,6 +10209,7 @@ How to use:
 
         if not entries:
             tk.Label(self.playtime_list_frame, text="No tracked play sessions yet. Launch a game to start collecting stats.", font=("Segoe UI", 10), bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(anchor="w")
+            self._refresh_addons_scroll_bindings()
             return
 
         entries.sort(key=lambda item: item[3], reverse=True)
@@ -9948,11 +10226,13 @@ How to use:
             tk.Label(right, text=self._format_duration(seconds), font=("Segoe UI", 10, "bold"), bg=COLORS['card_bg'], fg=COLORS['text_primary']).pack(anchor="e")
             tk.Label(right, text=f"{launches} launches", font=("Segoe UI", 9), bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(anchor="e")
 
+        self._refresh_addons_scroll_bindings()
+
     def reset_playtime_tracker(self):
         if not custom_askyesno("Reset Playtime", "Clear all tracked playtime and launch counts?", parent=self.root):
             return
         self._ensure_addons_config_defaults()
-        self.addons_config["playtime_tracker"] = {}
+        self.addons_config = addon_reset_playtime_tracker(self.addons_config)
         self.save_config(sync_ui=False)
         self.render_playtime_tracker()
 
@@ -9960,18 +10240,13 @@ How to use:
         if not inst_id:
             return
         self._ensure_addons_config_defaults()
-
-        tracker = self.addons_config.setdefault("playtime_tracker", {})
-        stats = tracker.setdefault(inst_id, {})
-        stats["seconds"] = int(stats.get("seconds", 0) or 0) + max(0, int(session_seconds))
-        stats["launches"] = int(stats.get("launches", 0) or 0) + 1
-        stats["last_session_seconds"] = max(0, int(session_seconds))
-        stats["last_played_at"] = datetime.now().isoformat()
-        if server_address:
-            last_server = str(server_address)
-            if server_port:
-                last_server = f"{last_server}:{server_port}"
-            stats["last_server"] = last_server
+        self.addons_config = addon_record_play_session(
+            self.addons_config,
+            inst_id,
+            session_seconds,
+            server_address=server_address,
+            server_port=server_port,
+        )
 
         for inst in self.installations:
             if inst.get("id") == inst_id:
@@ -9987,30 +10262,12 @@ How to use:
         address = self.quick_join_address_var.get().strip() if hasattr(self, 'quick_join_address_var') else ""
         port = self.quick_join_port_var.get().strip() if hasattr(self, 'quick_join_port_var') else "25565"
 
-        if not address:
-            custom_showerror("Missing Address", "Enter a server address first.", parent=self.root)
+        try:
+            self.addons_config = addon_add_saved_server(self.addons_config, name, address, port)
+        except ValueError as e:
+            title = "Missing Address" if "address" in str(e).lower() else "Invalid Port"
+            custom_showerror(title, str(e), parent=self.root)
             return
-
-        if ":" in address and address.count(":") == 1:
-            host_part, maybe_port = address.rsplit(":", 1)
-            if maybe_port.isdigit():
-                address = host_part
-                if not port or port == "25565":
-                    port = maybe_port
-
-        if not port:
-            port = "25565"
-        if not port.isdigit():
-            custom_showerror("Invalid Port", "Server port must be a number.", parent=self.root)
-            return
-
-        saved_servers = self.addons_config.setdefault("saved_servers", [])
-        saved_servers.append({
-            "id": str(uuid.uuid4()),
-            "name": name or address,
-            "address": address,
-            "port": int(port)
-        })
 
         self.quick_join_name_var.set("")
         self.quick_join_address_var.set("")
@@ -10020,10 +10277,7 @@ How to use:
 
     def remove_quick_join_server(self, server_id):
         self._ensure_addons_config_defaults()
-        self.addons_config["saved_servers"] = [
-            srv for srv in self.addons_config.get("saved_servers", [])
-            if str(srv.get("id")) != str(server_id)
-        ]
+        self.addons_config = addon_remove_saved_server(self.addons_config, server_id)
         self.save_config(sync_ui=False)
         self.render_quick_join_servers()
 
@@ -10056,6 +10310,7 @@ How to use:
         saved_servers = self.addons_config.get("saved_servers", [])
         if not saved_servers:
             tk.Label(self.saved_servers_list_frame, text="No saved servers yet.", font=("Segoe UI", 10), bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(anchor="w")
+            self._refresh_addons_scroll_bindings()
             return
 
         for server in saved_servers:
@@ -10072,8 +10327,290 @@ How to use:
             self._make_btn(btns, "Join", style="primary", font_size=9, bold=True, command=lambda s=server: self.launch_saved_server(s)).pack(side="left", padx=(0, 6))
             self._make_btn(btns, "Delete", style="secondary", font_size=9, command=lambda sid=server.get("id"): self.remove_quick_join_server(sid)).pack(side="left")
 
+        self._refresh_addons_scroll_bindings()
+
     def get_screenshots_dir(self):
         return os.path.join(self.minecraft_dir, "screenshots")
+
+    def get_third_party_addons_dir(self):
+        addons_dir = os.path.join(self.config_dir, "addons")
+        try:
+            os.makedirs(addons_dir, exist_ok=True)
+        except Exception:
+            pass
+        return addons_dir
+
+    def open_third_party_addons_folder(self):
+        self._open_path(self.get_third_party_addons_dir())
+
+    def refresh_third_party_addons(self):
+        if not hasattr(self, 'third_party_addons_cards_frame'):
+            return
+
+        addons_dir = self.get_third_party_addons_dir()
+        if hasattr(self, 'third_party_addons_path_lbl'):
+            self.third_party_addons_path_lbl.config(text=f"Folder: {addons_dir}")
+        if hasattr(self, 'third_party_addons_status_lbl'):
+            self.third_party_addons_status_lbl.config(text="Scanning third-party addons...")
+
+        payload = {
+            "minecraft_dir": self.minecraft_dir,
+        }
+        self.send_agent_request("list_third_party_addons", payload, self._on_third_party_addons_loaded)
+
+    def _on_third_party_addons_loaded(self, result):
+        if not isinstance(result, dict):
+            if hasattr(self, 'third_party_addons_status_lbl'):
+                self.third_party_addons_status_lbl.config(text="Failed to load third-party addons.")
+            return
+
+        if result.get("status") != "success":
+            if hasattr(self, 'third_party_addons_status_lbl'):
+                self.third_party_addons_status_lbl.config(text=str(result.get("msg", "Failed to load third-party addons.")))
+            self.third_party_addons = []
+            self.render_third_party_addons()
+            return
+
+        data = result.get("data", {})
+        if isinstance(data, dict):
+            self.third_party_addons = data.get("addons", []) if isinstance(data.get("addons"), list) else []
+            if hasattr(self, 'third_party_addons_path_lbl'):
+                self.third_party_addons_path_lbl.config(text=f"Folder: {data.get('addons_dir', self.get_third_party_addons_dir())}")
+        else:
+            self.third_party_addons = []
+
+        addon_count = len(self.third_party_addons)
+        if hasattr(self, 'third_party_addons_status_lbl'):
+            self.third_party_addons_status_lbl.config(text=f"{addon_count} addon{'s' if addon_count != 1 else ''} detected.")
+        self.render_third_party_addons()
+
+    def _coerce_third_party_addon_input(self, input_type, var):
+        if input_type == "checkbox":
+            return bool(var.get())
+        if input_type == "number":
+            raw = str(var.get()).strip()
+            if not raw:
+                return ""
+            try:
+                if "." in raw:
+                    return float(raw)
+                return int(raw)
+            except Exception:
+                return raw
+        return str(var.get())
+
+    def run_third_party_addon_action(self, addon_data, action_data):
+        addon_id = str(addon_data.get("id", "")).strip()
+        action_id = str(action_data.get("id", "")).strip()
+        if not addon_id or not action_id:
+            return
+
+        inputs = {}
+        input_map = self.third_party_addon_input_vars.get((addon_id, action_id), {})
+        for input_id, data in input_map.items():
+            inputs[input_id] = self._coerce_third_party_addon_input(data.get("type"), data.get("var"))
+
+        if hasattr(self, 'third_party_addons_status_lbl'):
+            self.third_party_addons_status_lbl.config(text=f"Running {addon_data.get('name', addon_id)}...")
+
+        payload = {
+            "addon_id": addon_id,
+            "action_id": action_id,
+            "inputs": inputs,
+            "minecraft_dir": self.minecraft_dir,
+        }
+        self.send_agent_request(
+            "run_third_party_addon_action",
+            payload,
+            lambda result, addon=addon_data, action=action_data: self._on_third_party_addon_action_result(addon, action, result),
+        )
+
+    def _on_third_party_addon_action_result(self, addon_data, action_data, result):
+        addon_name = str(addon_data.get("name", addon_data.get("id", "Addon")))
+        action_label = str(action_data.get("label", action_data.get("id", "Action")))
+
+        if not isinstance(result, dict):
+            custom_showerror("Addon Error", f"{addon_name} returned an invalid response.")
+            return
+
+        status = result.get("status")
+        message = str(result.get("msg", "") or "")
+        extra_data = result.get("data", {})
+
+        if hasattr(self, 'third_party_addons_status_lbl'):
+            if status == "success":
+                self.third_party_addons_status_lbl.config(text=f"{addon_name}: {message or 'Completed successfully.'}")
+            else:
+                self.third_party_addons_status_lbl.config(text=f"{addon_name}: {message or 'Action failed.'}")
+
+        if isinstance(extra_data, dict):
+            open_path = extra_data.get("open_path")
+            open_url = extra_data.get("open_url")
+            if open_path:
+                self._open_path(str(open_path))
+            if open_url:
+                webbrowser.open(str(open_url))
+            if extra_data.get("refresh_addons"):
+                self.refresh_third_party_addons()
+
+        if status == "success":
+            if message:
+                custom_showinfo(f"{addon_name} - {action_label}", message, parent=self.root)
+        else:
+            custom_showerror(f"{addon_name} - {action_label}", message or "Action failed.", parent=self.root)
+
+    def render_third_party_addons(self):
+        if not hasattr(self, 'third_party_addons_cards_frame'):
+            return
+
+        for widget in self.third_party_addons_cards_frame.winfo_children():
+            widget.destroy()
+        self.third_party_addon_input_vars = {}
+
+        addons = self.third_party_addons if isinstance(self.third_party_addons, list) else []
+        if not addons:
+            tk.Label(
+                self.third_party_addons_cards_frame,
+                text="No third-party addons found yet. Drop addon folders here and click Refresh.",
+                font=("Segoe UI", 10),
+                bg=COLORS['main_bg'],
+                fg=COLORS['text_secondary'],
+                justify="left",
+                wraplength=760,
+            ).pack(anchor="w")
+            self._refresh_addons_scroll_bindings()
+            return
+
+        create_card = getattr(self, "_addons_create_collapsible_card", None)
+        if not callable(create_card):
+            return
+
+        for addon in addons:
+            addon_name = str(addon.get("name", addon.get("id", "Addon")))
+            addon_version = str(addon.get("version", "0.0.0"))
+            addon_id = str(addon.get("id", addon_name)).strip() or addon_name
+            card, body = create_card(
+                self.third_party_addons_cards_frame,
+                addon_name,
+                str(addon.get("description", "Third-party addon")),
+                f"third_party_addon::{addon_id}",
+                default_open=False,
+                title_badge_text="+",
+                title_badge_fg=COLORS['accent_blue'],
+            )
+
+            meta_text = f"By {addon.get('author', 'Unknown')}"
+            tk.Label(
+                body,
+                text=f"{meta_text}  •  v{addon_version}",
+                font=("Segoe UI", 9),
+                bg=COLORS['card_bg'],
+                fg=COLORS['text_secondary'],
+                anchor="w",
+            ).pack(fill="x")
+
+            if addon.get("load_error"):
+                tk.Label(
+                    body,
+                    text=f"Load Error:\n{addon.get('load_error')}",
+                    font=("Consolas", 8),
+                    bg=COLORS['card_bg'],
+                    fg=COLORS['error_red'],
+                    justify="left",
+                    wraplength=740,
+                    anchor="w",
+                ).pack(fill="x", pady=(10, 0))
+                continue
+
+            actions = addon.get("actions", [])
+            if not isinstance(actions, list) or not actions:
+                tk.Label(
+                    body,
+                    text="This addon does not expose any launcher actions.",
+                    font=("Segoe UI", 9),
+                    bg=COLORS['card_bg'],
+                    fg=COLORS['text_secondary'],
+                    anchor="w",
+                ).pack(fill="x", pady=(10, 0))
+                continue
+
+            for action in actions:
+                action_frame = tk.Frame(body, bg=COLORS['card_bg'])
+                action_frame.pack(fill="x", pady=(10, 0))
+
+                tk.Label(
+                    action_frame,
+                    text=str(action.get("label", action.get("id", "Action"))),
+                    font=("Segoe UI", 9, "bold"),
+                    bg=COLORS['card_bg'],
+                    fg=COLORS['text_primary'],
+                    anchor="w",
+                ).pack(fill="x")
+
+                if action.get("description"):
+                    tk.Label(
+                        action_frame,
+                        text=str(action.get("description", "")),
+                        font=("Segoe UI", 8),
+                        bg=COLORS['card_bg'],
+                        fg=COLORS['text_secondary'],
+                        justify="left",
+                        wraplength=720,
+                        anchor="w",
+                    ).pack(fill="x", pady=(2, 6))
+
+                action_inputs = {}
+                for input_spec in action.get("inputs", []) or []:
+                    input_id = str(input_spec.get("id", "")).strip()
+                    input_type = str(input_spec.get("type", "text")).strip().lower()
+                    label = str(input_spec.get("label", input_id))
+
+                    if input_type == "checkbox":
+                        var = tk.BooleanVar(value=bool(input_spec.get("default", False)))
+                        tk.Checkbutton(
+                            action_frame,
+                            text=label,
+                            variable=var,
+                            bg=COLORS['card_bg'],
+                            fg=COLORS['text_primary'],
+                            selectcolor=COLORS['card_bg'],
+                            activebackground=COLORS['card_bg'],
+                        ).pack(anchor="w", pady=(2, 4))
+                    else:
+                        tk.Label(
+                            action_frame,
+                            text=label,
+                            font=("Segoe UI", 8),
+                            bg=COLORS['card_bg'],
+                            fg=COLORS['text_secondary'],
+                            anchor="w",
+                        ).pack(fill="x")
+                        var = tk.StringVar(value=str(input_spec.get("default", "")))
+                        entry = tk.Entry(
+                            action_frame,
+                            textvariable=var,
+                            font=("Segoe UI", 9),
+                            bg=COLORS['input_bg'],
+                            fg="white",
+                            relief="flat",
+                            insertbackground="white",
+                            show="*" if input_type == "password" else "",
+                        )
+                        entry.pack(fill="x", ipady=5, pady=(2, 6))
+
+                    action_inputs[input_id] = {"type": input_type, "var": var}
+
+                self.third_party_addon_input_vars[(str(addon.get("id", "")), str(action.get("id", "")))] = action_inputs
+                self._make_btn(
+                    action_frame,
+                    str(action.get("label", "Run")),
+                    style=str(action.get("style", "secondary")),
+                    font_size=9,
+                    bold=True,
+                    command=lambda addon_data=addon, action_data=action: self.run_third_party_addon_action(addon_data, action_data),
+                ).pack(anchor="w", pady=(2, 0))
+
+        self._refresh_addons_scroll_bindings()
 
     def _open_path(self, path):
         try:
@@ -10087,16 +10624,7 @@ How to use:
             custom_showerror("Open Failed", f"Could not open:\n{path}\n\n{e}", parent=self.root)
 
     def _list_screenshot_files(self):
-        screenshots_dir = self.get_screenshots_dir()
-        if not os.path.isdir(screenshots_dir):
-            return []
-        items = []
-        for entry in os.listdir(screenshots_dir):
-            path = os.path.join(screenshots_dir, entry)
-            if os.path.isfile(path) and os.path.splitext(entry)[1].lower() in {".png", ".jpg", ".jpeg"}:
-                items.append(path)
-        items.sort(key=lambda item: os.path.getmtime(item), reverse=True)
-        return items
+        return addon_list_screenshot_files(self.minecraft_dir).get("items", [])
 
     def _get_screenshot_thumbnail(self, path, size=(170, 96)):
         try:
@@ -10121,7 +10649,7 @@ How to use:
         if not custom_askyesno("Delete Screenshot", f"Delete '{os.path.basename(path)}'?", parent=self.root):
             return
         try:
-            os.remove(path)
+            addon_delete_screenshot(path)
             self.save_config(sync_ui=False)
             self.render_screenshot_browser()
         except Exception as e:
@@ -10142,6 +10670,7 @@ How to use:
 
         if not screenshots:
             tk.Label(self.screenshot_grid_frame, text="No screenshots found yet.", font=("Segoe UI", 10), bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(anchor="w")
+            self._refresh_addons_scroll_bindings()
             return
 
         columns = 3
@@ -10168,9 +10697,13 @@ How to use:
             self._make_btn(btns, "Open", style="secondary", font_size=8, command=lambda p=path: self._open_path(p)).pack(side="left")
             self._make_btn(btns, "Delete", style="secondary", font_size=8, command=lambda p=path: self.delete_screenshot(p)).pack(side="right")
 
+        self._refresh_addons_scroll_bindings()
+
     def refresh_addons_tab_state(self):
         self._ensure_addons_config_defaults()
 
+        if hasattr(self, 'streamer_mode_var'):
+            self.streamer_mode_var.set(bool(self.addons_config.get("streamer_mode_enabled", False)))
         if hasattr(self, 'gh_sync_enabled'):
             self.gh_sync_enabled.set(bool(self.addons_config.get("gh_sync_enabled", False)))
         if hasattr(self, 'gh_repo_entry'):
@@ -10184,6 +10717,9 @@ How to use:
         self.render_playtime_tracker()
         self.render_quick_join_servers()
         self.render_screenshot_browser()
+        self.refresh_third_party_addons()
+        self._apply_streamer_mode_ui()
+        self._refresh_addons_scroll_bindings()
 
     def _save_addons_config(self):
         self._ensure_addons_config_defaults()
@@ -10686,6 +11222,9 @@ How to use:
     def update_rpc(self, state, details=None, start=None):
         if not self.rpc_connected or not self.rpc: return
         try:
+            self._last_rpc_state = state
+            self._last_rpc_details = details
+            self._last_rpc_start = start
             # User Info for formatted Rich Presence
             user_text = "Steve"
             small_key = "steve" # Fallback asset key
@@ -10696,6 +11235,7 @@ How to use:
                 # Use MC-Heads for dynamic avatar if UUID exists (Microsoft/Ely.by)
                 if p.get("uuid"):
                     small_key = f"https://mc-heads.net/avatar/{p.get('uuid')}"
+            user_text = self._get_streamer_safe_name(user_text)
             
             kwargs = {
                 "state": state,
@@ -10721,7 +11261,7 @@ How to use:
             if hasattr(self, 'log_area') and self.log_area.winfo_exists():
                 timestamp = datetime.now().strftime("%H:%M:%S")
                 # Strip [GAME] prefix for UI if needed, but keeping it is good for context
-                line = f"[{timestamp}] {message}"
+                line = f"[{timestamp}] {self._mask_streamer_text(message)}"
                 self.log_area.insert(tk.END, line + "\n")
                 self.log_area.see(tk.END)
         except:
@@ -10766,6 +11306,7 @@ How to use:
         if hasattr(self, 'user_entry'):
             self.user_entry.delete(0, tk.END)
             self.user_entry.insert(0, p.get("name", "Steve"))
+            self.user_entry.config(show="*" if self._is_streamer_mode_enabled() else "")
         
         # Update Model Radio var BEFORE rendering
         if hasattr(self, 'skin_model_var'):
@@ -10792,7 +11333,7 @@ How to use:
         p = self.profiles[self.current_profile_index]
         
         if hasattr(self, 'sidebar_username'):
-            self.sidebar_username.config(text=p.get("name", "Steve"))
+            self.sidebar_username.config(text=self._get_streamer_safe_name(p.get("name", "Steve")))
         
         if hasattr(self, 'sidebar_acct_type'):
             t = p.get("type", "offline")
@@ -12013,8 +12554,11 @@ How to use:
             self.root.after(0, lambda: self.update_rpc("Idle", "In Launcher"))
         except Exception as e:
             self.log(f"Error: {e}")
+            logging.exception("Launch failed")
             
             err_msg = str(e)
+            if isinstance(e, KeyError) and e.args == ("value",):
+                err_msg = "The selected version has malformed launch metadata.\nThe launcher skipped a broken launch entry, but this install may still need Force Update & Play."
             if "launchermeta.mojang.com" in err_msg or "getaddrinfo failed" in err_msg:
                  err_msg = "Network Error: Could not connect to Mojang servers.\nPlease check your internet connection."
             elif "SSL" in err_msg or "DECRYPTION_FAILED" in err_msg:

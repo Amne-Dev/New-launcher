@@ -12,10 +12,39 @@ Its Simple. Fast. Customizable.
 ## � Documentation
 For detailed guides, troubleshooting, and developer docs, check out our [**Project Wiki**](WIKI.md).
 
-## �📥 How to Install
-1.  Download the installer (e.g., `NLCSetup.exe`) from the Releases page.
-2.  Run the installer and follow the simple steps.
-3.  Open **New Launcher** from your desktop icon.
+## 📥 How to Install
+
+### Windows
+1.  Download the latest `NLCSetup.exe` from the [Releases](https://github.com/Amne-Dev/New-launcher/releases) page.
+2.  Run the installer and follow the prompts.
+3.  Open **New Launcher** from the Start Menu or desktop shortcut.
+
+### Linux
+1.  Download the latest Linux `AppImage` from the [Releases](https://github.com/Amne-Dev/New-launcher/releases) page.
+2.  Open a terminal in the folder containing the file.
+3.  Make it executable:
+
+```bash
+chmod +x NewLauncher-*-x86_64.AppImage
+```
+
+4.  Launch it:
+
+```bash
+./NewLauncher-*-x86_64.AppImage
+```
+
+If your desktop does not launch AppImages directly, you can still run it from the terminal with the command above.
+
+### Linux From Source
+If you want to build the Linux AppImage yourself:
+
+```bash
+chmod +x linux/build_appimage.sh
+./linux/build_appimage.sh
+```
+
+That script creates a portable Linux AppImage from the repository root.
 
 ## 🎮 How to Play
 1.  **Create a Profile**: On the sidebar, click the profile name (e.g. "Steve") to add your own offline username.

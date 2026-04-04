@@ -1,0 +1,24 @@
+{
+    "id": "hello_addon",
+    "name": "Hello Addon",
+    "version": "1.0.0",
+    "author": "Your Name",
+    "description": "Example third-party addon for New Launcher.",
+    "entrypoint": "main.py",
+    "actions": [
+        {
+            "id": "show_greeting",
+            "label": "Show Greeting",
+            "style": "primary",
+            "description": "Displays a simple message from your addon.",
+            "inputs": [
+                {
+                    "id": "message",
+                    "label": "Message",
+                    "type": "text",
+                    "default": "Hello from my addon!"
+                }
+            ]
+        }
+    ]
+}

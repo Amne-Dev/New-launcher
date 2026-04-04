@@ -1,17 +1,25 @@
 # Credits
 
-## Development Team
-*   **Project Lead**: Amne-Dev
+## Development
+- **Project Lead**: Amne-Dev
 
 ## Open Source Libraries
-This project wouldn't be possible without these amazing open-source libraries:
+New Launcher Core is built on top of these open-source projects:
 
-*   **[minecraft-launcher-lib](https://gitlab.com/JakobDev/minecraft-launcher-lib)**: The core engine powering the Minecraft installation and launch processes.
-*   **[requests](https://requests.readthedocs.io/)**: For handling all network communications and downloads.
-*   **[Pillow (PIL)](https://python-pillow.org/)**: For image processing and icon handling.
-*   **[pypresence](https://github.com/qwertyquerty/pypresence)**: For the Discord Rich Presence integration.
-*   **[Tkinter](https://docs.python.org/3/library/tkinter.html)**: The standard Python interface to the Tcl/Tk GUI toolkit, used for the interface.
+- **[minecraft-launcher-lib](https://gitlab.com/JakobDev/minecraft-launcher-lib)**: Minecraft metadata, installation, and launch command generation.
+- **[requests](https://requests.readthedocs.io/)**: HTTP requests for downloads, APIs, and update checks.
+- **[Pillow](https://python-pillow.org/)**: Image processing for skins, thumbnails, previews, and launcher visuals.
+- **[pypresence](https://github.com/qwertyquerty/pypresence)**: Discord Rich Presence integration.
+- **[skinpy](https://pypi.org/project/skinpy/)**: Skin parsing and skin-related utility support.
+- **[pystray](https://github.com/moses-palmer/pystray)**: System tray support for minimizing the launcher.
+- **[Tkinter](https://docs.python.org/3/library/tkinter.html)**: Desktop UI toolkit used throughout the launcher.
+
+## Related Tools
+- **[authlib-injector](https://github.com/yushijinhun/authlib-injector)**: Used for supported local skin injection flows.
+- **[Modrinth](https://modrinth.com/)**: Mod, modpack, and project ecosystem integration.
+- **[GitHub](https://github.com/)**: Release delivery, Windows build automation, and optional skin sync workflows.
 
 ## Special Thanks
-*   **Mojang Studios**: For creating Minecraft.
-*   **The Open Source Community**: For providing the tools and libraries that make this project possible.
+- **Mojang Studios**: For creating Minecraft.
+- **The Minecraft modding community**: For the tooling, loaders, APIs, and ecosystem that make launcher features possible.
+- **Open source maintainers**: For the libraries and utilities this project depends on.

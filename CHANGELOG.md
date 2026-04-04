@@ -2,6 +2,45 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.7] - 2026-04-04
+
+### Added
+
+- **Drop-In Third-Party Addons**: Added support for user-made addon folders that can be dropped into the launcher addons directory and rendered directly inside the native Addons tab.
+- **Streamer Mode Addon**: Added a dedicated Streamer Mode addon for masking account names on launcher-controlled surfaces without changing the real account used for launch.
+
+### Fixed
+
+- **Addons Page Scrolling**: Rebound dynamic Addons content after rebuilds so mouse-wheel scrolling stays responsive after addon sections refresh or re-render.
+
+## [2.6] - 2026-04-04
+
+### Added
+
+- **Addons Expansion**: Added 3 new built-in addons in the Addons tab:
+  - **Playtime Tracker** for per-installation session time and launch counts.
+  - **Server Quick Join** for saving favorite servers and launching directly into them.
+  - **Screenshot Browser** for browsing, opening, and deleting recent screenshots from the Minecraft directory.
+- **Modpack Version Picker**: Modrinth modpack installs now let users choose which `.mrpack` release to install instead of always taking the first available version.
+- **Installation Advanced Options**: The installation create/edit dialog now supports a working custom **Java Executable** field and **Resolution** override, both saved per installation and applied at launch.
+- **Windows Build Automation**: Added a GitHub Actions Windows build workflow that builds the launcher and installer automatically and can attach the installer plus SHA256 checksums to tagged releases.
+
+### Changed
+
+- **Addons Layout**: The Addons tab was reorganized so Playtime Tracker stays always visible, while the other addon sections are collapsible.
+- **Addon UI Polish**: Collapsible addon cards now use top-right dropdown icons instead of inline text chevrons.
+- **Skin Injection Branding**: The local authlib-injector metadata now identifies itself as **NLC Skin Handler** instead of **Local Skin Server**.
+- **Versioning**: Updated launcher and installer version references to **2.6**.
+
+### Fixed
+
+- **Linux Scrolling**: Added Linux mouse wheel support (`Button-4` / `Button-5`) to the shared smooth-scrolling system so scrollable launcher views work properly on Linux.
+- **Offline Skin Launches**: Fixed a launch failure where enabling local skin injection without an actual selected skin could prevent the game from starting.
+- **No-Skin Placeholder**: Replaced the old fake fallback face with a white `?` placeholder when no skin is set.
+- **Installed Mods Dialog**: Reworked the installed-mods browser to reduce jitter, stabilize scrolling/rendering, and support persistent Grid/List view selection.
+- **Modpacks Page Rendering**: Fixed Linux cases where modpack action buttons did not visibly render until hover.
+- **Sidebar Highlighting**: Fixed highlight behavior for the Modrinth `Mods` entry so the active state covers the full label area correctly.
+
 ## [1.8.2] - 2026-02-05
 
 ### Fixed
