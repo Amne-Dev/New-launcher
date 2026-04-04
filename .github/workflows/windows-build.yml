@@ -37,7 +37,7 @@ jobs:
       - name: Read App Version
         shell: pwsh
         run: |
-          $version = python -c "import pathlib, re; text = pathlib.Path('config.py').read_text(encoding='utf-8'); match = re.search(r'CURRENT_VERSION\\s*=\\s*\"([^\"]+)\"', text); print(match.group(1) if match else '')"
+          $version = python -c "from config import CURRENT_VERSION; print(CURRENT_VERSION)"
           if (-not $version) {
             throw "Could not read CURRENT_VERSION from config.py"
           }
