@@ -26,7 +26,7 @@ try:
     from skinpy import Skin, Perspective, BodyPart
 except ImportError:
     pass
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageDraw
 from datetime import datetime
 from typing import Any, cast
 import time
@@ -62,6 +62,27 @@ except ImportError:
     TrayItem = None
     TrayIcon = None
     TRAY_AVAILABLE = False
+
+
+_ORIGINAL_PIL_PHOTOIMAGE = ImageTk.PhotoImage
+_IMAGETK_FALLBACK_WARNED = False
+
+
+def _safe_pil_photoimage(image, *args, **kwargs):
+    global _IMAGETK_FALLBACK_WARNED
+    try:
+        return _ORIGINAL_PIL_PHOTOIMAGE(image, *args, **kwargs)
+    except Exception as exc:
+        if not _IMAGETK_FALLBACK_WARNED:
+            logging.warning("ImageTk.PhotoImage failed (%s); using tkinter.PhotoImage PNG fallback.", exc)
+            _IMAGETK_FALLBACK_WARNED = True
+        with io.BytesIO() as png_buffer:
+            image.save(png_buffer, format="PNG")
+            encoded = base64.b64encode(png_buffer.getvalue()).decode("ascii")
+        return tk.PhotoImage(data=encoded, format="png")
+
+
+ImageTk.PhotoImage = _safe_pil_photoimage
 
 
 def _resolve_requests_ca_bundle():
@@ -808,6 +829,11 @@ class SkinRenderer3D:
 class CustomMessagebox(tk.Toplevel):
     def __init__(self, title, message, type="info", buttons=None, parent=None):
         super().__init__(parent)
+        if os.name == 'nt':
+            try:
+                self.withdraw()
+            except Exception:
+                pass
         self.title(title)
         self.configure(bg=COLORS['card_bg'])
         self._drag_start_x = 0
@@ -844,7 +870,6 @@ class CustomMessagebox(tk.Toplevel):
         except Exception:
             self._dialog_manager = None
         _ensure_window_icon(self, owner=target_parent)
-        _prime_taskbar_window(self)
         
         # Styles
         bg_col = COLORS['card_bg']
@@ -949,25 +974,26 @@ class CustomMessagebox(tk.Toplevel):
         w = 440
         h = max(160, self.winfo_reqheight())
         
-        # Safe Centering
-        screen_w = self.winfo_screenwidth()
-        screen_h = self.winfo_screenheight()
-        x = (screen_w // 2) - (w // 2)
-        y = (screen_h // 2) - (h // 2)
-        
-        if target_parent and target_parent.winfo_exists():
-            try:
-                px = target_parent.winfo_rootx()
-                py = target_parent.winfo_rooty()
-                pw = target_parent.winfo_width()
-                ph = target_parent.winfo_height()
-                # Center on parent
-                if pw > 100 and ph > 100:
-                    x = px + (pw // 2) - (w // 2)
-                    y = py + (ph // 2) - (h // 2)
-            except: pass
-            
-        self.geometry(f"{w}x{h}+{int(x)}+{int(y)}")
+        _schedule_window_centering(self, target_parent, width=w, height=h)
+        if os.name == 'nt':
+            def _finalize_windows_dialog_show():
+                try:
+                    if not self.winfo_exists():
+                        return
+                    self.deiconify()
+                    _schedule_window_centering(self, target_parent, width=w, height=h)
+                    self.lift()
+                    self.focus_force()
+                except Exception:
+                    pass
+
+            _finalize_windows_dialog_show()
+            _prime_taskbar_window(self)
+            for delay in (40, 140, 320, 700):
+                try:
+                    self.after(delay, _finalize_windows_dialog_show)
+                except Exception:
+                    pass
         if os.name != "nt" and target_parent and target_parent.winfo_exists():
             self.transient(target_parent)
         if os.name != "nt" and target_parent and target_parent.winfo_exists():
@@ -1045,6 +1071,163 @@ def _parse_messagebox_args(args, kwargs):
         message = ""
 
     return str(title), str(message), parent
+
+
+def _center_window_on_parent(win, parent=None, width=None, height=None):
+    try:
+        if parent is not None and hasattr(parent, "winfo_exists") and parent.winfo_exists():
+            try:
+                parent.update_idletasks()
+            except Exception:
+                pass
+
+        try:
+            win.update_idletasks()
+        except Exception:
+            pass
+
+        final_w = width if width is not None else win.winfo_width()
+        final_h = height if height is not None else win.winfo_height()
+
+        if not final_w or final_w <= 1:
+            final_w = win.winfo_reqwidth()
+        if not final_h or final_h <= 1:
+            final_h = win.winfo_reqheight()
+
+        screen_w = win.winfo_screenwidth()
+        screen_h = win.winfo_screenheight()
+        x = (screen_w - final_w) // 2
+        y = (screen_h - final_h) // 2
+
+        if parent is not None and hasattr(parent, "winfo_exists") and parent.winfo_exists():
+            try:
+                parent_x = parent.winfo_rootx()
+                parent_y = parent.winfo_rooty()
+                parent_w = parent.winfo_width()
+                parent_h = parent.winfo_height()
+                if parent_w > 1 and parent_h > 1:
+                    x = parent_x + (parent_w - final_w) // 2
+                    y = parent_y + (parent_h - final_h) // 2
+            except Exception:
+                pass
+
+        x = max(0, min(x, max(0, screen_w - final_w)))
+        y = max(0, min(y, max(0, screen_h - final_h)))
+        win.geometry(f"{int(final_w)}x{int(final_h)}+{int(x)}+{int(y)}")
+    except Exception:
+        pass
+
+
+def _resolve_dialog_parent(preferred_parent=None, fallback_widget=None):
+    candidates = []
+    if preferred_parent is not None:
+        candidates.append(preferred_parent)
+    if fallback_widget is not None:
+        try:
+            manager = getattr(fallback_widget, "_nlc_app", None)
+            if manager is not None and getattr(manager, "root", None) is not None:
+                candidates.append(manager.root)
+        except Exception:
+            pass
+        try:
+            top = fallback_widget.winfo_toplevel()
+            if top is not None:
+                candidates.append(top)
+        except Exception:
+            pass
+    default_root = getattr(tk, "_default_root", None)
+    if default_root is not None:
+        candidates.append(default_root)
+
+    seen = set()
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        ident = id(candidate)
+        if ident in seen:
+            continue
+        seen.add(ident)
+        try:
+            if candidate.winfo_exists():
+                return candidate
+        except Exception:
+            continue
+    return None
+
+
+def _schedule_window_centering(win, parent=None, width=None, height=None):
+    owner = _resolve_dialog_parent(parent, win)
+    try:
+        win._nlc_center_owner = owner  # type: ignore[attr-defined]
+        win._nlc_center_width = width  # type: ignore[attr-defined]
+        win._nlc_center_height = height  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
+    def apply_center(target=win, target_owner=owner, target_width=width, target_height=height):
+        try:
+            if not target.winfo_exists():
+                return
+            if os.name == "nt":
+                try:
+                    if str(target.state()) == "withdrawn":
+                        return
+                except Exception:
+                    pass
+            _center_window_on_parent(target, target_owner, width=target_width, height=target_height)
+        except Exception:
+            pass
+
+    apply_center()
+
+    delays = (0, 30, 120, 240, 420, 760) if os.name == "nt" else (0, 30, 120)
+    for delay in delays:
+        try:
+            win.after(delay, apply_center)
+        except Exception:
+            pass
+
+    if not getattr(win, "_nlc_center_hooks", False):
+        try:
+            win.bind(
+                "<Map>",
+                lambda _event, w=win: _schedule_window_centering(
+                    w,
+                    getattr(w, "_nlc_center_owner", None),
+                    getattr(w, "_nlc_center_width", None),
+                    getattr(w, "_nlc_center_height", None),
+                ),
+                add="+",
+            )
+        except Exception:
+            pass
+        try:
+            win._nlc_center_hooks = True  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+
+def _build_missing_skin_head(size):
+    try:
+        pattern = [
+            "..###...",
+            ".#...#..",
+            "....#...",
+            "...#....",
+            "...#....",
+            "........",
+            "...#....",
+            "........",
+        ]
+        img = Image.new("RGBA", (8, 8), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        for y, row in enumerate(pattern):
+            for x, cell in enumerate(row):
+                if cell == "#":
+                    draw.point((x, y), fill=(255, 255, 255, 255))
+        return ImageTk.PhotoImage(img.resize((size, size), RESAMPLE_NEAREST))
+    except Exception:
+        return None
 
 
 def custom_showinfo(*args, **kwargs):
@@ -1177,6 +1360,18 @@ class MinecraftLauncher:
         except Exception:
             pass
         _ensure_window_icon(self.root, owner=self.root)
+        if os.name != 'nt':
+            try:
+                self.root.option_add("*Button.highlightThickness", 0)
+                self.root.option_add("*Entry.highlightThickness", 0)
+                self.root.option_add("*Listbox.highlightThickness", 0)
+                self.root.option_add("*Text.highlightThickness", 0)
+                self.root.option_add("*Canvas.highlightThickness", 0)
+                self.root.option_add("*Checkbutton.highlightThickness", 0)
+                self.root.option_add("*Radiobutton.highlightThickness", 0)
+                self.root.option_add("*Scale.highlightThickness", 0)
+            except Exception:
+                pass
             
         # Center Window
         w, h = 1080, 720
@@ -1318,6 +1513,8 @@ class MinecraftLauncher:
         self.current_profile_index = -1
         self.skin_path = ""  # Initialize before load_from_config
         self.auto_download_mod = False
+        self.enable_modrinth = True
+        self.installed_mods_view_mode = "grid"
         self.mod_available_online = False
         self.ram_allocation = DEFAULT_RAM
         self.java_args = ""
@@ -1335,8 +1532,15 @@ class MinecraftLauncher:
 
         # Addons Config
         self.addons_config = {
-            "p3_reload_menu": False
+            "p3_reload_menu": False,
+            "gh_sync_enabled": False,
+            "gh_repo": "",
+            "gh_token": "",
+            "playtime_tracker": {},
+            "saved_servers": []
         }
+        self.screenshot_thumbnail_cache = {}
+        self.quick_join_installation_labels = {}
         
         # Agent / Background Process
         self.agent_process = None
@@ -2237,8 +2441,40 @@ class MinecraftLauncher:
                 pass
 
     def _apply_custom_toplevel_chrome(self, win, title_text, close_command=None):
+        owner = _resolve_dialog_parent(getattr(win, "master", None), self.root)
+        if os.name == 'nt':
+            try:
+                win.withdraw()
+            except Exception:
+                pass
+
+        def finalize_windows_dialog():
+            if os.name != 'nt':
+                return
+            try:
+                if not win.winfo_exists():
+                    return
+                win.deiconify()
+                _schedule_window_centering(win, owner)
+                win.lift()
+                win.focus_force()
+            except Exception:
+                pass
+
+        def schedule_windows_finalize():
+            if os.name != 'nt':
+                return
+            finalize_windows_dialog()
+            for delay in (40, 140, 320, 700):
+                try:
+                    win.after(delay, finalize_windows_dialog)
+                except Exception:
+                    pass
+
         if not (self.custom_titlebar_enabled and os.name == 'nt'):
             self._prepare_dialog_window(win)
+            _schedule_window_centering(win, owner)
+            schedule_windows_finalize()
             return win
         existing_content = getattr(win, "_custom_content_root", None)
         if existing_content and existing_content.winfo_exists():
@@ -2249,12 +2485,16 @@ class MinecraftLauncher:
                 except Exception:
                     pass
             self._prepare_dialog_window(win)
+            _schedule_window_centering(win, owner)
+            schedule_windows_finalize()
             return existing_content
 
         try:
             win.overrideredirect(True)
         except Exception:
             self._prepare_dialog_window(win)
+            _schedule_window_centering(win, owner)
+            schedule_windows_finalize()
             return win
 
         shell = tk.Frame(win, bg=COLORS.get('sidebar_bg', '#141414'), highlightthickness=0, bd=0)
@@ -2323,6 +2563,8 @@ class MinecraftLauncher:
         except Exception:
             pass
         self._prepare_dialog_window(win)
+        _schedule_window_centering(win, owner)
+        schedule_windows_finalize()
         return body
 
     def _get_toplevel_content_root(self, parent):
@@ -2643,10 +2885,7 @@ class MinecraftLauncher:
                         self.set_active_sidebar(frame)
                         return
                     self.set_active_sidebar(frame)
-                    if tab_name == "Mods" and not getattr(self, 'enable_modrinth', False):
-                        self.show_modrinth_enable_dialog()
-                    else:
-                        self.show_tab(tab_name)
+                    self.show_tab(tab_name)
 
                 frame.bind("<Button-1>", on_click)
                 lbl.bind("<Button-1>", on_click)
@@ -4119,7 +4358,6 @@ class MinecraftLauncher:
         def enable():
             self.enable_modrinth = True
             self.save_config()
-            if hasattr(self, 'enable_modrinth_var'): self.enable_modrinth_var.set(True)
             dialog.destroy()
             
             if messagebox.askyesno("Restart Required", "The launcher needs to restart to apply changes.\nRestart now?"):
@@ -4156,16 +4394,14 @@ class MinecraftLauncher:
                 frame.is_active = True
                 for child in frame.winfo_children():
                     if isinstance(child, tk.Label):
-                        txt = child.cget("text")
-                        if txt not in ["Mods", "Java", "Agent"]:
+                        if not getattr(child, "_keep_sidebar_bg", False):
                             child.config(bg=COLORS.get('hover_bg', '#3A3B3C'), fg=COLORS['text_primary'])
             else:
                 frame.config(bg=COLORS['sidebar_bg'])
                 frame.is_active = False
                 for child in frame.winfo_children():
                     if isinstance(child, tk.Label):
-                        txt = child.cget("text")
-                        if txt not in ["Mods", "Java", "Agent"]:
+                        if not getattr(child, "_keep_sidebar_bg", False):
                             child.config(bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'])
 
     def _attach_sidebar_hover(self, frame):
@@ -4173,11 +4409,8 @@ class MinecraftLauncher:
             frame.config(bg=COLORS.get('hover_bg', '#3A3B3C'))
             for child in frame.winfo_children():
                 if isinstance(child, tk.Label):
-                    txt = child.cget("text")
-                    if txt not in ["Mods", "Java", "Agent"]:
+                    if not getattr(child, "_keep_sidebar_bg", False):
                         child.config(bg=COLORS.get('hover_bg', '#3A3B3C'), fg=COLORS['text_primary'])
-                    if txt not in ["Mods", "Java", "Agent"]:
-                        child.config(bg="#3A3B3C", fg=COLORS['text_primary'])
         
         def on_leave(e):
             if getattr(frame, "is_active", False):
@@ -4186,8 +4419,7 @@ class MinecraftLauncher:
             frame.config(bg=COLORS['sidebar_bg'])
             for child in frame.winfo_children():
                 if isinstance(child, tk.Label):
-                    txt = child.cget("text")
-                    if txt not in ["Mods", "Java", "Agent"]:
+                    if not getattr(child, "_keep_sidebar_bg", False):
                         child.config(bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'])
             
         frame.bind("<Enter>", on_enter)
@@ -4208,8 +4440,10 @@ class MinecraftLauncher:
              else:
                  bg_color = "#E74C3C" if indicator_text == "Mods" else "#2D8F36"
              
-             tk.Label(frame, text=indicator_text, bg=bg_color, fg="white", 
-                     font=("Segoe UI", 8, "bold"), width=4, cursor="hand2").pack(side="left", padx=(0,10))
+             indicator_label = tk.Label(frame, text=indicator_text, bg=bg_color, fg="white", 
+                     font=("Segoe UI", 8, "bold"), width=4, cursor="hand2")
+             indicator_label._keep_sidebar_bg = True  # type: ignore[attr-defined]
+             indicator_label.pack(side="left", padx=(0,10))
         
         # Icon
         if icon:
@@ -4237,6 +4471,36 @@ class MinecraftLauncher:
         self._attach_sidebar_hover(frame)
 
     # --- Smooth Scroll Utilities ---
+    def _get_scroll_impulse(self, event):
+        try:
+            delta = getattr(event, "delta", 0)
+            if delta:
+                return -delta / 120.0 * 40
+        except Exception:
+            pass
+
+        try:
+            button_num = getattr(event, "num", None)
+            if button_num == 4:
+                return -40
+            if button_num == 5:
+                return 40
+        except Exception:
+            pass
+
+        return 0
+
+    def _bind_wheel_events(self, widget, handler, bind_tag):
+        if not widget or not widget.winfo_exists():
+            return
+        attr_name = f"_nlc_wheel_bind_{bind_tag}"
+        if getattr(widget, attr_name, False):
+            return
+        widget.bind("<MouseWheel>", handler)
+        widget.bind("<Button-4>", handler)
+        widget.bind("<Button-5>", handler)
+        setattr(widget, attr_name, True)
+
     def _smooth_scroll(self, canvas, event):
         """Smooth mousewheel scrolling with inertia for any canvas widget."""
         try:
@@ -4251,7 +4515,9 @@ class MinecraftLauncher:
             except: pass
         
         # Add velocity from scroll event (accumulate for fast flicks)
-        impulse = -event.delta / 120.0 * 40  # pixels per scroll notch
+        impulse = self._get_scroll_impulse(event)
+        if not impulse:
+            return
         current = self._scroll_velocities.get(cid, 0)
         self._scroll_velocities[cid] = current + impulse
         
@@ -4313,7 +4579,7 @@ class MinecraftLauncher:
         already_bound = getattr(widget, "_nlc_scroll_canvas_id", None)
         if already_bound != canvas_id:
             handler = lambda e, c=canvas: self._smooth_scroll(c, e)
-            widget.bind("<MouseWheel>", handler)
+            self._bind_wheel_events(widget, handler, f"smooth_{canvas_id}")
             setattr(widget, "_nlc_scroll_canvas_id", canvas_id)
         for child in widget.winfo_children():
             self._bind_smooth_scroll(canvas, child)
@@ -4348,6 +4614,15 @@ class MinecraftLauncher:
                        activebackground=cfg["hover"], activeforeground=cfg["active_fg"],
                        relief="flat", bd=0, cursor="hand2", command=command) # type: ignore
 
+        if os.name != "nt":
+            btn.config(
+                highlightthickness=0,
+                takefocus=0,
+                highlightbackground=cfg["bg"],
+                highlightcolor=cfg["bg"],
+                disabledforeground=cfg["fg"],
+            )
+
         if style == "icon":
             btn.config(padx=6, pady=4)
         elif style == "text":
@@ -4365,6 +4640,24 @@ class MinecraftLauncher:
             btn.config(bg=cfg["bg"])
         btn.bind("<Enter>", on_enter)
         btn.bind("<Leave>", on_leave)
+
+        if os.name != "nt":
+            def prime_linux_button():
+                try:
+                    if not btn.winfo_exists():
+                        return
+                    btn.config(
+                        bg=cfg["bg"],
+                        fg=cfg["fg"],
+                        activebackground=cfg["hover"],
+                        activeforeground=cfg["active_fg"],
+                    )
+                    btn.update_idletasks()
+                except Exception:
+                    pass
+
+            btn.after_idle(prime_linux_button)
+            btn.after(40, prime_linux_button)
 
         return btn
 
@@ -4482,10 +4775,7 @@ class MinecraftLauncher:
         
         # Lazy Init Mods Tab
         if tab_name == "Mods" and "Mods" not in self.tabs:
-             if getattr(self, 'enable_modrinth', True):
-                 self.create_mods_tab()
-             else:
-                 return
+             self.create_mods_tab()
 
         # Hide all tabs
         for t in self.tabs.values():
@@ -4814,7 +5104,7 @@ class MinecraftLauncher:
         scrollbar.pack(side="right", fill="y")
 
         # Smooth mousewheel
-        canvas.bind("<MouseWheel>", lambda e, c=canvas: self._smooth_scroll(c, e))
+        self._bind_wheel_events(canvas, lambda e, c=canvas: self._smooth_scroll(c, e), f"direct_{id(canvas)}")
         list_container.bind("<Enter>", lambda e: self._bind_smooth_scroll(canvas, self.inst_list_frame))
         
         # Update Scrollbar visibility
@@ -4989,6 +5279,8 @@ class MinecraftLauncher:
             if hasattr(self, 'inst_selector_icon'):
                 self.inst_selector_icon.config(image="", text="?", font=("Segoe UI", 12), fg="white", width=4, height=2)
 
+        self._refresh_quick_join_installation_values()
+
     def select_installation(self, index):
         if not self.installations: return
         if not (0 <= index < len(self.installations)): return
@@ -5083,7 +5375,7 @@ class MinecraftLauncher:
         # Scrollbar visibility managed later
         
         # Smooth mousewheel
-        canvas.bind("<MouseWheel>", lambda e, c=canvas: self._smooth_scroll(c, e))
+        self._bind_wheel_events(canvas, lambda e, c=canvas: self._smooth_scroll(c, e), f"direct_{id(canvas)}")
         
         # Close on click outside (Lose Focus) or Escape
         def on_focus_out(event):
@@ -5383,7 +5675,7 @@ class MinecraftLauncher:
              scrollbar.pack(side="right", fill="y")
              
              # Bind scrolling to the window so it works when hovering anywhere in the modal
-             sel_win.bind("<MouseWheel>", lambda e, c=canvas: self._smooth_scroll(c, e))
+             self._bind_wheel_events(sel_win, lambda e, c=canvas: self._smooth_scroll(c, e), f"direct_{id(canvas)}")
              
              # Popular Minecraft Blocks
              block_names = [
@@ -5532,10 +5824,48 @@ class MinecraftLauncher:
 
         # Java Executable
         create_label("JAVA EXECUTABLE").pack(in_=opts_container, fill="x", pady=(5,5))
-        java_entry = tk.Entry(opts_container, bg=input_bg_color, fg=input_fg_color, relief="flat", font=("Segoe UI", 10))
-        java_entry.pack(fill="x", ipady=6)
-        java_entry.insert(0, "<Use Bundled Java Runtime>")
-        java_entry.config(state="disabled") # Placeholder for now
+        java_row = tk.Frame(opts_container, bg="#1e1e1e")
+        java_row.pack(fill="x")
+        java_entry = tk.Entry(java_row, bg=input_bg_color, fg=input_fg_color, relief="flat", font=("Segoe UI", 10))
+        java_entry.pack(side="left", fill="x", expand=True, ipady=6)
+        existing_java = str(existing_data.get("java_executable", "") or "")
+        if existing_java:
+            java_entry.insert(0, existing_java)
+
+        def browse_java_executable():
+            current_value = java_entry.get().strip()
+            initial_dir = None
+            if current_value:
+                initial_dir = current_value if os.path.isdir(current_value) else os.path.dirname(current_value)
+            elif os.path.isdir(self.minecraft_dir):
+                initial_dir = self.minecraft_dir
+
+            selected = filedialog.askopenfilename(
+                parent=win,
+                title="Select Java Executable",
+                initialdir=initial_dir or None,
+                filetypes=[("All Files", "*")],
+            )
+            if selected:
+                java_entry.delete(0, tk.END)
+                java_entry.insert(0, selected)
+
+        self._make_btn(
+            java_row,
+            "Browse...",
+            style="secondary",
+            font_size=9,
+            command=browse_java_executable,
+        ).pack(side="left", padx=(8, 0))
+
+        tk.Label(
+            opts_container,
+            text="Leave blank to use the bundled/runtime Java.",
+            bg="#1e1e1e",
+            fg="#7A7A7A",
+            font=("Segoe UI", 8),
+            anchor="w",
+        ).pack(fill="x", pady=(4, 0))
 
         # Resolution
         create_label("RESOLUTION").pack(in_=opts_container, fill="x", pady=(15,5))
@@ -5544,13 +5874,18 @@ class MinecraftLauncher:
         
         res_w = tk.Entry(res_frame, bg=input_bg_color, fg=input_fg_color, width=10, relief="flat", font=("Segoe UI", 10))
         res_w.pack(side="left", ipady=6)
-        res_w.insert(0, "Auto")
+        existing_res_w = existing_data.get("resolution_width")
+        res_w.insert(0, str(existing_res_w) if existing_res_w else "Auto")
         
         tk.Label(res_frame, text=" x ", bg="#1e1e1e", fg="white").pack(side="left")
         
         res_h = tk.Entry(res_frame, bg=input_bg_color, fg=input_fg_color, width=10, relief="flat", font=("Segoe UI", 10))
         res_h.pack(side="left", ipady=6)
-        res_h.insert(0, "Auto")
+        existing_res_h = existing_data.get("resolution_height")
+        res_h.insert(0, str(existing_res_h) if existing_res_h else "Auto")
+
+        if existing_java or existing_res_w or existing_res_h:
+            toggle_opts()
 
 
         # -- Logic --
@@ -5693,14 +6028,33 @@ class MinecraftLauncher:
              version_id = v_selection.split(" ")[0]
              loader = loader_var.get()
              icon_val = current_icon_var.get()
+             try:
+                 java_executable = self._normalize_java_executable_input(java_entry.get())
+                 resolution_width = self._normalize_installation_resolution_value(res_w.get(), "width")
+                 resolution_height = self._normalize_installation_resolution_value(res_h.get(), "height")
+             except ValueError as e:
+                 custom_showerror("Invalid Installation Settings", str(e), parent=win)
+                 return
+
+             if bool(resolution_width) != bool(resolution_height):
+                 custom_showerror(
+                     "Invalid Resolution",
+                     "Set both width and height, or leave both as Auto.",
+                     parent=win,
+                 )
+                 return
              
              new_profile = {
+                 "id": existing_data.get("id", str(uuid.uuid4())),
                  "name": name,
                  "version": version_id,
                  "loader": loader,
                  "icon": icon_val,
+                 "java_executable": java_executable,
+                 "resolution_width": int(resolution_width) if resolution_width else None,
+                 "resolution_height": int(resolution_height) if resolution_height else None,
                  "last_played": existing_data.get("last_played", "Never"),
-                 "created": existing_data.get("created", "2024-01-01")
+                 "created": existing_data.get("created", datetime.now().isoformat())
              }
              
              try:
@@ -5996,7 +6350,7 @@ class MinecraftLauncher:
         self.history_canvas.configure(yscrollcommand=self.history_scroll.set)
         
         self.history_frame.bind("<Configure>", lambda e: self.history_canvas.configure(scrollregion=self.history_canvas.bbox("all")))
-        self.history_canvas.bind("<MouseWheel>", lambda e, c=self.history_canvas: self._smooth_scroll(c, e))
+        self._bind_wheel_events(self.history_canvas, lambda e, c=self.history_canvas: self._smooth_scroll(c, e), f"direct_{id(self.history_canvas)}")
 
         self.history_canvas.pack(side="left", fill="both", expand=True)
         self.history_scroll.pack(side="right", fill="y")
@@ -6184,7 +6538,7 @@ class MinecraftLauncher:
         canvas.bind("<Configure>", on_configure)
 
         # Smooth mousewheel
-        canvas.bind("<MouseWheel>", lambda e, c=canvas: self._smooth_scroll(c, e))
+        self._bind_wheel_events(canvas, lambda e, c=canvas: self._smooth_scroll(c, e), f"direct_{id(canvas)}")
         self._bind_smooth_scroll(canvas, self.wp_grid_frame)
 
     def add_custom_wallpaper(self):
@@ -6451,7 +6805,7 @@ class MinecraftLauncher:
         # Scrollbar packing handled in refresh/configure
         
         # Smooth mousewheel
-        canvas.bind("<MouseWheel>", lambda e, c=canvas: self._smooth_scroll(c, e))
+        self._bind_wheel_events(canvas, lambda e, c=canvas: self._smooth_scroll(c, e), f"direct_{id(canvas)}")
         self._bind_smooth_scroll(canvas, list_frame)
         
         # Update Scrollbar visibility
@@ -6930,7 +7284,7 @@ class MinecraftLauncher:
         # Scrollbar visibility managed in refresh
         
         # Smooth mousewheel
-        self.mp_canvas.bind("<MouseWheel>", lambda e, c=self.mp_canvas: self._smooth_scroll(c, e))
+        self._bind_wheel_events(self.mp_canvas, lambda e, c=self.mp_canvas: self._smooth_scroll(c, e), f"direct_{id(self.mp_canvas)}")
         container.bind("<Enter>", lambda e: self._bind_smooth_scroll(self.mp_canvas, self.mp_scrollable_frame))
         self.mp_canvas.bind("<Enter>", lambda e: self._bind_smooth_scroll(self.mp_canvas, self.mp_scrollable_frame))
         self.mp_scrollable_frame.bind("<Enter>", lambda e: self._bind_smooth_scroll(self.mp_canvas, self.mp_scrollable_frame))
@@ -6980,6 +7334,17 @@ class MinecraftLauncher:
         meta = f"Loader: {pack.get('loader', 'Unknown').capitalize()}  •  Version: {pack.get('mc_version', 'Unknown')}"
         tk.Label(info, text=meta, font=("Segoe UI", 10), fg=COLORS['text_secondary'], bg=COLORS['card_bg'], anchor="w").pack(fill="x", pady=2)
 
+        selected_pack_version = pack.get("version_name")
+        if selected_pack_version:
+            tk.Label(
+                info,
+                text=f"Pack Release: {selected_pack_version}",
+                font=("Segoe UI", 9),
+                fg=COLORS['text_secondary'],
+                bg=COLORS['card_bg'],
+                anchor="w",
+            ).pack(fill="x")
+
         # Linked Status
         linked_inst_id = pack.get("linked_installation_id")
         link_status = "Not linked"
@@ -7012,10 +7377,7 @@ class MinecraftLauncher:
 
         # Browse (+)
         def browse_action():
-            if getattr(self, 'enable_modrinth', True):
-                self.select_modpack_and_browse(pack)
-            else:
-                self.install_local_mods(pack)
+            self.select_modpack_and_browse(pack)
 
         self._make_btn(btns, "+", style="primary", font_size=10, icon=True, width=3,
                       command=browse_action).pack(side="left", padx=2)
@@ -7122,6 +7484,12 @@ class MinecraftLauncher:
 
         self._make_btn(actions, "🔄 Refresh", style="secondary", font_size=9,
                       command=refresh_list).pack(side="left")
+
+        view_mode_var = tk.StringVar(value=getattr(self, "installed_mods_view_mode", "grid"))
+        grid_btn = self._make_btn(actions, "Grid", style="secondary", font_size=9)
+        grid_btn.pack(side="left", padx=(12, 5))
+        list_btn = self._make_btn(actions, "List", style="secondary", font_size=9)
+        list_btn.pack(side="left")
         
         # Search bar
         search_frame = tk.Frame(header, bg=COLORS['input_bg'], padx=10, pady=8)
@@ -7142,297 +7510,80 @@ class MinecraftLauncher:
         content_frame.pack(fill="both", expand=True)
         
         canvas = tk.Canvas(content_frame, bg=COLORS['main_bg'], highlightthickness=0)
-        scrollbar = ttk.Scrollbar(content_frame, orient="vertical", 
+        scrollbar = ttk.Scrollbar(content_frame, orient="vertical",
                                  command=canvas.yview, style="Launcher.Vertical.TScrollbar")
         scroll_frame = tk.Frame(canvas, bg=COLORS['main_bg'])
-        canvas._nlc_scroll_enabled = False # type: ignore
-        
-        scroll_frame.bind(
-            "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-        )
-        
+        canvas._nlc_scroll_enabled = True # type: ignore[attr-defined]
+        scroll_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas_window = canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
-        
-        def on_canvas_configure(event):
-            canvas.itemconfig(canvas_window, width=event.width)
-            update_scrollbar_visibility()
-            maybe_load_more()
-        
-        canvas.bind("<Configure>", on_canvas_configure)
-        
+
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
-        
-        # Auto-hide scrollbar
-        def update_scrollbar_visibility(*args):
-            try:
-                scroll_frame.update_idletasks()
-                canvas.update_idletasks()
-                content_height = scroll_frame.winfo_reqheight()
-                canvas_height = canvas.winfo_height()
-                
-                if content_height > canvas_height:
-                    scrollbar.pack(side="right", fill="y")
-                else:
-                    scrollbar.pack_forget()
-            except:
-                pass
+        canvas.configure(yscrollcommand=scrollbar.set)
 
-        def on_canvas_yview(first, last):
-            scrollbar.set(first, last)
-            update_scrollbar_visibility()
-            maybe_load_more()
-
-        def on_scrollbar_move(*args):
-            canvas.yview(*args)
-            maybe_load_more()
-
-        canvas.configure(yscrollcommand=on_canvas_yview)
-        scrollbar.configure(command=on_scrollbar_move)
-        
-        scroll_frame.bind("<Configure>", lambda e: update_scrollbar_visibility())
-        
-        dialog_scroll = {"velocity": 0.0, "after_id": None}
-
-        def stop_dialog_scroll_animation():
-            after_id = dialog_scroll.get("after_id")
-            if after_id is not None:
-                try:
-                    canvas.after_cancel(after_id)
-                except Exception:
-                    pass
-            dialog_scroll["after_id"] = None
-            dialog_scroll["velocity"] = 0.0
-
-        def animate_dialog_scroll():
-            dialog_scroll["after_id"] = None
-            if not getattr(canvas, "_nlc_scroll_enabled", True):
-                stop_dialog_scroll_animation()
-                return
-            try:
-                if not canvas.winfo_exists():
-                    stop_dialog_scroll_animation()
-                    return
-            except Exception:
-                stop_dialog_scroll_animation()
-                return
-
-            velocity = float(dialog_scroll.get("velocity", 0.0))
-            if abs(velocity) < 0.25:
-                stop_dialog_scroll_animation()
-                return
-
-            bbox = canvas.bbox("all")
-            if not bbox:
-                stop_dialog_scroll_animation()
-                return
-
-            total_h = max(1, int(bbox[3] - bbox[1]))
-            view_h = max(1, int(canvas.winfo_height()))
-            if total_h <= view_h:
-                stop_dialog_scroll_animation()
-                return
-
-            top, _ = canvas.yview()
-            max_top = max(0.0, (total_h - view_h) / total_h)
-            next_top = top + (velocity / total_h)
-            if next_top < 0.0:
-                next_top = 0.0
-                velocity = 0.0
-            elif next_top > max_top:
-                next_top = max_top
-                velocity = 0.0
-
-            canvas.yview_moveto(next_top)
-            velocity *= 0.84
-            dialog_scroll["velocity"] = velocity
-            maybe_load_more()
-            dialog_scroll["after_id"] = canvas.after(16, animate_dialog_scroll)
-
-        def on_dialog_mousewheel(event):
-            if not getattr(canvas, "_nlc_scroll_enabled", True):
-                return "break"
-            delta = int(getattr(event, "delta", 0))
-            if delta == 0:
-                return "break"
-            step = -delta / 120.0
-            if abs(step) < 0.01:
-                step = -1.0 if delta > 0 else 1.0
-            dialog_scroll["velocity"] = float(dialog_scroll.get("velocity", 0.0)) + (step * 26.0)
-            if dialog_scroll.get("after_id") is None:
-                animate_dialog_scroll()
-            return "break"
-
-        def bind_dialog_wheel(widget):
-            if not widget or not widget.winfo_exists():
-                return
-            if not getattr(widget, "_nlc_dialog_wheel_bound", False):
-                widget.bind("<MouseWheel>", on_dialog_mousewheel)
-                try:
-                    widget._nlc_dialog_wheel_bound = True  # type: ignore[attr-defined]
-                except Exception:
-                    pass
-            for child in widget.winfo_children():
-                bind_dialog_wheel(child)
-
-        canvas.bind("<MouseWheel>", on_dialog_mousewheel)
-        content_frame.bind("<Enter>", lambda e: bind_dialog_wheel(scroll_frame))
-
-        def set_scroll_ready(ready):
-            try:
-                canvas._nlc_scroll_enabled = bool(ready) # type: ignore
-                if not ready:
-                    stop_dialog_scroll_animation()
-            except Exception:
-                pass
-
-        lazy_state = {
-            "files": [],
-            "loaded_count": 0,
-            "cols": 1,
-            "batch_size": 24,
-            "grid_wrap": None,
-            "is_loading": False
-        }
+        layout_state = {"cols": None, "render_after_id": None}
 
         def compute_grid_columns():
             try:
                 canvas.update_idletasks()
-                available_w = max(320, canvas.winfo_width() - 40)
+                available_w = max(360, canvas.winfo_width() - 36)
                 return max(1, min(4, available_w // 235))
             except Exception:
                 return 3
 
-        def load_next_mod_batch():
-            if lazy_state["is_loading"]:
-                return
-            files = lazy_state["files"]
-            start = int(lazy_state["loaded_count"])
-            if start >= len(files):
-                return
-            grid_wrap = lazy_state.get("grid_wrap")
-            if grid_wrap is None or not grid_wrap.winfo_exists():
-                return
+        def update_view_buttons():
+            current = view_mode_var.get()
+            if current == "grid":
+                grid_btn.config(bg=COLORS.get('play_btn_green', '#2D8F36'), fg="white",
+                                activebackground=COLORS.get('play_btn_green', '#2D8F36'))
+                list_btn.config(bg="#404040", fg="#E0E0E0", activebackground="#525252")
+            else:
+                list_btn.config(bg=COLORS.get('play_btn_green', '#2D8F36'), fg="white",
+                                activebackground=COLORS.get('play_btn_green', '#2D8F36'))
+                grid_btn.config(bg="#404040", fg="#E0E0E0", activebackground="#525252")
 
-            lazy_state["is_loading"] = True
-            try:
-                cols = max(1, int(lazy_state["cols"]))
-                end = min(len(files), start + int(lazy_state["batch_size"]))
-                for idx in range(start, end):
-                    filename = files[idx]
-                    row = idx // cols
-                    col = idx % cols
-                    create_mod_card(grid_wrap, filename, mods_dir, pack, row, col)
-                lazy_state["loaded_count"] = end
-            finally:
-                lazy_state["is_loading"] = False
-                scroll_frame.update_idletasks()
-                canvas.configure(scrollregion=canvas.bbox("all"))
-                update_scrollbar_visibility()
-                bind_dialog_wheel(scroll_frame)
-
-        def maybe_load_more(_event=None):
-            if lazy_state["loaded_count"] >= len(lazy_state["files"]):
+        def set_view_mode(mode):
+            if mode not in ("grid", "list"):
                 return
-            try:
-                _, bottom = canvas.yview()
-            except Exception:
+            if getattr(self, "installed_mods_view_mode", "grid") == mode and view_mode_var.get() == mode:
+                update_view_buttons()
                 return
-            if bottom >= 0.82:
-                load_next_mod_batch()
-        
-        # Render function
-        def render_mods():
-            set_scroll_ready(False)
-            stop_dialog_scroll_animation()
-            try:
-                # Clear existing
-                for widget in scroll_frame.winfo_children():
-                    widget.destroy()
-                
-                files = sorted([f for f in os.listdir(mods_dir) if f.endswith(".jar")], key=str.lower)
-                search_term = search_var.get().lower()
-                
-                # Filter by search
-                if search_term:
-                    files = [f for f in files if search_term in f.lower()]
+            self.installed_mods_view_mode = mode
+            view_mode_var.set(mode)
+            update_view_buttons()
+            self.save_config(sync_ui=False)
+            render_mods(reset_scroll=False)
 
-                lazy_state["files"] = files
-                lazy_state["loaded_count"] = 0
-                lazy_state["cols"] = compute_grid_columns()
-                lazy_state["batch_size"] = max(12, int(lazy_state["cols"]) * 4) # Optimized for faster rendering
-                lazy_state["grid_wrap"] = None
-                
-                # Count label
-                count_label = tk.Label(scroll_frame, 
-                                      text=f"{len(files)} mod{'s' if len(files) != 1 else ''} installed", 
-                                      font=("Segoe UI", 10), bg=COLORS['main_bg'],
-                                      fg=COLORS['text_secondary'])
-                count_label.pack(anchor="w", padx=20, pady=(15, 10))
-                
-                if not files:
-                    # Empty state
-                    empty_frame = tk.Frame(scroll_frame, bg=COLORS['main_bg'])
-                    empty_frame.pack(fill="both", expand=True, pady=50)
-                    
-                    tk.Label(empty_frame, text="📦", font=("Segoe UI", 48),
-                            bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack()
-                    
-                    msg = "No mods found" if not search_term else "No mods match your search"
-                    tk.Label(empty_frame, text=msg, font=("Segoe UI", 12),
-                            bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(pady=10)
-                    
-                    if not search_term:
-                        tk.Label(empty_frame, text="Use the + button to add mods", 
-                                font=("Segoe UI", 10), bg=COLORS['main_bg'],
-                                fg=COLORS['text_secondary']).pack()
-                else:
-                    grid_wrap = tk.Frame(scroll_frame, bg=COLORS['main_bg'])
-                    grid_wrap.pack(fill="x", padx=16, pady=(0, 12))
-                    for c in range(lazy_state["cols"]):
-                        grid_wrap.grid_columnconfigure(c, weight=1, uniform="modgrid")
-                    lazy_state["grid_wrap"] = grid_wrap
-                    load_next_mod_batch()
-            finally:
-                scroll_frame.update_idletasks()
-                canvas.configure(scrollregion=canvas.bbox("all"))
-                update_scrollbar_visibility()
-                bind_dialog_wheel(scroll_frame)
-                canvas.yview_moveto(0.0)
-                set_scroll_ready(True)
-                dialog.after(30, maybe_load_more)
-        
-        def create_mod_card(parent, filename, mods_dir, pack, row, col):
-            card = tk.Frame(parent, bg=COLORS['card_bg'], padx=12, pady=10, width=220, height=128)
-            card.grid(row=row, column=col, padx=8, pady=8, sticky="nsew")
-            card.grid_propagate(False)
-            
-            # Left side - Icon/Initial + Info
-            left = tk.Frame(card, bg=COLORS['card_bg'])
-            left.pack(fill="both", expand=True)
-            
-            # Icon (first letter of filename)
+        grid_btn.config(command=lambda: set_view_mode("grid"))
+        list_btn.config(command=lambda: set_view_mode("list"))
+        update_view_buttons()
+
+        def on_canvas_configure(event):
+            canvas.itemconfig(canvas_window, width=event.width)
+            if view_mode_var.get() != "grid":
+                return
+            new_cols = compute_grid_columns()
+            if layout_state["cols"] == new_cols:
+                return
+            layout_state["cols"] = new_cols
+            after_id = layout_state.get("render_after_id")
+            if after_id is not None:
+                try:
+                    dialog.after_cancel(after_id)
+                except Exception:
+                    pass
+            layout_state["render_after_id"] = dialog.after(70, lambda: render_mods(reset_scroll=False))
+
+        canvas.bind("<Configure>", on_canvas_configure)
+        content_frame.bind("<Enter>", lambda e: self._bind_smooth_scroll(canvas, scroll_frame))
+        canvas.bind("<Enter>", lambda e: self._bind_smooth_scroll(canvas, scroll_frame))
+
+        def get_mod_display_data(filename):
+            display_name = filename[:-4] if filename.endswith('.jar') else filename
             initial = filename[0].upper() if filename else "M"
-            # Color based on first char
             colors = ["#3498DB", "#E67E22", "#9B59B6", "#2ECC71", "#E74C3C", "#F39C12"]
             icon_color = colors[ord(initial) % len(colors)]
-            
-            icon = tk.Label(left, text=initial, font=("Segoe UI", 14, "bold"),
-                           bg=icon_color, fg="white", width=2, height=1)
-            icon.pack(anchor="w")
-            
-            # Info
-            info = tk.Frame(left, bg=COLORS['card_bg'])
-            info.pack(fill="both", expand=True, pady=(8, 0))
-            
-            # Filename (remove .jar extension for cleaner display)
-            display_name = filename[:-4] if filename.endswith('.jar') else filename
-            tk.Label(info, text=display_name, font=("Segoe UI", 11, "bold"),
-                    bg=COLORS['card_bg'], fg=COLORS['text_primary'], anchor="w",
-                    wraplength=190, justify="left").pack(fill="x")
-            
-            # File size
+            size_str = ""
             try:
                 file_path = os.path.join(mods_dir, filename)
                 size_bytes = os.path.getsize(file_path)
@@ -7442,76 +7593,183 @@ class MinecraftLauncher:
                     size_str = f"{size_bytes / 1024:.1f} KB"
                 else:
                     size_str = f"{size_bytes / (1024 * 1024):.1f} MB"
-                
-                tk.Label(info, text=f"📊 {size_str}", font=("Segoe UI", 9),
-                        bg=COLORS['card_bg'], fg=COLORS['text_secondary'], 
-                        anchor="w").pack(fill="x", pady=(4, 0))
-            except:
+            except Exception:
                 pass
-            
-            # Right side - Actions
-            actions = tk.Frame(card, bg=COLORS['card_bg'])
-            actions.pack(fill="x", pady=(6, 0))
-            
-            def delete_mod():
-                if custom_askyesno("Delete Mod", 
-                                  f"Are you sure you want to delete '{display_name}'?",
-                                  parent=dialog):
-                    try:
-                        os.remove(os.path.join(mods_dir, filename))
-                        # Remove from pack meta if tracked
-                        rem_meta = next((m for m in pack['mods'] 
-                                       if m.get('filename') == filename), None)
-                        if rem_meta:
-                            pack['mods'].remove(rem_meta)
-                            self.save_modpacks()
-                        render_mods()  # Refresh list
-                    except Exception as e:
-                        custom_showerror("Error", f"Failed to delete mod: {e}", 
-                                       parent=dialog)
-            
-            # Delete button
-            del_btn = tk.Button(actions, text="Remove", font=("Segoe UI", 9, "bold"),
-                               bg="#552222", fg="#F2B5B5",
-                               relief="flat", bd=0, cursor="hand2",
-                               command=delete_mod)
-            del_btn.pack(side="right")
-            
-            # Hover effect for delete button
-            def on_enter_del(e):
-                del_btn.config(bg=COLORS['error_red'], fg="white")
-            
-            def on_leave_del(e):
-                del_btn.config(bg="#552222", fg="#F2B5B5")
-            
-            del_btn.bind("<Enter>", on_enter_del)
-            del_btn.bind("<Leave>", on_leave_del)
-            
-            # Card hover effect
-            def on_enter_card(e):
-                card.config(bg="#3A3A3A")
-                left.config(bg="#3A3A3A")
-                info.config(bg="#3A3A3A")
-                actions.config(bg="#3A3A3A")
-                for child in info.winfo_children():
-                    child.config(bg="#3A3A3A") # type: ignore
-                    
-            def on_leave_card(e):
-                # Don't change delete button bg on card hover
-                if del_btn.winfo_containing(e.x_root, e.y_root) == del_btn:
+            return display_name, initial, icon_color, size_str
+
+        def delete_mod(filename, display_name):
+            if custom_askyesno("Delete Mod",
+                              f"Are you sure you want to delete '{display_name}'?",
+                              parent=dialog):
+                try:
+                    os.remove(os.path.join(mods_dir, filename))
+                    rem_meta = next((m for m in pack.get('mods', []) if m.get('filename') == filename), None)
+                    if rem_meta:
+                        pack['mods'].remove(rem_meta)
+                        self.save_modpacks()
+                    render_mods(reset_scroll=False)
+                except Exception as e:
+                    custom_showerror("Error", f"Failed to delete mod: {e}", parent=dialog)
+
+        def bind_hover_surfaces(card, surfaces, info_widgets, del_btn):
+            def on_enter_card(_event):
+                for surface in surfaces:
+                    surface.config(bg="#3A3A3A")
+                for widget in info_widgets:
+                    widget.config(bg="#3A3A3A") # type: ignore[arg-type]
+
+            def on_leave_card(event):
+                if del_btn.winfo_containing(event.x_root, event.y_root) == del_btn:
                     return
-                card.config(bg=COLORS['card_bg'])
-                left.config(bg=COLORS['card_bg'])
-                info.config(bg=COLORS['card_bg'])
-                actions.config(bg=COLORS['card_bg'])
-                for child in info.winfo_children():
-                    child.config(bg=COLORS['card_bg']) # type: ignore
-            
-            card.bind("<Enter>", on_enter_card)
-            card.bind("<Leave>", on_leave_card)
-        
-        # Initial render
-        # Optimize: schedule render_mods slightly after the dialog appears so it doesn't block the UI from opening
+                for surface in surfaces:
+                    surface.config(bg=COLORS['card_bg'])
+                for widget in info_widgets:
+                    widget.config(bg=COLORS['card_bg']) # type: ignore[arg-type]
+
+            for surface in surfaces:
+                surface.bind("<Enter>", on_enter_card)
+                surface.bind("<Leave>", on_leave_card)
+
+        def create_remove_button(parent, command):
+            del_btn = tk.Button(parent, text="Remove", font=("Segoe UI", 9, "bold"),
+                               bg="#552222", fg="#F2B5B5", relief="flat", bd=0,
+                               cursor="hand2", command=command)
+            del_btn.bind("<Enter>", lambda _e: del_btn.config(bg=COLORS['error_red'], fg="white"))
+            del_btn.bind("<Leave>", lambda _e: del_btn.config(bg="#552222", fg="#F2B5B5"))
+            return del_btn
+
+        def create_mod_grid_card(parent, filename, row, col):
+            display_name, initial, icon_color, size_str = get_mod_display_data(filename)
+            card = tk.Frame(parent, bg=COLORS['card_bg'], padx=12, pady=10, width=220, height=128)
+            card.grid(row=row, column=col, padx=8, pady=8, sticky="nsew")
+            card.grid_propagate(False)
+
+            left = tk.Frame(card, bg=COLORS['card_bg'])
+            left.pack(fill="both", expand=True)
+
+            icon = tk.Label(left, text=initial, font=("Segoe UI", 14, "bold"),
+                           bg=icon_color, fg="white", width=2, height=1)
+            icon.pack(anchor="w")
+
+            info = tk.Frame(left, bg=COLORS['card_bg'])
+            info.pack(fill="both", expand=True, pady=(8, 0))
+
+            name_lbl = tk.Label(info, text=display_name, font=("Segoe UI", 11, "bold"),
+                               bg=COLORS['card_bg'], fg=COLORS['text_primary'], anchor="w",
+                               wraplength=190, justify="left")
+            name_lbl.pack(fill="x")
+
+            size_lbl = None
+            if size_str:
+                size_lbl = tk.Label(info, text=f"Size: {size_str}", font=("Segoe UI", 9),
+                                   bg=COLORS['card_bg'], fg=COLORS['text_secondary'], anchor="w")
+                size_lbl.pack(fill="x", pady=(4, 0))
+
+            actions_row = tk.Frame(card, bg=COLORS['card_bg'])
+            actions_row.pack(fill="x", pady=(6, 0))
+            del_btn = create_remove_button(actions_row, lambda f=filename, d=display_name: delete_mod(f, d))
+            del_btn.pack(side="right")
+
+            info_widgets = [name_lbl]
+            if size_lbl is not None:
+                info_widgets.append(size_lbl)
+            bind_hover_surfaces(card, [card, left, info, actions_row], info_widgets, del_btn)
+
+        def create_mod_list_row(parent, filename):
+            display_name, initial, icon_color, size_str = get_mod_display_data(filename)
+            row = tk.Frame(parent, bg=COLORS['card_bg'], padx=14, pady=12)
+            row.pack(fill="x", padx=12, pady=6)
+
+            left = tk.Frame(row, bg=COLORS['card_bg'])
+            left.pack(side="left", fill="both", expand=True)
+
+            icon = tk.Label(left, text=initial, font=("Segoe UI", 14, "bold"),
+                           bg=icon_color, fg="white", width=2, height=1)
+            icon.pack(side="left", padx=(0, 12))
+
+            info = tk.Frame(left, bg=COLORS['card_bg'])
+            info.pack(side="left", fill="both", expand=True)
+
+            name_lbl = tk.Label(info, text=display_name, font=("Segoe UI", 11, "bold"),
+                               bg=COLORS['card_bg'], fg=COLORS['text_primary'], anchor="w")
+            name_lbl.pack(fill="x")
+
+            meta_text = filename if not size_str else f"{filename}  •  {size_str}"
+            meta_lbl = tk.Label(info, text=meta_text, font=("Segoe UI", 9),
+                               bg=COLORS['card_bg'], fg=COLORS['text_secondary'], anchor="w")
+            meta_lbl.pack(fill="x", pady=(3, 0))
+
+            actions_row = tk.Frame(row, bg=COLORS['card_bg'])
+            actions_row.pack(side="right", padx=(10, 0))
+            del_btn = create_remove_button(actions_row, lambda f=filename, d=display_name: delete_mod(f, d))
+            del_btn.pack()
+
+            bind_hover_surfaces(row, [row, left, info, actions_row], [name_lbl, meta_lbl], del_btn)
+
+        def render_mods(reset_scroll=True):
+            after_id = layout_state.get("render_after_id")
+            if after_id is not None:
+                try:
+                    dialog.after_cancel(after_id)
+                except Exception:
+                    pass
+            layout_state["render_after_id"] = None
+
+            current_top = canvas.yview()[0] if not reset_scroll else 0.0
+
+            for widget in scroll_frame.winfo_children():
+                widget.destroy()
+
+            files = sorted([f for f in os.listdir(mods_dir) if f.endswith(".jar")], key=str.lower)
+            search_term = search_var.get().strip().lower()
+            if search_term:
+                files = [f for f in files if search_term in f.lower()]
+
+            count_label = tk.Label(
+                scroll_frame,
+                text=f"{len(files)} mod{'s' if len(files) != 1 else ''} installed",
+                font=("Segoe UI", 10),
+                bg=COLORS['main_bg'],
+                fg=COLORS['text_secondary'],
+            )
+            count_label.pack(anchor="w", padx=20, pady=(15, 10))
+
+            if not files:
+                empty_frame = tk.Frame(scroll_frame, bg=COLORS['main_bg'])
+                empty_frame.pack(fill="both", expand=True, pady=50)
+
+                tk.Label(empty_frame, text="📦", font=("Segoe UI", 48),
+                        bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack()
+
+                msg = "No mods found" if not search_term else "No mods match your search"
+                tk.Label(empty_frame, text=msg, font=("Segoe UI", 12),
+                        bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(pady=10)
+
+                if not search_term:
+                    tk.Label(empty_frame, text="Use the + button to add mods",
+                            font=("Segoe UI", 10), bg=COLORS['main_bg'],
+                            fg=COLORS['text_secondary']).pack()
+            elif view_mode_var.get() == "list":
+                layout_state["cols"] = None
+                list_wrap = tk.Frame(scroll_frame, bg=COLORS['main_bg'])
+                list_wrap.pack(fill="x", padx=8, pady=(0, 12))
+                for filename in files:
+                    create_mod_list_row(list_wrap, filename)
+            else:
+                cols = compute_grid_columns()
+                layout_state["cols"] = cols
+                grid_wrap = tk.Frame(scroll_frame, bg=COLORS['main_bg'])
+                grid_wrap.pack(fill="x", padx=16, pady=(0, 12))
+                for c in range(cols):
+                    grid_wrap.grid_columnconfigure(c, weight=1, uniform="modgrid")
+                for idx, filename in enumerate(files):
+                    create_mod_grid_card(grid_wrap, filename, idx // cols, idx % cols)
+
+            scroll_frame.update_idletasks()
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            self._bind_smooth_scroll(canvas, scroll_frame)
+            canvas.yview_moveto(0.0 if reset_scroll else current_top)
+
         dialog.after(50, render_mods)
         
         # Bind search to debounced re-render
@@ -7748,7 +8006,10 @@ class MinecraftLauncher:
                  "name": new_name,
                  "version": mc_ver,
                  "loader": loader,
-                 "icon": "icons/crafting_table_front.png", 
+                 "icon": "icons/crafting_table_front.png",
+                 "java_executable": "",
+                 "resolution_width": None,
+                 "resolution_height": None,
                  "last_played": "Never",
                  "created": datetime.now().isoformat()
             }
@@ -7979,7 +8240,7 @@ class MinecraftLauncher:
                 self.last_scroll_check = now
                 self._check_scroll_position()
         
-        self.mods_canvas.bind("<MouseWheel>", lambda e: _mods_smooth_scroll(e))
+        self._bind_wheel_events(self.mods_canvas, _mods_smooth_scroll, f"mods_{id(self.mods_canvas)}")
         frame.bind("<Enter>", lambda e: self._bind_smooth_scroll(self.mods_canvas, self.mods_scrollable_frame))
 
         self.mod_search_timer = None
@@ -8348,41 +8609,176 @@ class MinecraftLauncher:
         
         self.download_manager.queue_mod(run_install, task_id)
 
+    def _get_modpack_version_file(self, version_data):
+        try:
+            files = version_data.get('files', [])
+            return next(
+                (f for f in files if str(f.get('filename', '')).endswith('.mrpack') and f.get('url')),
+                None
+            )
+        except Exception:
+            return None
+
+    def _format_modpack_version_option(self, version_data):
+        version_name = version_data.get('version_number') or version_data.get('name') or version_data.get('id', 'Unknown')
+        game_versions = [str(v) for v in version_data.get('game_versions', []) if v]
+        loaders = [str(v) for v in version_data.get('loaders', []) if v]
+        published = str(version_data.get('date_published', '')).replace('T', ' ')[:16]
+
+        meta_parts = []
+        if game_versions:
+            meta_parts.append(", ".join(game_versions[:2]))
+        if loaders:
+            meta_parts.append("/".join(loaders[:2]))
+        if published:
+            meta_parts.append(published)
+
+        return version_name if not meta_parts else f"{version_name}  •  " + "  •  ".join(meta_parts)
+
+    def _prompt_modpack_version(self, mod_data, versions):
+        result = {"version": None}
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"Choose Version - {mod_data.get('title', 'Modpack')}")
+        dialog.geometry("560x280")
+        dialog.config(bg=COLORS['main_bg'])
+        if os.name != "nt":
+            dialog.transient(self.root)
+            dialog.grab_set()
+
+        dialog_root = self._apply_custom_toplevel_chrome(dialog, f"Install {mod_data.get('title', 'Modpack')}")
+
+        container = tk.Frame(dialog_root, bg=COLORS['main_bg'], padx=24, pady=24)
+        container.pack(fill="both", expand=True)
+
+        tk.Label(
+            container,
+            text="Select Modpack Version",
+            font=("Segoe UI", 14, "bold"),
+            bg=COLORS['main_bg'],
+            fg=COLORS['text_primary'],
+        ).pack(anchor="w")
+
+        tk.Label(
+            container,
+            text="Choose which version of this modpack to install.",
+            font=("Segoe UI", 10),
+            bg=COLORS['main_bg'],
+            fg=COLORS['text_secondary'],
+        ).pack(anchor="w", pady=(6, 16))
+
+        options = [self._format_modpack_version_option(version) for version in versions]
+        selected_index = {"value": 0}
+        version_var = tk.StringVar(value=options[0] if options else "")
+
+        combo = ttk.Combobox(
+            container,
+            textvariable=version_var,
+            values=options,
+            state="readonly",
+            style="Launcher.TCombobox",
+        )
+        combo.pack(fill="x", ipady=6)
+        if options:
+            combo.current(0)
+
+        detail_lbl = tk.Label(
+            container,
+            text="",
+            font=("Segoe UI", 9),
+            bg=COLORS['main_bg'],
+            fg=COLORS['text_secondary'],
+            justify="left",
+            anchor="w",
+        )
+        detail_lbl.pack(fill="x", pady=(14, 0))
+
+        def update_version_details(*_args):
+            try:
+                idx = combo.current()
+            except Exception:
+                idx = selected_index["value"]
+            if idx is None or idx < 0 or idx >= len(versions):
+                idx = 0
+            selected_index["value"] = idx
+            version = versions[idx]
+            mrpack_file = self._get_modpack_version_file(version)
+            game_versions = ", ".join(str(v) for v in version.get('game_versions', [])[:3]) or "Unknown"
+            loaders = ", ".join(str(v) for v in version.get('loaders', [])[:3]) or "Unknown"
+            file_name = mrpack_file.get('filename', 'Unknown') if mrpack_file else "Missing .mrpack"
+            detail_lbl.config(
+                text=f"Minecraft: {game_versions}\nLoader: {loaders}\nFile: {file_name}"
+            )
+
+        combo.bind("<<ComboboxSelected>>", update_version_details)
+        update_version_details()
+
+        btn_row = tk.Frame(container, bg=COLORS['main_bg'])
+        btn_row.pack(side="bottom", fill="x", pady=(20, 0))
+
+        def confirm_install():
+            idx = selected_index["value"]
+            if 0 <= idx < len(versions):
+                result["version"] = versions[idx]
+            dialog.destroy()
+
+        self._make_btn(
+            btn_row, "Cancel", style="secondary", font_size=10, command=dialog.destroy
+        ).pack(side="right")
+        self._make_btn(
+            btn_row, "Install", style="primary", font_size=10, bold=True, command=confirm_install
+        ).pack(side="right", padx=(0, 8))
+
+        self.root.wait_window(dialog)
+        return result["version"]
+
     def _install_mr_modpack(self, mod_data, btn_widget):
-        btn_widget.config(state="disabled", text="Queued...")
+        original_text = btn_widget.cget("text")
+        btn_widget.config(state="disabled", text="Loading...")
+
+        try:
+            mod_id = mod_data['slug']
+            v_url = f"https://api.modrinth.com/v2/project/{mod_id}/version"
+            r = requests.get(v_url, headers={"User-Agent": "AmneDev/NewLauncher"}, timeout=10)
+            if r.status_code != 200:
+                raise Exception(f"Failed to fetch versions: {r.status_code}")
+
+            versions = [v for v in r.json() if self._get_modpack_version_file(v)]
+            if not versions:
+                raise Exception("No installable .mrpack versions were found for this modpack.")
+
+            selected_version = self._prompt_modpack_version(mod_data, versions)
+            if not selected_version:
+                btn_widget.config(state="normal", text=original_text, bg=COLORS['play_btn_green'])
+                return
+        except Exception as e:
+            btn_widget.config(state="normal", text=original_text, bg=COLORS['play_btn_green'])
+            custom_showerror("Error", str(e), parent=self.root)
+            return
+
+        btn_widget.config(state="disabled", text="Queued...", bg=COLORS['text_secondary'])
         task_id = self.add_download_task(mod_data['title'], "modpack")
         
         def run():
              self.root.after(0, lambda: btn_widget.config(text="Installing..."))
-             self._install_mr_modpack_thread(mod_data, btn_widget, task_id)
+             self._install_mr_modpack_thread(mod_data, selected_version, btn_widget, task_id)
              
         self.download_manager.queue_modpack(run, task_id)
 
-    def _install_mr_modpack_thread(self, mod_data, btn_widget, task_id):
+    def _install_mr_modpack_thread(self, mod_data, version_data, btn_widget, task_id):
         try:
-             mod_id = mod_data['slug']
-             
              self.root.after(0, lambda: self.update_download_task(task_id, 0, detail="Fetching info..."))
+             best = version_data
              
-             v_url = f"https://api.modrinth.com/v2/project/{mod_id}/version"
-             r = requests.get(v_url, headers={"User-Agent": "AmneDev/NewLauncher"}, timeout=10)
-             versions = r.json()
-             if not versions:
-                 raise Exception("No versions found")
-                 
-             best = versions[0]
-             
-             files = best.get('files', [])
-             mrpack_file = next((f for f in files if f['filename'].endswith('.mrpack')), None)
+             mrpack_file = self._get_modpack_version_file(best)
              
              if not mrpack_file:
-                 # Some packs might not distribute mrpack on all versions?
-                 raise Exception("No .mrpack file found in latest version")
+                 raise Exception("No .mrpack file found in selected version")
                  
              # Create Pack Entry
              pack_name = mod_data['title']
-             mc_ver = best['game_versions'][0]
-             loader = best['loaders'][0]
+             mc_ver = next((str(v) for v in best.get('game_versions', []) if v), "unknown")
+             loader = next((str(v) for v in best.get('loaders', []) if v), "vanilla")
+             version_name = best.get('version_number') or best.get('name') or best.get('id', 'unknown')
              
              new_id = str(uuid.uuid4())
              new_pack = {
@@ -8390,12 +8786,14 @@ class MinecraftLauncher:
                  "name": pack_name,
                  "loader": loader,
                  "mc_version": mc_ver,
+                 "version_id": best.get('id', ''),
+                 "version_name": version_name,
                  "mods": [],
                  "linked_installation_id": None
              }
              
              # Download .mrpack to temp
-             self.root.after(0, lambda: self.update_download_task(task_id, 5, detail="Downloading mrpack..."))
+             self.root.after(0, lambda: self.update_download_task(task_id, 5, detail=f"Downloading {version_name}..."))
              import tempfile
              with tempfile.TemporaryDirectory() as temp_dir:
                  mr_path = os.path.join(temp_dir, "pack.mrpack")
@@ -8474,7 +8872,7 @@ class MinecraftLauncher:
              self.root.after(0, lambda: [
                  self.refresh_modpacks_list(),
                  self.update_active_modpack_dropdown(),
-                 messagebox.showinfo("Success", f"Installed modpack '{pack_name}'"),
+                 messagebox.showinfo("Success", f"Installed modpack '{pack_name}' ({version_name})"),
                  btn_widget.destroy()
              ])
              
@@ -8550,7 +8948,7 @@ class MinecraftLauncher:
         # Center the content slightly
         canvas_window = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw", width=content_container.winfo_reqwidth())
 
-        canvas.bind("<MouseWheel>", lambda e, c=canvas: self._smooth_scroll(c, e))
+        self._bind_wheel_events(canvas, lambda e, c=canvas: self._smooth_scroll(c, e), f"direct_{id(canvas)}")
         
         def on_canvas_configure(event):
             # Center content if wide enough, else fill
@@ -8688,12 +9086,6 @@ class MinecraftLauncher:
         card_down, lbl_down = create_card(main_wrapper, "DOWNLOADS")
         create_top_nav_btn("Downloads", card_down)
 
-        self.enable_modrinth_var = tk.BooleanVar(value=getattr(self, 'enable_modrinth', True))
-        def on_modrinth_toggle():
-             val = self.enable_modrinth_var.get(); self.enable_modrinth = val; self.save_config()
-             custom_showinfo("Restart Required", "Restart to apply Modrinth changes.")
-        card_check(card_down, "Enable Modrinth Integration (Mods Tab)", self.enable_modrinth_var, on_modrinth_toggle)
-        
         card_label(card_down, "Download Limits")
         lim_frame = tk.Frame(card_down, bg=COLORS['card_bg'])
         lim_frame.pack(fill="x", pady=(0, 10))
@@ -8802,7 +9194,7 @@ class MinecraftLauncher:
         canvas_window = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw", width=content_frame.winfo_reqwidth())
 
         # Smooth mousewheel
-        canvas.bind("<MouseWheel>", lambda e, c=canvas: self._smooth_scroll(c, e))
+        self._bind_wheel_events(canvas, lambda e, c=canvas: self._smooth_scroll(c, e), f"direct_{id(canvas)}")
         
         def on_canvas_configure(event):
             canvas.itemconfig(canvas_window, width=event.width)
@@ -9016,19 +9408,6 @@ class MinecraftLauncher:
         lbl_downloads = tk.Label(main_container, text="DOWNLOADS & FEATURES", font=("Segoe UI", 14, "bold"),
                 bg=COLORS['main_bg'], fg=COLORS['text_primary'])
         lbl_downloads.pack(anchor="w", pady=(20, 15))
-
-        # Modrinth Toggle
-        self.enable_modrinth_var = tk.BooleanVar(value=getattr(self, 'enable_modrinth', True))
-        def on_modrinth_toggle():
-             val = self.enable_modrinth_var.get()
-             self.enable_modrinth = val
-             self.save_config()
-             custom_showinfo("Restart Required", "Please restart the launcher to apply changes to Modrinth integration.")
-        
-        tk.Checkbutton(main_container, text="Enable Modrinth Integration (Mods Tab)", variable=self.enable_modrinth_var,
-                      bg=COLORS['main_bg'], fg=COLORS['text_primary'],
-                      selectcolor=COLORS['main_bg'], activebackground=COLORS['main_bg'],
-                      command=on_modrinth_toggle).pack(anchor="w", pady=(0, 15))
 
         # Concurrent Limits
         tk.Label(main_container, text="Concurrent Limits", font=("Segoe UI", 10, "bold"), 
@@ -9258,7 +9637,7 @@ class MinecraftLauncher:
         scroll_frame.bind("<Configure>", lambda e: update_scrollbar_visibility())
 
         # Smooth mousewheel
-        canvas.bind("<MouseWheel>", lambda e, c=canvas: self._smooth_scroll(c, e))
+        self._bind_wheel_events(canvas, lambda e, c=canvas: self._smooth_scroll(c, e), f"direct_{id(canvas)}")
 
         # Bind enter for scrolling
         frame.bind("<Enter>", lambda e: self._bind_smooth_scroll(canvas, scroll_frame))
@@ -9267,12 +9646,139 @@ class MinecraftLauncher:
         content = tk.Frame(scroll_frame, bg=COLORS['main_bg'], padx=30, pady=10)
         content.pack(fill="x")
 
+        if not hasattr(self, '_addons_collapsible_state'):
+            self._addons_collapsible_state = {}
+
+        def create_collapsible_card(parent, title, subtitle, state_key, default_open=True):
+            card = tk.Frame(parent, bg=COLORS['card_bg'], padx=20, pady=20)
+            card.pack(fill="x", pady=(0, 20))
+
+            is_open = bool(self._addons_collapsible_state.get(state_key, default_open))
+            body = tk.Frame(card, bg=COLORS['card_bg'])
+            icon_font = ("Segoe UI Symbol", 13, "bold")
+            icon_open = "⌄"
+            icon_closed = "›"
+
+            header = tk.Frame(card, bg=COLORS['card_bg'], cursor="hand2")
+            header.pack(fill="x")
+
+            text_wrap = tk.Frame(header, bg=COLORS['card_bg'])
+            text_wrap.pack(side="left", fill="x", expand=True)
+
+            icon_wrap = tk.Frame(header, bg=COLORS['card_bg'])
+            icon_wrap.pack(side="right", anchor="ne")
+            chevron = tk.Label(
+                icon_wrap,
+                text=icon_open if is_open else icon_closed,
+                font=icon_font,
+                bg=COLORS['card_bg'],
+                fg=COLORS['text_primary'],
+                cursor="hand2",
+                anchor="ne",
+            )
+            chevron.pack(anchor="ne")
+
+            title_lbl = tk.Label(text_wrap, text=title, font=("Segoe UI", 16, "bold"), bg=COLORS['card_bg'], fg=COLORS['text_primary'], anchor="w", cursor="hand2")
+            title_lbl.pack(anchor="w")
+            subtitle_lbl = tk.Label(text_wrap, text=subtitle, font=("Segoe UI", 10), bg=COLORS['card_bg'], fg=COLORS['text_secondary'], anchor="w", cursor="hand2")
+            subtitle_lbl.pack(anchor="w", pady=(4, 0))
+
+            def toggle_section(_event=None):
+                is_now_open = not bool(self._addons_collapsible_state.get(state_key, default_open))
+                self._addons_collapsible_state[state_key] = is_now_open
+                chevron.config(text=icon_open if is_now_open else icon_closed)
+                if is_now_open:
+                    body.pack(fill="x", pady=(15, 0))
+                else:
+                    body.pack_forget()
+
+            for widget in (header, text_wrap, icon_wrap, title_lbl, subtitle_lbl, chevron):
+                widget.bind("<Button-1>", toggle_section)
+
+            if is_open:
+                body.pack(fill="x", pady=(15, 0))
+
+            return card, body
+
+        # Playtime Tracker
+        playtime_frame = tk.Frame(content, bg=COLORS['card_bg'], padx=20, pady=20)
+        playtime_frame.pack(fill="x", pady=(0, 20))
+        tk.Label(playtime_frame, text="Playtime Tracker", font=("Segoe UI", 16, "bold"), bg=COLORS['card_bg'], fg=COLORS['text_primary']).pack(anchor="w", pady=(0, 5))
+        tk.Label(playtime_frame, text="Tracks session time and launch counts for each installation.", font=("Segoe UI", 10), bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(anchor="w")
+
+        playtime_summary = tk.Frame(playtime_frame, bg=COLORS['card_bg'])
+        playtime_summary.pack(fill="x", pady=(15, 12))
+        self.playtime_total_lbl = tk.Label(playtime_summary, text="Total Time: 0m", font=("Segoe UI", 11, "bold"), bg=COLORS['card_bg'], fg=COLORS['text_primary'])
+        self.playtime_total_lbl.pack(side="left")
+        self.playtime_launches_lbl = tk.Label(playtime_summary, text="Launches: 0", font=("Segoe UI", 10), bg=COLORS['card_bg'], fg=COLORS['text_secondary'])
+        self.playtime_launches_lbl.pack(side="left", padx=(18, 0))
+        self._make_btn(playtime_summary, "Reset Stats", style="secondary", font_size=9, command=self.reset_playtime_tracker).pack(side="right")
+
+        self.playtime_list_frame = tk.Frame(playtime_frame, bg=COLORS['card_bg'])
+        self.playtime_list_frame.pack(fill="x")
+
+        # Server Quick Join
+        _server_card, server_frame = create_collapsible_card(
+            content,
+            "Server Quick Join",
+            "Save favorite servers and launch directly into them.",
+            "server_quick_join",
+            default_open=True,
+        )
+
+        install_row = tk.Frame(server_frame, bg=COLORS['card_bg'])
+        install_row.pack(fill="x", pady=(0, 12))
+        tk.Label(install_row, text="Installation", font=("Segoe UI", 10), bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(side="left")
+        self.quick_join_install_var = tk.StringVar()
+        self.quick_join_install_combo = ttk.Combobox(install_row, textvariable=self.quick_join_install_var, state="readonly", style="Launcher.TCombobox", width=36)
+        self.quick_join_install_combo.pack(side="left", padx=(10, 0), fill="x", expand=True)
+
+        server_form = tk.Frame(server_frame, bg=COLORS['card_bg'])
+        server_form.pack(fill="x")
+        server_form.columnconfigure(1, weight=1)
+
+        self.quick_join_name_var = tk.StringVar()
+        self.quick_join_address_var = tk.StringVar()
+        self.quick_join_port_var = tk.StringVar(value="25565")
+
+        tk.Label(server_form, text="Name", font=("Segoe UI", 10), bg=COLORS['card_bg'], fg=COLORS['text_secondary']).grid(row=0, column=0, sticky="w", pady=5)
+        tk.Entry(server_form, textvariable=self.quick_join_name_var, font=("Segoe UI", 10), bg=COLORS['input_bg'], fg="white", relief="flat").grid(row=0, column=1, sticky="ew", ipady=5)
+        tk.Label(server_form, text="Address", font=("Segoe UI", 10), bg=COLORS['card_bg'], fg=COLORS['text_secondary']).grid(row=1, column=0, sticky="w", pady=5)
+        tk.Entry(server_form, textvariable=self.quick_join_address_var, font=("Segoe UI", 10), bg=COLORS['input_bg'], fg="white", relief="flat").grid(row=1, column=1, sticky="ew", ipady=5)
+        tk.Label(server_form, text="Port", font=("Segoe UI", 10), bg=COLORS['card_bg'], fg=COLORS['text_secondary']).grid(row=2, column=0, sticky="w", pady=5)
+        tk.Entry(server_form, textvariable=self.quick_join_port_var, font=("Segoe UI", 10), bg=COLORS['input_bg'], fg="white", relief="flat", width=12).grid(row=2, column=1, sticky="w", ipady=5)
+
+        self._make_btn(server_frame, "Save Server", style="primary", font_size=10, bold=True, command=self.add_quick_join_server).pack(anchor="w", pady=(14, 0))
+        self.saved_servers_list_frame = tk.Frame(server_frame, bg=COLORS['card_bg'])
+        self.saved_servers_list_frame.pack(fill="x", pady=(14, 0))
+
+        # Screenshot Browser
+        _screenshot_card, screenshot_frame = create_collapsible_card(
+            content,
+            "Screenshot Browser",
+            "Browse recent screenshots from your Minecraft directory.",
+            "screenshot_browser",
+            default_open=False,
+        )
+
+        screenshot_actions = tk.Frame(screenshot_frame, bg=COLORS['card_bg'])
+        screenshot_actions.pack(fill="x", pady=(0, 12))
+        self.screenshot_status_lbl = tk.Label(screenshot_actions, text="", font=("Segoe UI", 9), bg=COLORS['card_bg'], fg=COLORS['text_secondary'])
+        self.screenshot_status_lbl.pack(side="left")
+        self._make_btn(screenshot_actions, "Refresh", style="secondary", font_size=9, command=self.render_screenshot_browser).pack(side="right")
+        self._make_btn(screenshot_actions, "Open Folder", style="secondary", font_size=9, command=lambda: self._open_path(self.get_screenshots_dir())).pack(side="right", padx=(0, 8))
+
+        self.screenshot_grid_frame = tk.Frame(screenshot_frame, bg=COLORS['card_bg'])
+        self.screenshot_grid_frame.pack(fill="x")
+
         # GitHub Skin Sync
-        sync_frame = tk.Frame(content, bg=COLORS['card_bg'], padx=20, pady=20)
-        sync_frame.pack(fill="x", pady=(0, 20))
-        
-        tk.Label(sync_frame, text="GitHub Skin Sync", font=("Segoe UI", 16, "bold"), bg=COLORS['card_bg'], fg=COLORS['text_primary']).pack(anchor="w", pady=(0, 5))
-        tk.Label(sync_frame, text="Link a GitHub repository to sync skins with your friends.", font=("Segoe UI", 10), bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(anchor="w", pady=(0, 20))
+        _sync_card, sync_frame = create_collapsible_card(
+            content,
+            "GitHub Skin Sync",
+            "Link a GitHub repository to sync skins with your friends.",
+            "github_skin_sync",
+            default_open=False,
+        )
 
         # Enable Toggle
         self.gh_sync_enabled = tk.BooleanVar(value=self.addons_config.get("gh_sync_enabled", False))
@@ -9289,13 +9795,11 @@ class MinecraftLauncher:
         # Repo
         tk.Label(grid_frame, text="Repository (user/repo):", font=("Segoe UI", 10), bg=COLORS['card_bg'], fg=COLORS['text_secondary']).grid(row=0, column=0, sticky="w", pady=5)
         self.gh_repo_entry = tk.Entry(grid_frame, font=("Segoe UI", 10), bg=COLORS['input_bg'], fg="white", relief="flat")
-        self.gh_repo_entry.insert(0, str(self.addons_config.get("gh_repo", "")))
         self.gh_repo_entry.grid(row=0, column=1, sticky="ew", padx=10, ipady=5)
 
         # Token
         tk.Label(grid_frame, text="Access Token (PAT):", font=("Segoe UI", 10), bg=COLORS['card_bg'], fg=COLORS['text_secondary']).grid(row=1, column=0, sticky="w", pady=5)
         self.gh_token_entry = tk.Entry(grid_frame, font=("Segoe UI", 10), bg=COLORS['input_bg'], fg="white", relief="flat", show="*")
-        self.gh_token_entry.insert(0, str(self.addons_config.get("gh_token", "")))
         self.gh_token_entry.grid(row=1, column=1, sticky="ew", padx=10, ipady=5)
         
         # Save Button
@@ -9319,11 +9823,375 @@ How to use:
         """
         tk.Label(info_frame, text=info_text, font=("Segoe UI", 9), justify="left", bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(anchor="w")
 
+        self.refresh_addons_tab_state()
+
+    def _ensure_addons_config_defaults(self):
+        if not isinstance(self.addons_config, dict):
+            self.addons_config = {}
+        self.addons_config.setdefault("p3_reload_menu", False)
+        self.addons_config.setdefault("gh_sync_enabled", False)
+        self.addons_config.setdefault("gh_repo", "")
+        self.addons_config.setdefault("gh_token", "")
+        if not isinstance(self.addons_config.get("playtime_tracker"), dict):
+            self.addons_config["playtime_tracker"] = {}
+        if not isinstance(self.addons_config.get("saved_servers"), list):
+            self.addons_config["saved_servers"] = []
+        normalized_servers = []
+        for server in self.addons_config.get("saved_servers", []):
+            if not isinstance(server, dict):
+                continue
+            address = str(server.get("address", "")).strip()
+            if not address:
+                continue
+            port = server.get("port", 25565)
+            try:
+                port = int(port)
+            except Exception:
+                port = 25565
+            normalized_servers.append({
+                "id": str(server.get("id") or uuid.uuid4()),
+                "name": str(server.get("name") or address),
+                "address": address,
+                "port": port,
+            })
+        self.addons_config["saved_servers"] = normalized_servers
+
+    def _get_installation_display_label(self, inst):
+        return f"{inst.get('name', 'Unnamed')} • {inst.get('loader', 'Vanilla')} {inst.get('version', 'latest-release')}"
+
+    def _refresh_quick_join_installation_values(self):
+        if not hasattr(self, 'quick_join_install_combo'):
+            return
+        labels = {}
+        values = []
+        for idx, inst in enumerate(self.installations):
+            label = self._get_installation_display_label(inst)
+            values.append(label)
+            labels[label] = idx
+        self.quick_join_installation_labels = labels
+        self.quick_join_install_combo.config(values=values, state="readonly" if values else "disabled")
+
+        selected = self.quick_join_install_var.get() if hasattr(self, 'quick_join_install_var') else ""
+        if selected in labels:
+            return
+
+        fallback = ""
+        current_idx = getattr(self, 'current_installation_index', 0)
+        if 0 <= current_idx < len(values):
+            fallback = values[current_idx]
+        elif values:
+            fallback = values[0]
+        self.quick_join_install_var.set(fallback)
+
+    def _format_duration(self, total_seconds):
+        total_seconds = max(0, int(total_seconds))
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, _seconds = divmod(remainder, 60)
+        if hours and minutes:
+            return f"{hours}h {minutes}m"
+        if hours:
+            return f"{hours}h"
+        return f"{minutes}m"
+
+    def _format_timestamp_short(self, iso_value):
+        if not iso_value:
+            return "Never"
+        try:
+            return datetime.fromisoformat(str(iso_value)).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            return str(iso_value)
+
+    def render_playtime_tracker(self):
+        if not hasattr(self, 'playtime_list_frame'):
+            return
+
+        self._ensure_addons_config_defaults()
+        for widget in self.playtime_list_frame.winfo_children():
+            widget.destroy()
+
+        tracker = self.addons_config.get("playtime_tracker", {})
+        total_seconds = 0
+        total_launches = 0
+        entries = []
+        installations_by_id = {
+            inst.get("id"): inst for inst in self.installations if inst.get("id")
+        }
+
+        for inst_id, stats in tracker.items():
+            if not isinstance(stats, dict):
+                continue
+            seconds = int(stats.get("seconds", 0) or 0)
+            launches = int(stats.get("launches", 0) or 0)
+            total_seconds += seconds
+            total_launches += launches
+            inst = installations_by_id.get(inst_id, {"name": "Unknown Installation", "loader": "-", "version": "-"})
+            entries.append((inst_id, inst, stats, seconds, launches))
+
+        self.playtime_total_lbl.config(text=f"Total Time: {self._format_duration(total_seconds)}")
+        self.playtime_launches_lbl.config(text=f"Launches: {total_launches}")
+
+        if not entries:
+            tk.Label(self.playtime_list_frame, text="No tracked play sessions yet. Launch a game to start collecting stats.", font=("Segoe UI", 10), bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(anchor="w")
+            return
+
+        entries.sort(key=lambda item: item[3], reverse=True)
+        for _inst_id, inst, stats, seconds, launches in entries:
+            row = tk.Frame(self.playtime_list_frame, bg=COLORS['card_bg'], pady=8)
+            row.pack(fill="x")
+            left = tk.Frame(row, bg=COLORS['card_bg'])
+            left.pack(side="left", fill="x", expand=True)
+            tk.Label(left, text=inst.get("name", "Unknown Installation"), font=("Segoe UI", 10, "bold"), bg=COLORS['card_bg'], fg=COLORS['text_primary']).pack(anchor="w")
+            tk.Label(left, text=f"{inst.get('loader', 'Vanilla')} {inst.get('version', 'latest-release')}  •  Last Played: {self._format_timestamp_short(stats.get('last_played_at'))}", font=("Segoe UI", 9), bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(anchor="w")
+
+            right = tk.Frame(row, bg=COLORS['card_bg'])
+            right.pack(side="right")
+            tk.Label(right, text=self._format_duration(seconds), font=("Segoe UI", 10, "bold"), bg=COLORS['card_bg'], fg=COLORS['text_primary']).pack(anchor="e")
+            tk.Label(right, text=f"{launches} launches", font=("Segoe UI", 9), bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(anchor="e")
+
+    def reset_playtime_tracker(self):
+        if not custom_askyesno("Reset Playtime", "Clear all tracked playtime and launch counts?", parent=self.root):
+            return
+        self._ensure_addons_config_defaults()
+        self.addons_config["playtime_tracker"] = {}
+        self.save_config(sync_ui=False)
+        self.render_playtime_tracker()
+
+    def _record_play_session(self, inst_id, session_seconds, server_address=None, server_port=None):
+        if not inst_id:
+            return
+        self._ensure_addons_config_defaults()
+
+        tracker = self.addons_config.setdefault("playtime_tracker", {})
+        stats = tracker.setdefault(inst_id, {})
+        stats["seconds"] = int(stats.get("seconds", 0) or 0) + max(0, int(session_seconds))
+        stats["launches"] = int(stats.get("launches", 0) or 0) + 1
+        stats["last_session_seconds"] = max(0, int(session_seconds))
+        stats["last_played_at"] = datetime.now().isoformat()
+        if server_address:
+            last_server = str(server_address)
+            if server_port:
+                last_server = f"{last_server}:{server_port}"
+            stats["last_server"] = last_server
+
+        for inst in self.installations:
+            if inst.get("id") == inst_id:
+                inst["last_played"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                break
+
+        self.save_config(sync_ui=False)
+        self.render_playtime_tracker()
+
+    def add_quick_join_server(self):
+        self._ensure_addons_config_defaults()
+        name = self.quick_join_name_var.get().strip() if hasattr(self, 'quick_join_name_var') else ""
+        address = self.quick_join_address_var.get().strip() if hasattr(self, 'quick_join_address_var') else ""
+        port = self.quick_join_port_var.get().strip() if hasattr(self, 'quick_join_port_var') else "25565"
+
+        if not address:
+            custom_showerror("Missing Address", "Enter a server address first.", parent=self.root)
+            return
+
+        if ":" in address and address.count(":") == 1:
+            host_part, maybe_port = address.rsplit(":", 1)
+            if maybe_port.isdigit():
+                address = host_part
+                if not port or port == "25565":
+                    port = maybe_port
+
+        if not port:
+            port = "25565"
+        if not port.isdigit():
+            custom_showerror("Invalid Port", "Server port must be a number.", parent=self.root)
+            return
+
+        saved_servers = self.addons_config.setdefault("saved_servers", [])
+        saved_servers.append({
+            "id": str(uuid.uuid4()),
+            "name": name or address,
+            "address": address,
+            "port": int(port)
+        })
+
+        self.quick_join_name_var.set("")
+        self.quick_join_address_var.set("")
+        self.quick_join_port_var.set("25565")
+        self.save_config(sync_ui=False)
+        self.render_quick_join_servers()
+
+    def remove_quick_join_server(self, server_id):
+        self._ensure_addons_config_defaults()
+        self.addons_config["saved_servers"] = [
+            srv for srv in self.addons_config.get("saved_servers", [])
+            if str(srv.get("id")) != str(server_id)
+        ]
+        self.save_config(sync_ui=False)
+        self.render_quick_join_servers()
+
+    def launch_saved_server(self, server_data):
+        if not self.installations:
+            custom_showerror("No Installation", "Create an installation before using Quick Join.", parent=self.root)
+            return
+
+        self._refresh_quick_join_installation_values()
+        selected_label = self.quick_join_install_var.get() if hasattr(self, 'quick_join_install_var') else ""
+        install_idx = self.quick_join_installation_labels.get(selected_label, getattr(self, 'current_installation_index', 0))
+        if install_idx is None or not (0 <= install_idx < len(self.installations)):
+            custom_showerror("Invalid Installation", "Select a valid installation for Quick Join.", parent=self.root)
+            return
+
+        self.launch_installation(
+            install_idx,
+            server_address=str(server_data.get("address", "")).strip(),
+            server_port=server_data.get("port"),
+        )
+
+    def render_quick_join_servers(self):
+        if not hasattr(self, 'saved_servers_list_frame'):
+            return
+
+        self._ensure_addons_config_defaults()
+        for widget in self.saved_servers_list_frame.winfo_children():
+            widget.destroy()
+
+        saved_servers = self.addons_config.get("saved_servers", [])
+        if not saved_servers:
+            tk.Label(self.saved_servers_list_frame, text="No saved servers yet.", font=("Segoe UI", 10), bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(anchor="w")
+            return
+
+        for server in saved_servers:
+            row = tk.Frame(self.saved_servers_list_frame, bg=COLORS['card_bg'], pady=8)
+            row.pack(fill="x")
+            info = tk.Frame(row, bg=COLORS['card_bg'])
+            info.pack(side="left", fill="x", expand=True)
+            port = server.get("port", 25565)
+            tk.Label(info, text=server.get("name", "Unnamed Server"), font=("Segoe UI", 10, "bold"), bg=COLORS['card_bg'], fg=COLORS['text_primary']).pack(anchor="w")
+            tk.Label(info, text=f"{server.get('address', '')}:{port}", font=("Segoe UI", 9), bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(anchor="w")
+
+            btns = tk.Frame(row, bg=COLORS['card_bg'])
+            btns.pack(side="right")
+            self._make_btn(btns, "Join", style="primary", font_size=9, bold=True, command=lambda s=server: self.launch_saved_server(s)).pack(side="left", padx=(0, 6))
+            self._make_btn(btns, "Delete", style="secondary", font_size=9, command=lambda sid=server.get("id"): self.remove_quick_join_server(sid)).pack(side="left")
+
+    def get_screenshots_dir(self):
+        return os.path.join(self.minecraft_dir, "screenshots")
+
+    def _open_path(self, path):
+        try:
+            if os.name == "nt":
+                os.startfile(path)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", path], close_fds=True)
+            else:
+                subprocess.Popen(["xdg-open", path], close_fds=True)
+        except Exception as e:
+            custom_showerror("Open Failed", f"Could not open:\n{path}\n\n{e}", parent=self.root)
+
+    def _list_screenshot_files(self):
+        screenshots_dir = self.get_screenshots_dir()
+        if not os.path.isdir(screenshots_dir):
+            return []
+        items = []
+        for entry in os.listdir(screenshots_dir):
+            path = os.path.join(screenshots_dir, entry)
+            if os.path.isfile(path) and os.path.splitext(entry)[1].lower() in {".png", ".jpg", ".jpeg"}:
+                items.append(path)
+        items.sort(key=lambda item: os.path.getmtime(item), reverse=True)
+        return items
+
+    def _get_screenshot_thumbnail(self, path, size=(170, 96)):
+        try:
+            mtime = os.path.getmtime(path)
+            cache_key = (path, mtime, size)
+            if cache_key in self.screenshot_thumbnail_cache:
+                return self.screenshot_thumbnail_cache[cache_key]
+
+            img = Image.open(path).convert("RGB")
+            img.thumbnail(size, Image.Resampling.LANCZOS)
+            background = Image.new("RGB", size, COLORS.get('input_bg', '#1A1A1A'))
+            offset_x = max(0, (size[0] - img.width) // 2)
+            offset_y = max(0, (size[1] - img.height) // 2)
+            background.paste(img, (offset_x, offset_y))
+            photo = ImageTk.PhotoImage(background)
+            self.screenshot_thumbnail_cache[cache_key] = photo
+            return photo
+        except Exception:
+            return None
+
+    def delete_screenshot(self, path):
+        if not custom_askyesno("Delete Screenshot", f"Delete '{os.path.basename(path)}'?", parent=self.root):
+            return
+        try:
+            os.remove(path)
+            self.save_config(sync_ui=False)
+            self.render_screenshot_browser()
+        except Exception as e:
+            custom_showerror("Delete Failed", f"Could not delete screenshot:\n{e}", parent=self.root)
+
+    def render_screenshot_browser(self):
+        if not hasattr(self, 'screenshot_grid_frame'):
+            return
+
+        for widget in self.screenshot_grid_frame.winfo_children():
+            widget.destroy()
+
+        screenshots = self._list_screenshot_files()
+        screenshots_dir = self.get_screenshots_dir()
+        if hasattr(self, 'screenshot_status_lbl'):
+            count = len(screenshots)
+            self.screenshot_status_lbl.config(text=f"{count} screenshot{'s' if count != 1 else ''} in {screenshots_dir}")
+
+        if not screenshots:
+            tk.Label(self.screenshot_grid_frame, text="No screenshots found yet.", font=("Segoe UI", 10), bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(anchor="w")
+            return
+
+        columns = 3
+        for column in range(columns):
+            self.screenshot_grid_frame.grid_columnconfigure(column, weight=1)
+
+        for index, path in enumerate(screenshots[:18]):
+            card = tk.Frame(self.screenshot_grid_frame, bg=COLORS.get('input_bg', '#1A1A1A'), padx=10, pady=10)
+            card.grid(row=index // columns, column=index % columns, sticky="nsew", padx=6, pady=6)
+
+            thumbnail = self._get_screenshot_thumbnail(path)
+            if thumbnail:
+                preview = tk.Label(card, image=thumbnail, bg=COLORS.get('input_bg', '#1A1A1A'))
+                preview.image = thumbnail  # type: ignore[attr-defined]
+            else:
+                preview = tk.Label(card, text="No Preview", width=20, height=6, bg=COLORS.get('input_bg', '#1A1A1A'), fg=COLORS['text_secondary'])
+            preview.pack(fill="x")
+
+            tk.Label(card, text=os.path.basename(path), font=("Segoe UI", 9, "bold"), bg=COLORS.get('input_bg', '#1A1A1A'), fg=COLORS['text_primary'], anchor="w").pack(fill="x", pady=(8, 2))
+            tk.Label(card, text=datetime.fromtimestamp(os.path.getmtime(path)).strftime("%Y-%m-%d %H:%M"), font=("Segoe UI", 8), bg=COLORS.get('input_bg', '#1A1A1A'), fg=COLORS['text_secondary'], anchor="w").pack(fill="x")
+
+            btns = tk.Frame(card, bg=COLORS.get('input_bg', '#1A1A1A'))
+            btns.pack(fill="x", pady=(8, 0))
+            self._make_btn(btns, "Open", style="secondary", font_size=8, command=lambda p=path: self._open_path(p)).pack(side="left")
+            self._make_btn(btns, "Delete", style="secondary", font_size=8, command=lambda p=path: self.delete_screenshot(p)).pack(side="right")
+
+    def refresh_addons_tab_state(self):
+        self._ensure_addons_config_defaults()
+
+        if hasattr(self, 'gh_sync_enabled'):
+            self.gh_sync_enabled.set(bool(self.addons_config.get("gh_sync_enabled", False)))
+        if hasattr(self, 'gh_repo_entry'):
+            self.gh_repo_entry.delete(0, tk.END)
+            self.gh_repo_entry.insert(0, str(self.addons_config.get("gh_repo", "")))
+        if hasattr(self, 'gh_token_entry'):
+            self.gh_token_entry.delete(0, tk.END)
+            self.gh_token_entry.insert(0, str(self.addons_config.get("gh_token", "")))
+
+        self._refresh_quick_join_installation_values()
+        self.render_playtime_tracker()
+        self.render_quick_join_servers()
+        self.render_screenshot_browser()
+
     def _save_addons_config(self):
+        self._ensure_addons_config_defaults()
         self.addons_config["gh_sync_enabled"] = self.gh_sync_enabled.get()
         self.save_config()
 
     def _save_gh_sync_settings(self):
+        self._ensure_addons_config_defaults()
         repo = self.gh_repo_entry.get().strip()
         token = self.gh_token_entry.get().strip()
         
@@ -9378,7 +10246,11 @@ How to use:
             # Determine command based on environment (Frozen vs Source)
             if getattr(sys, 'frozen', False):
                 base_dir = os.path.dirname(sys.executable)
-                agent_exe = os.path.join(base_dir, "agent.exe")
+                agent_candidates = [
+                    os.path.join(base_dir, "agent.exe"),
+                    os.path.join(base_dir, "agent"),
+                ]
+                agent_exe = next((path for path in agent_candidates if os.path.exists(path)), agent_candidates[0])
                 cmd = [agent_exe, self.config_dir]
                 cwd = base_dir
             else:
@@ -9484,6 +10356,7 @@ How to use:
             self.dir_entry.delete(0, tk.END)
             self.dir_entry.insert(0, path)
             self.load_versions()
+            self.render_screenshot_browser()
 
     def check_for_updates(self):
         self.update_status_lbl.config(text="Checking for updates...", fg=COLORS['text_secondary'])
@@ -9868,17 +10741,8 @@ How to use:
                 head = img.crop((8, 8, 16, 16))
                 return ImageTk.PhotoImage(head.resize((size, size), RESAMPLE_NEAREST))
         except: pass
-        
-        # Default Steve
-        try:
-            # Generate a simple blocky face
-            img = Image.new('RGB', (8, 8), color='#7F684E') # Brown
-            img.putpixel((1, 3), (255, 255, 255)) # Eyes
-            img.putpixel((2, 3), (60, 60, 160))
-            img.putpixel((5, 3), (255, 255, 255))
-            img.putpixel((6, 3), (60, 60, 160))
-            return ImageTk.PhotoImage(img.resize((size, size), RESAMPLE_NEAREST))
-        except: return None
+
+        return _build_missing_skin_head(size)
 
     def update_active_profile(self):
         if not self.profiles:
@@ -9975,6 +10839,9 @@ How to use:
                             "version": "latest-release", # Metadata placeholder
                             "loader": "Vanilla",
                             "icon": "icons/grass_block_side.png",
+                            "java_executable": "",
+                            "resolution_width": None,
+                            "resolution_height": None,
                             "last_played": "Never",
                             "created": "2024-01-01"
                         }]
@@ -9984,6 +10851,9 @@ How to use:
                         for inst in self.installations:
                             if "id" not in inst:
                                 inst["id"] = str(uuid.uuid4())
+                            inst.setdefault("java_executable", "")
+                            inst.setdefault("resolution_width", None)
+                            inst.setdefault("resolution_height", None)
                         print(f"Loaded {len(self.installations)} installations")
                     
                     idx = data.get("current_profile_index", 0)
@@ -10008,13 +10878,14 @@ How to use:
                     self.max_concurrent_mods = data.get("max_concurrent_mods", 3)
                     self.limit_download_speed_enabled = data.get("limit_download_speed_enabled", False)
                     self.max_download_speed = data.get("max_download_speed", 2048) # KB/s
-                    self.enable_modrinth = data.get("enable_modrinth", False)
-                    
-                    if hasattr(self, 'enable_modrinth_var'): self.enable_modrinth_var.set(self.enable_modrinth)
+                    self.enable_modrinth = True
+                    loaded_mods_view = str(data.get("installed_mods_view_mode", "grid")).lower()
+                    self.installed_mods_view_mode = loaded_mods_view if loaded_mods_view in ("grid", "list") else "grid"
                     
                     # Addons
                     if "addons" in data:
                         self.addons_config.update(data["addons"])
+                    self._ensure_addons_config_defaults()
 
                     # Load RPC
                     self.rpc_enabled = data.get("rpc_enabled", True)
@@ -10050,6 +10921,8 @@ How to use:
                     if hasattr(self, 'java_args_entry'):
                         self.java_args_entry.delete(0, tk.END)
                         self.java_args_entry.insert(0, self.java_args)
+
+                    self.refresh_addons_tab_state()
 
                     # Load Custom Directory
                     custom_dir = data.get("minecraft_dir", "")
@@ -10164,7 +11037,8 @@ How to use:
             "max_concurrent_mods": getattr(self, 'max_concurrent_mods', 3),
             "limit_download_speed_enabled": getattr(self, 'limit_download_speed_enabled', False),
             "max_download_speed": getattr(self, 'max_download_speed', 2048),
-            "enable_modrinth": getattr(self, 'enable_modrinth', True),
+            "enable_modrinth": True,
+            "installed_mods_view_mode": getattr(self, 'installed_mods_view_mode', 'grid'),
             "close_launcher": close_launcher_val,
             "minimize_to_tray": minimize_to_tray_val,
             "show_console": show_console_val,
@@ -10220,10 +11094,14 @@ How to use:
     def create_default_profile(self):
         self.profiles = [{"name": DEFAULT_USERNAME, "type": "offline", "skin_path": "", "uuid": ""}]
         self.installations = [{
+            "id": str(uuid.uuid4()),
             "name": "Latest Release",
             "version": "latest-release",
             "loader": "Vanilla",
             "icon": "icons/grass_block_side.png",
+            "java_executable": "",
+            "resolution_width": None,
+            "resolution_height": None,
             "last_played": "Never",
             "created": "2024-01-01"
         }]
@@ -10243,12 +11121,12 @@ How to use:
     def on_version_change(self, event):
         pass
 
-    def launch_installation(self, idx):
+    def launch_installation(self, idx, server_address=None, server_port=None):
         if 0 <= idx < len(self.installations):
             self.current_installation_index = idx
             self.show_tab("Play")
             self.update_installation_dropdown()
-            self.start_launch()
+            self.start_launch(server_address=server_address, server_port=server_port)
 
     def update_skin_indicator(self):
         if not hasattr(self, 'skin_indicator') or not self.skin_indicator.winfo_exists(): return
@@ -10729,7 +11607,43 @@ How to use:
                 d[inst["id"]] = inst
         return d
 
-    def start_launch(self, force_update=False):
+    def _normalize_java_executable_input(self, value):
+        raw_value = os.path.expandvars(os.path.expanduser(str(value or "").strip()))
+        if not raw_value or raw_value == "<Use Bundled Java Runtime>":
+            return ""
+
+        if os.path.isdir(raw_value):
+            candidates = [
+                os.path.join(raw_value, "bin", "java.exe"),
+                os.path.join(raw_value, "bin", "javaw.exe"),
+                os.path.join(raw_value, "bin", "java"),
+            ]
+            for candidate in candidates:
+                if os.path.isfile(candidate):
+                    return candidate
+            raise ValueError(f"No Java executable was found inside '{raw_value}'.")
+
+        if os.path.isfile(raw_value):
+            return raw_value
+
+        if shutil.which(raw_value):
+            return raw_value
+
+        raise ValueError(f"Java executable not found: {raw_value}")
+
+    def _normalize_installation_resolution_value(self, value, label):
+        raw_value = str(value or "").strip()
+        if not raw_value or raw_value.lower() == "auto":
+            return ""
+        if not raw_value.isdigit():
+            raise ValueError(f"Resolution {label} must be a number or 'Auto'.")
+
+        numeric_value = int(raw_value)
+        if numeric_value <= 0:
+            raise ValueError(f"Resolution {label} must be greater than 0.")
+        return str(numeric_value)
+
+    def start_launch(self, force_update=False, server_address=None, server_port=None):
         # Close any open menus
         self._close_all_menus()
         
@@ -10741,6 +11655,9 @@ How to use:
         inst = self.installations[idx]
         version_id = inst.get("version")
         loader = inst.get("loader", "Vanilla")
+        java_executable = inst.get("java_executable", "")
+        resolution_width = inst.get("resolution_width")
+        resolution_height = inst.get("resolution_height")
         
         if not version_id or version_id == "latest-release":
             # Heuristic for latest release if not specific
@@ -10771,9 +11688,13 @@ How to use:
         self.launch_opts_btn.config(state="disabled")
         # self.set_status("Launching Minecraft...") # Redundant with overlay
         inst_id = inst.get("id")
-        threading.Thread(target=self.launch_logic, args=(version_id, username, loader, force_update, inst_id), daemon=True).start()
+        threading.Thread(
+            target=self.launch_logic,
+            args=(version_id, username, loader, force_update, inst_id, java_executable, resolution_width, resolution_height, server_address, server_port),
+            daemon=True,
+        ).start()
 
-    def launch_logic(self, version, username, loader, force_update=False, inst_id=None):
+    def launch_logic(self, version, username, loader, force_update=False, inst_id=None, custom_java_executable="", resolution_width=None, resolution_height=None, server_address=None, server_port=None):
         mods_backup_path = None
         # Callback wrapper to update overlay
         def update_status(t):
@@ -10808,58 +11729,62 @@ How to use:
         local_skin_server = None
         try:
             launch_id = version
+            normalized_java_executable = self._normalize_java_executable_input(custom_java_executable)
             
             # --- Check for existing installations to avoid re-downloading ---
             installed_versions = [v['id'] for v in minecraft_launcher_lib.utils.get_installed_versions(self.minecraft_dir)]
 
             # Resolve Java for Installers (Fabric/Forge need Java to run their installer)
-            java_install_path = "java"
-            try:
-                # 1. Try Library Utility (No args)
-                rt = minecraft_launcher_lib.utils.get_java_executable()
-                
-                if rt and os.path.exists(rt):
-                    java_install_path = rt
-                elif shutil.which("java"):
-                    java_install_path = shutil.which("java")
-                else:
-                    # 2. Check Local Runtime Folder Manually
-                    runtime_dir = os.path.join(self.minecraft_dir, "runtime")
-                    local_java = None
-                    if os.path.exists(runtime_dir):
-                        for root, dirs, files in os.walk(runtime_dir):
-                            if "java.exe" in files:
-                                local_java = os.path.join(root, "java.exe")
-                                break
-                            elif "java" in files and sys.platform != "win32":
-                                local_java = os.path.join(root, "java")
-                                break
+            java_install_path = normalized_java_executable or "java"
+            if normalized_java_executable:
+                self.log(f"Using custom Java executable: {normalized_java_executable}")
+            else:
+                try:
+                    # 1. Try Library Utility (No args)
+                    rt = minecraft_launcher_lib.utils.get_java_executable()
                     
-                    if local_java:
-                        java_install_path = local_java
+                    if rt and os.path.exists(rt):
+                        java_install_path = rt
+                    elif shutil.which("java"):
+                        java_install_path = shutil.which("java")
                     else:
-                        # 3. No Java found - Install Vanilla first to fetch Runtime
-                        self.log("Java not found. Installing Vanilla version to fetch Runtime...")
-                        try:
-                            minecraft_launcher_lib.install.install_minecraft_version(version, self.minecraft_dir, callback=callback)
-                            # Scan again
-                            if os.path.exists(runtime_dir):
-                                for root, dirs, files in os.walk(runtime_dir):
-                                    if "java.exe" in files:
-                                        java_install_path = os.path.join(root, "java.exe")
-                                        break
-                                    elif "java" in files and sys.platform != "win32":
-                                        java_install_path = os.path.join(root, "java")
-                                        break
-                        except Exception as e:
-                            self.log(f"Failed to install vanilla runtime: {e}")
-                            if "launchermeta.mojang.com" in str(e) or "getaddrinfo failed" in str(e):
-                                self.log("Network Error: Could not connect to Mojang. Check your internet.")
+                        # 2. Check Local Runtime Folder Manually
+                        runtime_dir = os.path.join(self.minecraft_dir, "runtime")
+                        local_java = None
+                        if os.path.exists(runtime_dir):
+                            for root, dirs, files in os.walk(runtime_dir):
+                                if "java.exe" in files:
+                                    local_java = os.path.join(root, "java.exe")
+                                    break
+                                elif "java" in files and sys.platform != "win32":
+                                    local_java = os.path.join(root, "java")
+                                    break
+                        
+                        if local_java:
+                            java_install_path = local_java
+                        else:
+                            # 3. No Java found - Install Vanilla first to fetch Runtime
+                            self.log("Java not found. Installing Vanilla version to fetch Runtime...")
+                            try:
+                                minecraft_launcher_lib.install.install_minecraft_version(version, self.minecraft_dir, callback=callback)
+                                # Scan again
+                                if os.path.exists(runtime_dir):
+                                    for root, dirs, files in os.walk(runtime_dir):
+                                        if "java.exe" in files:
+                                            java_install_path = os.path.join(root, "java.exe")
+                                            break
+                                        elif "java" in files and sys.platform != "win32":
+                                            java_install_path = os.path.join(root, "java")
+                                            break
+                            except Exception as e:
+                                self.log(f"Failed to install vanilla runtime: {e}")
+                                if "launchermeta.mojang.com" in str(e) or "getaddrinfo failed" in str(e):
+                                    self.log("Network Error: Could not connect to Mojang. Check your internet.")
 
-                        if java_install_path == "java" and not shutil.which("java"):
-                             self.log("Warning: Could not resolve setup Java. Fabric/Forge installation might fail.")
-            except Exception as e:
-                self.log(f"Java resolution error: {e}")
+                            if java_install_path == "java" and not shutil.which("java"):
+                                 self.log("Warning: Could not resolve setup Java. Fabric/Forge installation might fail.")
+                except Exception as e:
+                    self.log(f"Java resolution error: {e}")
             
             if force_update:
                 self.log("Force Update enabled: Verifying and re-installing versions...")
@@ -10961,19 +11886,22 @@ How to use:
                 self.log(f"Offline UUID: {launch_uuid}")
                 
                 if self.auto_download_mod: # This toggle now means "Enable Skin Injection"
-                     use_injection = True
-                     injector_path = self.ensure_authlib_injector()
-                     
-                     # Start Local Skin Server
-                     try:
-                         local_skin_server = LocalSkinServer(port=0)
-                         skin_path = current_profile.get("skin_path") or self.skin_path
-                         skin_model = current_profile.get("skin_model", "classic")
-                         skin_server_url = local_skin_server.start(skin_path, username, launch_uuid, skin_model)
-                         self.log(f"Local Skin Server active at {skin_server_url}")
-                     except Exception as e:
-                         self.log(f"Failed to start local skin server: {e}")
-                         use_injection = False
+                     skin_path = current_profile.get("skin_path") or self.skin_path
+                     if skin_path and os.path.exists(skin_path):
+                         use_injection = True
+                         injector_path = self.ensure_authlib_injector()
+                         
+                         # Start Local Skin Server only when a real local skin exists.
+                         try:
+                             local_skin_server = LocalSkinServer(port=0)
+                             skin_model = current_profile.get("skin_model", "classic")
+                             skin_server_url = local_skin_server.start(skin_path, username, launch_uuid, skin_model)
+                             self.log(f"Local Skin Server active at {skin_server_url}")
+                         except Exception as e:
+                             self.log(f"Failed to start local skin server: {e}")
+                             use_injection = False
+                     else:
+                         self.log("Skin injection is enabled, but no local skin is selected. Launching without authlib-injector.")
 
             # Build Options
             jvm_args = [f"-Xmx{self.ram_allocation}M"]
@@ -11019,6 +11947,19 @@ How to use:
                 "launcherName": "MinecraftLauncher",
                 "gameDirectory": self.minecraft_dir
             }
+
+            if normalized_java_executable:
+                options["executablePath"] = normalized_java_executable
+
+            if resolution_width and resolution_height:
+                options["customResolution"] = True
+                options["resolutionWidth"] = str(resolution_width)
+                options["resolutionHeight"] = str(resolution_height)
+
+            if server_address:
+                options["server"] = str(server_address)
+                if server_port:
+                    options["port"] = str(server_port)
             
             self.log(f"Generating command for: {launch_id}")
             command = minecraft_launcher_lib.command.get_minecraft_command(launch_id, self.minecraft_dir, options) # type: ignore
@@ -11029,6 +11970,8 @@ How to use:
             rpc_details = "Playing Minecraft"
             if getattr(self, 'rpc_show_version', True):
                  rpc_details = f"Playing {version} ({loader})"
+            if server_address:
+                 rpc_details = f"Connecting to {server_address}"
             
             self.root.after(0, lambda: self.update_rpc("In Game", rpc_details, start=time.time()))
             
@@ -11046,6 +11989,7 @@ How to use:
                 errors='replace',
                 creationflags=creationflags
             )
+            session_started_at = time.time()
             
             if process.stdout:
                 for line in process.stdout:
@@ -11062,6 +12006,9 @@ How to use:
                             except: pass
 
             process.wait()
+            if inst_id:
+                session_seconds = max(0, int(time.time() - session_started_at))
+                self.root.after(0, lambda iid=inst_id, secs=session_seconds, srv=server_address, prt=server_port: self._record_play_session(iid, secs, srv, prt))
             self.root.after(0, self.root.deiconify)
             self.root.after(0, lambda: self.update_rpc("Idle", "In Launcher"))
         except Exception as e:

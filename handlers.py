@@ -145,8 +145,8 @@ class LocalSkinHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             resp = {
                 "meta": {
-                    "serverName": "Local Skin Server", 
-                    "implementationName": "NLC-Local", 
+                    "serverName": "NLC Skin Handler",
+                    "implementationName": "NLC Skin Handler",
                     "implementationVersion": "1.0.0"
                 },
                 "skinDomains": ["localhost", "127.0.0.1"],

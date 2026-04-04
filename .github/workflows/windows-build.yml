@@ -1,0 +1,98 @@
+name: Build Windows Artifacts
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    env:
+      PYTHONUTF8: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set Up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install Dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyinstaller
+          python -m pip install -r requirements.txt
+
+      - name: Read App Version
+        shell: pwsh
+        run: |
+          $version = python -c "import pathlib, re; text = pathlib.Path('config.py').read_text(encoding='utf-8'); match = re.search(r'CURRENT_VERSION\\s*=\\s*\"([^\"]+)\"', text); print(match.group(1) if match else '')"
+          if (-not $version) {
+            throw "Could not read CURRENT_VERSION from config.py"
+          }
+          "APP_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build Agent
+        shell: pwsh
+        run: python -m PyInstaller --noconfirm --clean agent.spec
+
+      - name: Build Launcher
+        shell: pwsh
+        run: python -m PyInstaller --noconfirm --clean alt.spec
+
+      - name: Build Installer
+        shell: pwsh
+        run: python -m PyInstaller --noconfirm --clean installer_app.spec
+
+      - name: Prepare Artifact Bundle
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path installer | Out-Null
+          Copy-Item -Force dist\NLCSetup.exe installer\NLCSetup.exe
+
+          New-Item -ItemType Directory -Force -Path release-assets | Out-Null
+          Copy-Item -Force dist\agent.exe release-assets\agent.exe
+          Copy-Item -Force dist\NewLauncher.exe release-assets\NewLauncher.exe
+          Copy-Item -Force dist\NLCSetup.exe release-assets\NLCSetup.exe
+
+      - name: Generate Checksums
+        shell: pwsh
+        run: |
+          $files = @(
+            "release-assets\agent.exe",
+            "release-assets\NewLauncher.exe",
+            "release-assets\NLCSetup.exe"
+          )
+          $lines = foreach ($file in $files) {
+            $hash = (Get-FileHash -Algorithm SHA256 $file).Hash.ToLower()
+            "$hash  $([System.IO.Path]::GetFileName($file))"
+          }
+          $lines | Set-Content -Path release-assets\SHA256SUMS.txt
+
+      - name: Upload Workflow Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build-v${{ env.APP_VERSION }}
+          path: release-assets/*
+          if-no-files-found: error
+
+      - name: Attach Assets To Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release-assets/agent.exe
+            release-assets/NewLauncher.exe
+            release-assets/NLCSetup.exe
+            release-assets/SHA256SUMS.txt
