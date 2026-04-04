@@ -6,11 +6,11 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[('logo.png', '.'), ('logo.ico', '.'), ('icons', 'icons'), ('wallpapers', 'wallpapers')],
-    hiddenimports=['skinpy', 'pypresence', 'pystray'],
+    hiddenimports=['skinpy', 'pypresence', 'tkinter', 'PIL.ImageTk', 'PIL._tkinter_finder'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=['pystray', 'gi'],
     noarchive=False,
     optimize=0,
 )

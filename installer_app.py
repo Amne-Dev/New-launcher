@@ -12,7 +12,7 @@ import winreg
 
 
 APP_NAME = "New Launcher"
-APP_VERSION = "2.5"
+APP_VERSION = "2.6"
 APP_PUBLISHER = "@amne-dev on github"
 APP_EXE = "NewLauncher.exe"
 AGENT_EXE = "agent.exe"

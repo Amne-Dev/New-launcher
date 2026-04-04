@@ -14,10 +14,49 @@ except AttributeError:
     AFFINE = Image.AFFINE # type: ignore
 
 def resource_path(relative_path):
-    """ Get absolute path to resource, works for dev and for PyInstaller """
-    # PyInstaller creates a temp folder and stores path in _MEIPASS
-    base_path = getattr(sys, "_MEIPASS", os.path.abspath("."))
-    return os.path.join(base_path, relative_path)
+    """Get absolute path to a bundled resource for dev/PyInstaller/AppImage runs."""
+    rel = relative_path.lstrip("/\\")
+
+    candidates = []
+
+    # PyInstaller one-file extraction directory (preferred when present).
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(meipass)
+
+    exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+    module_dir = os.path.dirname(os.path.abspath(__file__))
+
+    if getattr(sys, "frozen", False):
+        candidates.extend([
+            exe_dir,
+            os.path.dirname(exe_dir),
+            os.path.join(exe_dir, "..", "share", "new-launcher"),
+            os.path.join(exe_dir, "..", "share", "NewLauncher"),
+            os.path.join(exe_dir, "..", "resources"),
+        ])
+    else:
+        candidates.extend([
+            module_dir,
+            os.getcwd(),
+        ])
+
+    seen = set()
+    for base in candidates:
+        if not base:
+            continue
+        abs_base = os.path.abspath(base)
+        if abs_base in seen:
+            continue
+        seen.add(abs_base)
+
+        candidate = os.path.join(abs_base, rel)
+        if os.path.exists(candidate):
+            return candidate
+
+    # Final fallback keeps previous behavior for callers that create files later.
+    fallback_base = module_dir if not getattr(sys, "frozen", False) else (meipass or exe_dir)
+    return os.path.join(os.path.abspath(fallback_base), rel)
 
 _CACHED_MC_DIR = None
 def get_minecraft_dir():
