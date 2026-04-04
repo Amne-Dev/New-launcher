@@ -23,12 +23,13 @@
 
     <main class="terms-container">
         <h1>Getting Started</h1>
-        <p class="last-updated">Last Updated: 2026-01-20</p>
+        <p class="last-updated">Last Updated: 2026-04-04</p>
 
         <section>
             <h2>System Requirements</h2>
             <ul>
                 <li>Windows 10/11 (x64)</li>
+                <li>Linux x64 desktop with AppImage support</li>
                 <li>Java 17+ (bundled with installer or use system Java)</li>
                 <li>200 MB free disk for launcher + additional space for Minecraft installations</li>
             </ul>
@@ -41,6 +42,29 @@
                 <li>Run the installer and follow prompts.</li>
                 <li>Launch the app from the Start Menu or desktop shortcut.</li>
             </ol>
+        </section>
+
+        <section>
+            <h2>Installation (Linux AppImage)</h2>
+            <ol>
+                <li>Download the latest Linux <code>AppImage</code> from the <a href="https://github.com/Amne-Dev/New-launcher/releases" target="_blank">Releases</a> page.</li>
+                <li>Open a terminal in the folder where the file was downloaded.</li>
+                <li>Make the AppImage executable:</li>
+            </ol>
+            <pre><code>chmod +x NewLauncher-*-x86_64.AppImage</code></pre>
+            <ol start="4">
+                <li>Run it:</li>
+            </ol>
+            <pre><code>./NewLauncher-*-x86_64.AppImage</code></pre>
+            <p>If your distro does not open AppImages by double-clicking, launching it from the terminal is enough.</p>
+        </section>
+
+        <section>
+            <h2>Build on Linux From Source</h2>
+            <p>If you want to build the Linux AppImage yourself from this repository:</p>
+            <pre><code>chmod +x linux/build_appimage.sh
+./linux/build_appimage.sh</code></pre>
+            <p>The script creates a portable AppImage in the repository root.</p>
         </section>
 
         <section>

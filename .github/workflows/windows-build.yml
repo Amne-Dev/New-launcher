@@ -92,7 +92,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            release-assets/agent.exe
-            release-assets/NewLauncher.exe
             release-assets/NLCSetup.exe
             release-assets/SHA256SUMS.txt
