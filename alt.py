@@ -6023,13 +6023,13 @@ class MinecraftLauncher:
                 if loader_type == "Vanilla":
                     return version_id in installed_list
                 elif loader_type == "Fabric":
-                    return any("fabric" in iv.lower() and version_id in iv for iv in installed_list)
+                    return any("fabric" in iv.lower() and version_id in iv.split('-') for iv in installed_list)
                 elif loader_type == "Forge":
-                    return any("forge" in iv.lower() and version_id in iv for iv in installed_list)
+                    return any("forge" in iv.lower() and version_id in iv.split('-') for iv in installed_list)
                 else: 
                      # For other clients, check exact match + client name usually
                      # Broad check for anything that looks like a version match in installed list
-                     return any(version_id in iv for iv in installed_list)
+                     return any(version_id in iv.split('-') or version_id == iv for iv in installed_list)
             except:
                 pass
             return False
@@ -12334,7 +12334,7 @@ How to use:
                 found_fabric = None
                 if not force_update:
                     for vid in installed_versions:
-                        if "fabric" in vid and version in vid:
+                        if "fabric" in vid and version in vid.split('-'):
                              found_fabric = vid
                              break
                 
@@ -12353,7 +12353,7 @@ How to use:
                 found_forge = None
                 if not force_update:
                     for vid in installed_versions:
-                        if "forge" in vid and version in vid:
+                        if "forge" in vid and version in vid.split('-'):
                             found_forge = vid
                             break
                         
