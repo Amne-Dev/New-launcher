@@ -65,6 +65,7 @@ def addon_normalize_config(addons_config):
     normalized["gh_sync_enabled"] = bool(normalized.get("gh_sync_enabled", False))
     normalized["gh_repo"] = str(normalized.get("gh_repo", "") or "")
     normalized["gh_token"] = str(normalized.get("gh_token", "") or "")
+    normalized["curseforge_api_key"] = str(normalized.get("curseforge_api_key", "") or "")
 
     if not isinstance(normalized.get("playtime_tracker"), dict):
         normalized["playtime_tracker"] = {}
@@ -180,10 +181,17 @@ def addon_list_screenshot_files(minecraft_dir):
     return {"dir": screenshots_dir, "items": items}
 
 
-def addon_delete_screenshot(path):
+def addon_delete_screenshot(path, minecraft_dir=None):
     target_path = os.path.abspath(str(path))
+    if minecraft_dir:
+        screenshots_dir = os.path.realpath(os.path.join(str(minecraft_dir), "screenshots"))
+        resolved_target = os.path.realpath(target_path)
+        if os.path.commonpath((screenshots_dir, resolved_target)) != screenshots_dir:
+            raise ValueError("Screenshot path is outside the configured screenshots folder.")
     if not os.path.exists(target_path):
         raise FileNotFoundError(target_path)
+    if os.path.splitext(target_path)[1].lower() not in {".png", ".jpg", ".jpeg"}:
+        raise ValueError("Only screenshot image files can be deleted.")
     os.remove(target_path)
     return {"deleted": target_path}
 
@@ -642,7 +650,7 @@ def handle_addons_list_screenshots(payload):
 
 def handle_addons_delete_screenshot(payload):
     try:
-        return {"status": "success", "data": addon_delete_screenshot(payload.get("path", ""))}
+        return {"status": "success", "data": addon_delete_screenshot(payload.get("path", ""), payload.get("minecraft_dir"))}
     except Exception as e:
         return {"status": "error", "msg": str(e)}
 

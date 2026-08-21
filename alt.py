@@ -18,6 +18,7 @@ import requests
 import io
 import webbrowser
 import zipfile
+import tempfile
 try:
     import certifi
 except ImportError:
@@ -135,6 +136,10 @@ def _patched_requests_session_request(session, method, url, **kwargs):
     if kwargs.get("verify", None) is None and _REQUESTS_CA_BUNDLE:
         kwargs["verify"] = _REQUESTS_CA_BUNDLE
 
+    # A missing timeout leaves the UI's worker threads hanging indefinitely on a
+    # broken connection.  Individual calls can still request a longer timeout.
+    kwargs.setdefault("timeout", (10, 60))
+
     try:
         return _ORIG_REQUESTS_SESSION_REQUEST(session, method, url, **kwargs)
     except OSError as exc:
@@ -145,9 +150,12 @@ def _patched_requests_session_request(session, method, url, **kwargs):
                 os.environ.pop(var_name, None)
             except Exception:
                 pass
+        # Never silently fall back to an unverified TLS connection.  Requests
+        # will use its bundled/default trust store after the invalid override
+        # has been cleared.
         retry_kwargs = dict(kwargs)
-        retry_kwargs["verify"] = False
-        logging.warning("Invalid TLS CA bundle path; retrying request without custom CA: %s", url)
+        retry_kwargs.pop("verify", None)
+        logging.warning("Invalid TLS CA bundle path; retrying with the default trust store: %s", url)
         return _ORIG_REQUESTS_SESSION_REQUEST(session, method, url, **retry_kwargs)
 
 
@@ -171,6 +179,63 @@ def normalize_version_text(value):
     if not value:
         return ""
     return value.replace(INSTALL_MARK, "").strip()
+
+
+def _safe_extract_zip(archive, destination):
+    """Extract a ZIP without allowing its entries to escape *destination*."""
+    destination_path = os.path.realpath(destination)
+    with zipfile.ZipFile(archive, "r") as zip_file:
+        for member in zip_file.infolist():
+            # Unix symlinks encoded in ZIP metadata can redirect a later file
+            # outside the target folder even when the filename looks harmless.
+            is_symlink = ((member.external_attr >> 16) & 0o170000) == 0o120000
+            member_path = os.path.realpath(os.path.join(destination_path, member.filename))
+            if is_symlink or os.path.commonpath((destination_path, member_path)) != destination_path:
+                raise ValueError(f"Unsafe archive entry rejected: {member.filename}")
+        zip_file.extractall(destination_path)
+
+
+def _atomic_download(url, destination, *, cancel_event=None, chunk_size=64 * 1024, progress=None, headers=None, rate_limit_kib=0, expected_sha1=None):
+    """Download to a sibling temporary file, then atomically publish it."""
+    destination = os.path.abspath(destination)
+    os.makedirs(os.path.dirname(destination), exist_ok=True)
+    temporary = f"{destination}.{uuid.uuid4().hex}.part"
+    try:
+        with requests.get(url, stream=True, headers=headers, timeout=(10, 60)) as response:
+            response.raise_for_status()
+            total = int(response.headers.get("Content-Length") or 0)
+            downloaded = 0
+            started_at = time.monotonic()
+            with open(temporary, "wb") as output:
+                for chunk in response.iter_content(chunk_size=chunk_size):
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise RuntimeError("Cancelled")
+                    if not chunk:
+                        continue
+                    output.write(chunk)
+                    downloaded += len(chunk)
+                    if rate_limit_kib:
+                        target_elapsed = downloaded / (max(1, rate_limit_kib) * 1024)
+                        remaining = target_elapsed - (time.monotonic() - started_at)
+                        if remaining > 0:
+                            time.sleep(remaining)
+                    if progress is not None:
+                        progress(downloaded, total)
+        if expected_sha1:
+            digest = hashlib.sha1()
+            with open(temporary, "rb") as downloaded_file:
+                for block in iter(lambda: downloaded_file.read(1024 * 1024), b""):
+                    digest.update(block)
+            if digest.hexdigest().lower() != str(expected_sha1).lower():
+                raise ValueError("Downloaded file failed checksum verification.")
+        os.replace(temporary, destination)
+        return destination
+    finally:
+        try:
+            if os.path.exists(temporary):
+                os.remove(temporary)
+        except OSError:
+            logging.warning("Could not remove incomplete download: %s", temporary)
 
 
 def _get_lib_name_without_version(lib):
@@ -979,6 +1044,7 @@ class CustomMessagebox(tk.Toplevel):
                 use_custom_chrome = False
         
         self.result = None
+        self._default_button = None
         target_parent = parent
         self._target_parent = target_parent
         self._parent_focus_bind_id = None
@@ -1001,6 +1067,7 @@ class CustomMessagebox(tk.Toplevel):
         accent_col = COLORS.get('play_btn_green', '#2D8F36')
         
         self.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.bind("<Escape>", lambda _event: self.on_close())
         content_root = self
         if use_custom_chrome:
             chrome = tk.Frame(self, bg=COLORS.get('sidebar_bg', '#141414'), highlightthickness=0, bd=0)
@@ -1072,9 +1139,10 @@ class CustomMessagebox(tk.Toplevel):
                 buttons = [("OK", True, "primary")]
                 
         for text, val, style in buttons:
-            b_bg = accent_col if style == "primary" else "#555555"
+            is_danger = style == "danger"
+            b_bg = COLORS.get('error_red', '#E74C3C') if is_danger else (accent_col if style == "primary" else "#555555")
             b_fg = "white"
-            b_hover_bg = COLORS.get('play_btn_green', '#2D8F36') if style == "primary" else "#666666"
+            b_hover_bg = "#C42B1C" if is_danger else (COLORS.get('play_btn_green', '#2D8F36') if style == "primary" else "#666666")
             
             btn = tk.Button(btn_inner, text=text, bg=b_bg, fg=b_fg, 
                            font=("Segoe UI", 9, "bold"), relief="flat",
@@ -1092,6 +1160,8 @@ class CustomMessagebox(tk.Toplevel):
             
             btn.bind("<Enter>", on_enter)
             btn.bind("<Leave>", on_leave)
+            if self._default_button is None and style in ("primary", "danger"):
+                self._default_button = btn
             
         # Centering Logic
         self.update_idletasks()
@@ -1118,17 +1188,22 @@ class CustomMessagebox(tk.Toplevel):
                     self.after(delay, _finalize_windows_dialog_show)
                 except Exception:
                     pass
-        if os.name != "nt" and target_parent and target_parent.winfo_exists():
+        if target_parent and target_parent.winfo_exists():
             self.transient(target_parent)
-        if os.name != "nt" and target_parent and target_parent.winfo_exists():
+        if target_parent and target_parent.winfo_exists():
             try:
                 self._parent_focus_bind_id = target_parent.bind("<FocusIn>", self._on_parent_focus, add="+")
             except Exception:
                 self._parent_focus_bind_id = None
-        if os.name != "nt":
-            self.bind("<Map>", self._on_map_restore_focus, add="+")
+        self.bind("<Map>", self._on_map_restore_focus, add="+")
+        try:
             self.grab_set()
-            self.after(0, self._restore_modal_focus)
+        except tk.TclError:
+            logging.warning("Unable to acquire modal input for dialog '%s'.", title)
+        if self._default_button is not None:
+            self.bind("<Return>", lambda _event: self._default_button.invoke())
+            self.after(0, self._default_button.focus_set)
+        self.after(0, self._restore_modal_focus)
         self.wait_window()
 
     def _drag_start(self, event):
@@ -1160,6 +1235,23 @@ class CustomMessagebox(tk.Toplevel):
         
     def on_click(self, val):
         self.result = val
+        target_parent = getattr(self, "_target_parent", None)
+        bind_id = getattr(self, "_parent_focus_bind_id", None)
+        if target_parent and bind_id:
+            try:
+                target_parent.unbind("<FocusIn>", bind_id)
+            except Exception:
+                pass
+        manager = getattr(self, "_dialog_manager", None)
+        if manager is not None:
+            try:
+                manager._unregister_dialog_window(self)
+            except Exception:
+                pass
+        try:
+            self.grab_release()
+        except tk.TclError:
+            pass
         self.destroy()
         
     def on_close(self):
@@ -1177,6 +1269,10 @@ class CustomMessagebox(tk.Toplevel):
             except Exception:
                 pass
         self.result = None
+        try:
+            self.grab_release()
+        except tk.TclError:
+            pass
         self.destroy()
 
 def _parse_messagebox_args(args, kwargs):
@@ -1356,26 +1452,111 @@ def _build_missing_skin_head(size):
 
 def custom_showinfo(*args, **kwargs):
     title, message, parent = _parse_messagebox_args(args, kwargs)
-    CustomMessagebox(title, message, type="info", parent=parent)
+    _show_popup(title, message, type="info", parent=parent)
     return "ok"
 
 
 def custom_showwarning(*args, **kwargs):
     title, message, parent = _parse_messagebox_args(args, kwargs)
-    CustomMessagebox(title, message, type="warning", parent=parent)
+    _show_popup(title, message, type="warning", parent=parent)
     return "ok"
 
 
 def custom_showerror(*args, **kwargs):
     title, message, parent = _parse_messagebox_args(args, kwargs)
-    CustomMessagebox(title, message, type="error", parent=parent)
+    _show_popup(title, message, type="error", parent=parent)
     return "ok"
 
 
 def custom_askyesno(*args, **kwargs):
     title, message, parent = _parse_messagebox_args(args, kwargs)
-    mbox = CustomMessagebox(title, message, type="yesno", parent=parent)
-    return bool(mbox.result)
+    return bool(_show_popup(title, message, type="yesno", parent=parent))
+
+
+class PopupManager:
+    """One owner for application dialogs, including duplicate suppression."""
+    def __init__(self, root):
+        self.root = root
+        self._active = set()
+
+    def show(self, title, message, *, type="info", buttons=None, parent=None):
+        signature = (type, str(title), str(message))
+        if signature in self._active:
+            logging.info("Suppressed duplicate popup: %s", title)
+            return None
+        self._active.add(signature)
+        try:
+            dialog = CustomMessagebox(title, message, type=type, buttons=buttons, parent=parent or self.root)
+            return dialog.result
+        finally:
+            self._active.discard(signature)
+
+
+def _show_popup(title, message, *, type="info", buttons=None, parent=None):
+    resolved_parent = _resolve_dialog_parent(parent)
+    manager = getattr(resolved_parent, "_nlc_popup_manager", None) if resolved_parent else None
+    if manager is not None:
+        return manager.show(title, message, type=type, buttons=buttons, parent=resolved_parent)
+    dialog = CustomMessagebox(title, message, type=type, buttons=buttons, parent=resolved_parent)
+    return dialog.result
+
+
+class ToastManager:
+    """Lightweight, deduplicated feedback for completed background work."""
+    def __init__(self, root):
+        self.root = root
+        self._toasts = []
+        self._signatures = set()
+
+    def show(self, message, *, kind="success", duration=3600):
+        signature = (kind, str(message))
+        if signature in self._signatures:
+            return
+        self._signatures.add(signature)
+        colors = {
+            "success": COLORS.get("success_green", "#2ECC71"),
+            "warning": "#E67E22",
+            "error": COLORS.get("error_red", "#E74C3C"),
+            "info": COLORS.get("accent_blue", "#3498DB"),
+        }
+        toast = tk.Toplevel(self.root)
+        toast.overrideredirect(True)
+        toast.configure(bg=COLORS["card_bg"])
+        toast.attributes("-topmost", True)
+        body = tk.Frame(toast, bg=COLORS["card_bg"], padx=14, pady=10)
+        body.pack(fill="both", expand=True)
+        tk.Label(body, text="●", fg=colors.get(kind, colors["info"]), bg=COLORS["card_bg"], font=("Segoe UI", 10, "bold")).pack(side="left", padx=(0, 8))
+        tk.Label(body, text=str(message), fg=COLORS["text_primary"], bg=COLORS["card_bg"], font=("Segoe UI", 9), wraplength=330, justify="left").pack(side="left")
+
+        def dismiss():
+            if toast in self._toasts:
+                self._toasts.remove(toast)
+            self._signatures.discard(signature)
+            try:
+                toast.destroy()
+            except tk.TclError:
+                pass
+            self._reposition()
+
+        toast.bind("<Button-1>", lambda _event: dismiss())
+        body.bind("<Button-1>", lambda _event: dismiss())
+        self._toasts.append(toast)
+        self._reposition()
+        toast.after(duration, dismiss)
+
+    def _reposition(self):
+        self._toasts[:] = [toast for toast in self._toasts if toast.winfo_exists()]
+        try:
+            self.root.update_idletasks()
+            x = self.root.winfo_rootx() + self.root.winfo_width() - 20
+            y = self.root.winfo_rooty() + 54
+            for toast in self._toasts:
+                toast.update_idletasks()
+                width, height = toast.winfo_reqwidth(), toast.winfo_reqheight()
+                toast.geometry(f"+{x - width}+{y}")
+                y += height + 8
+        except tk.TclError:
+            pass
 
 
 # Route all tkinter messagebox calls through custom dialogs so every prompt
@@ -1483,6 +1664,9 @@ class MinecraftLauncher:
             self.root._nlc_app = self  # type: ignore[attr-defined]
         except Exception:
             pass
+        self.popup_manager = PopupManager(self.root)
+        self.toast_manager = ToastManager(self.root)
+        self.root._nlc_popup_manager = self.popup_manager  # type: ignore[attr-defined]
         _ensure_window_icon(self.root, owner=self.root)
         if os.name != 'nt':
             try:
@@ -1561,6 +1745,7 @@ class MinecraftLauncher:
         self._config_save_after_id = None
         self._config_save_delay_ms = 250
         self._config_sync_ui_pending = False
+        self._launch_in_progress = False
         
         # Download Queue State
         self.download_tasks = {} # id -> {ui_elements, data}
@@ -1718,7 +1903,10 @@ class MinecraftLauncher:
             mp_file = os.path.join(self.config_dir, "modpacks.json")
             if os.path.exists(mp_file):
                 with open(mp_file, "r") as f:
-                    self.modpacks = json.load(f)
+                    loaded = json.load(f)
+                    if not isinstance(loaded, list):
+                        raise ValueError("Modpacks configuration must be a list.")
+                    self.modpacks = [pack for pack in loaded if isinstance(pack, dict)]
         except Exception as e:
             self.log(f"Error loading modpacks: {e}")
 
@@ -1731,8 +1919,15 @@ class MinecraftLauncher:
             self.log(f"Error saving modpacks: {e}")
 
     def get_modpack_dir(self, pack_id):
-        # Base dir for modpacks
-        base = os.path.join(getattr(self, 'config_dir', os.getcwd()), "modpacks", pack_id)
+        # IDs are persisted user data; do not let a malformed config traverse
+        # out of the launcher's modpack storage before a delete/copy operation.
+        safe_id = os.path.basename(str(pack_id or "").strip())
+        if not safe_id or safe_id in {".", ".."}:
+            raise ValueError("Invalid modpack identifier.")
+        root = os.path.abspath(os.path.join(getattr(self, 'config_dir', os.getcwd()), "modpacks"))
+        base = os.path.abspath(os.path.join(root, safe_id))
+        if os.path.commonpath((root, base)) != root:
+            raise ValueError("Modpack path is outside launcher storage.")
         if not os.path.exists(base):
             os.makedirs(base, exist_ok=True)
         return base
@@ -3128,6 +3323,33 @@ class MinecraftLauncher:
         self.queue_list_frame = tk.Frame(self.queue_container, bg=COLORS['sidebar_bg'])
         self.queue_list_frame.pack(fill="x")
 
+    def _show_skeleton_list(self, parent, *, rows=3, card_height=96, padx=20, pady=8):
+        """Render lightweight structural placeholders while async content loads."""
+        for child in parent.winfo_children():
+            child.destroy()
+
+        surface = COLORS.get('card_bg', '#3A3B3C')
+        placeholder = COLORS.get('input_bg', '#48494A')
+        muted_placeholder = COLORS.get('separator', '#454545')
+        for index in range(rows):
+            card = tk.Frame(parent, bg=surface, height=card_height, padx=14, pady=12)
+            card.pack(fill="x", padx=padx, pady=(pady if index else 0, pady))
+            card.pack_propagate(False)
+
+            avatar = tk.Frame(card, bg=placeholder, width=52, height=52)
+            avatar.pack(side="left", padx=(0, 14))
+            avatar.pack_propagate(False)
+
+            lines = tk.Frame(card, bg=surface)
+            lines.pack(side="left", fill="both", expand=True, pady=2)
+            tk.Frame(lines, bg=placeholder, height=13, width=210).pack(anchor="w", pady=(2, 10))
+            tk.Frame(lines, bg=muted_placeholder, height=9, width=320).pack(anchor="w", pady=(0, 7))
+            tk.Frame(lines, bg=muted_placeholder, height=9, width=160).pack(anchor="w")
+
+            action = tk.Frame(card, bg=placeholder, width=70, height=30)
+            action.pack(side="right", padx=(12, 0))
+            action.pack_propagate(False)
+
     def add_download_task(self, name, type_str="file"):
         # Show container if hidden with fade-in effect
         if not self.queue_container.winfo_viewable():
@@ -3187,6 +3409,7 @@ class MinecraftLauncher:
         pb.pack(fill="x", pady=3)
         
         self.download_tasks[task_id] = {
+            "border_frame": border_frame,
             "frame": frame,
             "pb": pb,
             "detail_lbl": detail_lbl,
@@ -3220,7 +3443,11 @@ class MinecraftLauncher:
         data = self.download_tasks[task_id]
         
         if progress is not None:
-            data['pb']['value'] = progress
+            data['pb']['value'] = max(0, min(100, float(progress)))
+
+        if status is not None:
+            # Keep the task title useful without adding another cramped line.
+            data['detail_lbl'].config(fg=COLORS['text_secondary'])
             
         if detail is not None:
              data['detail_lbl'].config(text=detail)
@@ -3252,6 +3479,16 @@ class MinecraftLauncher:
         
         # Wait 2 sec
         self.root.after(2000, remove)
+        if hasattr(self, "toast_manager"):
+            self.toast_manager.show("Download completed", kind="success")
+
+    def fail_download_task(self, task_id, message="Download failed"):
+        if task_id not in self.download_tasks:
+            return
+        data = self.download_tasks[task_id]
+        data['detail_lbl'].config(text=message, fg=COLORS.get('error_red', '#E74C3C'))
+        if 'border_frame' in data:
+            data['border_frame'].config(bg=COLORS.get('error_red', '#E74C3C'))
 
     def apply_accent_color(self, name):
         # Update Data
@@ -4598,10 +4835,15 @@ class MinecraftLauncher:
 
     # --- Smooth Scroll Utilities ---
     def _get_scroll_impulse(self, event):
+        """Normalise wheel and precision-touchpad input to pixel impulses."""
         try:
             delta = getattr(event, "delta", 0)
             if delta:
-                return -delta / 120.0 * 40
+                # Windows wheel mice normally report ±120; precision touchpads
+                # often report much smaller values.  The old conversion ignored
+                # those small deltas because the animation stopped below 0.5.
+                direction = -1 if delta > 0 else 1
+                return direction * max(18, min(72, abs(float(delta)) / 3))
         except Exception:
             pass
 
@@ -4622,10 +4864,14 @@ class MinecraftLauncher:
         attr_name = f"_nlc_wheel_bind_{bind_tag}"
         if getattr(widget, attr_name, False):
             return
-        widget.bind("<MouseWheel>", handler)
-        widget.bind("<Button-4>", handler)
-        widget.bind("<Button-5>", handler)
+        # Add, rather than replace, widget-native bindings (notably Combobox
+        # and Text).  This fixes wheel support without breaking controls.
+        widget.bind("<MouseWheel>", handler, add="+")
+        widget.bind("<Button-4>", handler, add="+")
+        widget.bind("<Button-5>", handler, add="+")
         setattr(widget, attr_name, True)
+        if isinstance(widget, tk.Canvas):
+            widget._nlc_canvas_wheel_bound = True  # type: ignore[attr-defined]
 
     def _smooth_scroll(self, canvas, event):
         """Smooth mousewheel scrolling with inertia for any canvas widget."""
@@ -4639,13 +4885,16 @@ class MinecraftLauncher:
         if cid in self._scroll_anim_ids:
             try: self.root.after_cancel(self._scroll_anim_ids[cid])
             except: pass
+            self._scroll_anim_ids.pop(cid, None)
         
         # Add velocity from scroll event (accumulate for fast flicks)
         impulse = self._get_scroll_impulse(event)
         if not impulse:
             return
-        current = self._scroll_velocities.get(cid, 0)
-        self._scroll_velocities[cid] = current + impulse
+        current = self._scroll_velocities.get(cid, 0.0)
+        # A hard cap prevents a burst of wheel events from coasting across an
+        # entire page and makes scrolling predictable at all window sizes.
+        self._scroll_velocities[cid] = max(-360.0, min(360.0, current + impulse))
         
         self._animate_scroll(canvas, cid)
     
@@ -4680,19 +4929,25 @@ class MinecraftLauncher:
         bbox = canvas.bbox("all")
         if not bbox:
             self._scroll_velocities.pop(cid, None)
+            self._scroll_anim_ids.pop(cid, None)
             return
         total_height = bbox[3] - bbox[1]
         canvas_height = canvas.winfo_height()
         
         if total_height <= canvas_height:
             self._scroll_velocities.pop(cid, None)
+            self._scroll_anim_ids.pop(cid, None)
             return
         
         fraction = velocity / total_height
-        canvas.yview_moveto(top + fraction)
+        max_top = max(0.0, 1.0 - (canvas_height / total_height))
+        canvas.yview_moveto(max(0.0, min(max_top, top + fraction)))
+        callback = getattr(canvas, "_nlc_after_scroll", None)
+        if callable(callback):
+            callback()
         
         # Apply friction
-        self._scroll_velocities[cid] = velocity * 0.82
+        self._scroll_velocities[cid] = velocity * 0.78
         
         # Schedule next frame (~16ms for 60fps)
         self._scroll_anim_ids[cid] = self.root.after(16, self._animate_scroll, canvas, cid)
@@ -4701,6 +4956,16 @@ class MinecraftLauncher:
         """Bind smooth scrolling to a widget and all its children for a specific canvas."""
         if not widget or not widget.winfo_exists():
             return
+        # Many panels previously bound the wheel only after entering a child
+        # frame, so the blank area around content appeared unscrollable.  Give
+        # every canvas a handler unless that panel already installed a custom
+        # one (such as Modrinth pagination).
+        if not getattr(canvas, "_nlc_canvas_wheel_bound", False):
+            self._bind_wheel_events(
+                canvas,
+                lambda event, target=canvas: self._smooth_scroll(target, event),
+                f"canvas_{id(canvas)}",
+            )
         canvas_id = id(canvas)
         already_bound = getattr(widget, "_nlc_scroll_canvas_id", None)
         if already_bound != canvas_id:
@@ -6038,9 +6303,16 @@ class MinecraftLauncher:
             try:
                 raw_versions = []
                 if loader_type == "Vanilla":
-                    vlist = minecraft_launcher_lib.utils.get_version_list()
-                    for v in vlist:
-                        raw_versions.append({'id': v['id'], 'type': v['type']})
+                    cached = getattr(self, "cached_vanilla_versions", None)
+                    if cached:
+                        raw_versions = list(cached)
+                    else:
+                        vlist = minecraft_launcher_lib.utils.get_version_list()
+                        raw_versions = [
+                            {'id': v['id'], 'type': v.get('type', 'release')}
+                            for v in vlist if isinstance(v, dict) and v.get('id')
+                        ]
+                        self.cached_vanilla_versions = list(raw_versions)
                 elif loader_type == "Fabric":
                     # Real Fetch using library
                     fab_list = minecraft_launcher_lib.fabric.get_all_minecraft_versions()
@@ -7383,6 +7655,13 @@ class MinecraftLauncher:
         create_mp_btn = self._make_btn(top_bar, "+ Create New Modpack", style="primary",
                                          font_size=10, bold=True, command=self.show_create_modpack_dialog)
         create_mp_btn.pack(side="right")
+        self._make_btn(
+            top_bar,
+            "Import CurseForge Pack",
+            style="secondary",
+            font_size=10,
+            command=self.show_import_curseforge_dialog,
+        ).pack(side="right", padx=(0, 8))
 
         # Config Warning
         if not self.modpacks:
@@ -7565,9 +7844,10 @@ class MinecraftLauncher:
         dialog.title(f"Mods in {pack['name']}")
         dialog.geometry("700x600")
         dialog.config(bg=COLORS['main_bg'])
-        if os.name != "nt":
-            dialog.transient(self.root)
-            dialog.grab_set()
+        # This is a destructive-management surface; it must be modal on every
+        # supported platform so actions cannot land in the launcher behind it.
+        dialog.transient(self.root)
+        dialog.grab_set()
         
         # Center on parent
         dialog.update_idletasks()
@@ -7598,10 +7878,7 @@ class MinecraftLauncher:
         actions.pack(side="right")
         
         def open_folder():
-            try:
-                os.startfile(mods_dir)
-            except:
-                pass
+            self._open_path(mods_dir)
         
         def refresh_list():
             render_mods()
@@ -7648,7 +7925,17 @@ class MinecraftLauncher:
         scrollbar.pack(side="right", fill="y")
         canvas.configure(yscrollcommand=scrollbar.set)
 
-        layout_state = {"cols": None, "render_after_id": None}
+        # Rendering every card in a single event-loop turn makes a large pack
+        # look like the launcher has hung.  Keep enough state to cancel a
+        # stale render (search, refresh, resize, or view change) and resume in
+        # short batches instead.
+        layout_state = {
+            "cols": None,
+            "render_after_id": None,
+            "batch_after_id": None,
+            "render_generation": 0,
+            "file_metadata": {},
+        }
 
         def compute_grid_columns():
             try:
@@ -7704,6 +7991,8 @@ class MinecraftLauncher:
         canvas.bind("<Configure>", on_canvas_configure)
         content_frame.bind("<Enter>", lambda e: self._bind_smooth_scroll(canvas, scroll_frame))
         canvas.bind("<Enter>", lambda e: self._bind_smooth_scroll(canvas, scroll_frame))
+        scroll_frame.bind("<Enter>", lambda e: self._bind_smooth_scroll(canvas, scroll_frame))
+        self._bind_wheel_events(canvas, lambda e, c=canvas: self._smooth_scroll(c, e), f"modpack_contents_{id(canvas)}")
 
         def get_mod_display_data(filename):
             display_name = filename[:-4] if filename.endswith('.jar') else filename
@@ -7712,8 +8001,7 @@ class MinecraftLauncher:
             icon_color = colors[ord(initial) % len(colors)]
             size_str = ""
             try:
-                file_path = os.path.join(mods_dir, filename)
-                size_bytes = os.path.getsize(file_path)
+                size_bytes = layout_state["file_metadata"].get(filename, 0)
                 if size_bytes < 1024:
                     size_str = f"{size_bytes} B"
                 elif size_bytes < 1024 * 1024:
@@ -7801,6 +8089,7 @@ class MinecraftLauncher:
             if size_lbl is not None:
                 info_widgets.append(size_lbl)
             bind_hover_surfaces(card, [card, left, info, actions_row], info_widgets, del_btn)
+            self._bind_smooth_scroll(canvas, card)
 
         def create_mod_list_row(parent, filename):
             display_name, initial, icon_color, size_str = get_mod_display_data(filename)
@@ -7832,6 +8121,7 @@ class MinecraftLauncher:
             del_btn.pack()
 
             bind_hover_surfaces(row, [row, left, info, actions_row], [name_lbl, meta_lbl], del_btn)
+            self._bind_smooth_scroll(canvas, row)
 
         def render_mods(reset_scroll=True):
             after_id = layout_state.get("render_after_id")
@@ -7842,12 +8132,37 @@ class MinecraftLauncher:
                     pass
             layout_state["render_after_id"] = None
 
+            batch_after_id = layout_state.get("batch_after_id")
+            if batch_after_id is not None:
+                try:
+                    dialog.after_cancel(batch_after_id)
+                except Exception:
+                    pass
+            layout_state["batch_after_id"] = None
+            layout_state["render_generation"] += 1
+            render_generation = layout_state["render_generation"]
+
             current_top = canvas.yview()[0] if not reset_scroll else 0.0
 
             for widget in scroll_frame.winfo_children():
                 widget.destroy()
 
-            files = sorted([f for f in os.listdir(mods_dir) if f.endswith(".jar")], key=str.lower)
+            # One scandir/stat pass per redraw keeps filtering responsive even
+            # for large modpacks.  The previous implementation re-opened each
+            # file again while building every card.
+            file_metadata = {}
+            with os.scandir(mods_dir) as entries:
+                files = []
+                for entry in entries:
+                    if not entry.is_file() or not entry.name.lower().endswith(".jar"):
+                        continue
+                    try:
+                        file_metadata[entry.name] = entry.stat().st_size
+                    except OSError:
+                        file_metadata[entry.name] = 0
+                    files.append(entry.name)
+            layout_state["file_metadata"] = file_metadata
+            files.sort(key=str.lower)
             search_term = search_var.get().strip().lower()
             if search_term:
                 files = [f for f in files if search_term in f.lower()]
@@ -7880,8 +8195,8 @@ class MinecraftLauncher:
                 layout_state["cols"] = None
                 list_wrap = tk.Frame(scroll_frame, bg=COLORS['main_bg'])
                 list_wrap.pack(fill="x", padx=8, pady=(0, 12))
-                for filename in files:
-                    create_mod_list_row(list_wrap, filename)
+                render_parent = list_wrap
+                render_as_grid = False
             else:
                 cols = compute_grid_columns()
                 layout_state["cols"] = cols
@@ -7889,14 +8204,65 @@ class MinecraftLauncher:
                 grid_wrap.pack(fill="x", padx=16, pady=(0, 12))
                 for c in range(cols):
                     grid_wrap.grid_columnconfigure(c, weight=1, uniform="modgrid")
-                for idx, filename in enumerate(files):
-                    create_mod_grid_card(grid_wrap, filename, idx // cols, idx % cols)
+                render_parent = grid_wrap
+                render_as_grid = True
 
-            scroll_frame.update_idletasks()
-            canvas.configure(scrollregion=canvas.bbox("all"))
-            self._bind_smooth_scroll(canvas, scroll_frame)
-            canvas.yview_moveto(0.0 if reset_scroll else current_top)
+            if files:
+                progress_label = tk.Label(
+                    scroll_frame,
+                    text=f"Loading mods… 0 / {len(files)}",
+                    font=("Segoe UI", 9),
+                    bg=COLORS['main_bg'],
+                    fg=COLORS['text_secondary'],
+                )
+                progress_label.pack(anchor="w", padx=20, pady=(0, 14))
+                render_state = {"index": 0, "restored_position": False}
 
+                def render_batch():
+                    # A render can become obsolete while its next batch is in
+                    # Tk's queue.  Never let it append results to a newer view.
+                    try:
+                        if not dialog.winfo_exists() or layout_state["render_generation"] != render_generation:
+                            return
+                    except tk.TclError:
+                        return
+
+                    batch_end = min(render_state["index"] + 14, len(files))
+                    for index in range(render_state["index"], batch_end):
+                        filename = files[index]
+                        if render_as_grid:
+                            create_mod_grid_card(render_parent, filename, index // cols, index % cols)
+                        else:
+                            create_mod_list_row(render_parent, filename)
+                    render_state["index"] = batch_end
+                    progress_label.config(text=f"Loading mods… {batch_end} / {len(files)}")
+
+                    scroll_frame.update_idletasks()
+                    canvas.configure(scrollregion=canvas.bbox("all"))
+                    if not render_state["restored_position"]:
+                        canvas.yview_moveto(0.0 if reset_scroll else current_top)
+                        render_state["restored_position"] = True
+
+                    if batch_end < len(files):
+                        layout_state["batch_after_id"] = dialog.after(6, render_batch)
+                    else:
+                        layout_state["batch_after_id"] = None
+                        progress_label.destroy()
+                        scroll_frame.update_idletasks()
+                        canvas.configure(scrollregion=canvas.bbox("all"))
+
+                # Give Tk a chance to paint the header/count before creating
+                # the first card batch.
+                layout_state["batch_after_id"] = dialog.after(1, render_batch)
+            else:
+                scroll_frame.update_idletasks()
+                canvas.configure(scrollregion=canvas.bbox("all"))
+                canvas.yview_moveto(0.0 if reset_scroll else current_top)
+
+        # Let the popup paint immediately, then scan/render its installed
+        # files. This avoids the blank flash on large modpack directories.
+        self._show_skeleton_list(scroll_frame, rows=3, card_height=112, padx=12, pady=6)
+        self._bind_smooth_scroll(canvas, scroll_frame)
         dialog.after(50, render_mods)
         
         # Bind search to debounced re-render
@@ -7920,6 +8286,196 @@ class MinecraftLauncher:
                 render_mods()
 
         search_var.trace_add("write", schedule_search_render)
+
+    def show_import_curseforge_dialog(self):
+        """Import a local CurseForge export, including its overrides folder.
+
+        CurseForge manifests deliberately omit direct mod-file URLs.  Supplying
+        an optional API key enables exact-file downloads through the official
+        CurseForge API; without one, the launcher still imports all included
+        overrides and retains the manifest's unresolved file list.
+        """
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Import CurseForge Modpack")
+        dialog.geometry("620x330")
+        dialog.configure(bg=COLORS['main_bg'])
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+        _schedule_window_centering(dialog, self.root, width=620, height=330)
+        dialog_root = self._apply_custom_toplevel_chrome(dialog, "Import CurseForge Modpack")
+
+        content = tk.Frame(dialog_root, bg=COLORS['main_bg'], padx=24, pady=22)
+        content.pack(fill="both", expand=True)
+        tk.Label(content, text="Import CurseForge Modpack", font=("Segoe UI", 15, "bold"),
+                 bg=COLORS['main_bg'], fg=COLORS['text_primary']).pack(anchor="w")
+        tk.Label(
+            content,
+            text="Choose a CurseForge export (.zip). Overrides are imported securely. An API key is optional but required to download the manifest's mod files.",
+            font=("Segoe UI", 9), bg=COLORS['main_bg'], fg=COLORS['text_secondary'],
+            justify="left", wraplength=560,
+        ).pack(anchor="w", pady=(6, 16))
+
+        archive_var = tk.StringVar()
+        archive_row = tk.Frame(content, bg=COLORS['main_bg'])
+        archive_row.pack(fill="x")
+        archive_entry = tk.Entry(archive_row, textvariable=archive_var, bg=COLORS['input_bg'],
+                                 fg=COLORS['text_primary'], relief="flat", insertbackground="white")
+        archive_entry.pack(side="left", fill="x", expand=True, ipady=6)
+
+        def choose_archive():
+            selected = filedialog.askopenfilename(
+                parent=dialog,
+                title="Choose CurseForge Modpack",
+                filetypes=[("CurseForge Modpack", "*.zip"), ("All Files", "*")],
+            )
+            if selected:
+                archive_var.set(selected)
+
+        self._make_btn(archive_row, "Browse…", style="secondary", font_size=9, command=choose_archive).pack(side="left", padx=(8, 0))
+
+        tk.Label(content, text="CurseForge API key (optional)", font=("Segoe UI", 9, "bold"),
+                 bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(anchor="w", pady=(16, 5))
+        api_key_var = tk.StringVar(value=str(self.addons_config.get("curseforge_api_key", "")))
+        tk.Entry(content, textvariable=api_key_var, show="•", bg=COLORS['input_bg'], fg=COLORS['text_primary'],
+                 relief="flat", insertbackground="white").pack(fill="x", ipady=6)
+
+        status = tk.Label(content, text="", font=("Segoe UI", 9), bg=COLORS['main_bg'], fg=COLORS['error_red'])
+        status.pack(anchor="w", pady=(8, 0))
+        actions = tk.Frame(content, bg=COLORS['main_bg'])
+        actions.pack(side="bottom", fill="x")
+
+        def begin_import():
+            archive_path = archive_var.get().strip()
+            if not archive_path or not os.path.isfile(archive_path):
+                status.config(text="Choose a valid CurseForge .zip export first.")
+                return
+            api_key = api_key_var.get().strip()
+            if api_key:
+                self.addons_config["curseforge_api_key"] = api_key
+                self.save_config(sync_ui=False)
+            task_id = self.add_download_task(os.path.basename(archive_path), "modpack")
+            dialog.destroy()
+            self.download_manager.queue_modpack(
+                lambda: self._import_curseforge_modpack_thread(archive_path, api_key, task_id),
+                task_id,
+            )
+
+        self._make_btn(actions, "Cancel", style="secondary", font_size=9, command=dialog.destroy).pack(side="right")
+        self._make_btn(actions, "Import", style="primary", font_size=9, bold=True, command=begin_import).pack(side="right", padx=(0, 8))
+
+    def _curseforge_loader_from_manifest(self, manifest):
+        minecraft = manifest.get("minecraft", {}) if isinstance(manifest, dict) else {}
+        loader_records = minecraft.get("modLoaders", []) if isinstance(minecraft, dict) else []
+        loader_ids = [str(item.get("id", "")).lower() for item in loader_records if isinstance(item, dict)]
+        if any("fabric" in loader_id for loader_id in loader_ids):
+            return "Fabric"
+        if any("forge" in loader_id and "neoforge" not in loader_id for loader_id in loader_ids):
+            return "Forge"
+        return "Vanilla"
+
+    def _import_curseforge_modpack_thread(self, archive_path, api_key, task_id):
+        staging_dir = None
+        try:
+            self.root.after(0, lambda: self.update_download_task(task_id, 2, detail="Reading CurseForge manifest…"))
+            with zipfile.ZipFile(archive_path, "r") as archive:
+                try:
+                    manifest = json.loads(archive.read("manifest.json").decode("utf-8-sig"))
+                except KeyError as exc:
+                    raise ValueError("This archive is not a CurseForge export (manifest.json is missing).") from exc
+            if not isinstance(manifest, dict) or not isinstance(manifest.get("minecraft"), dict):
+                raise ValueError("The CurseForge manifest is malformed.")
+
+            minecraft = manifest["minecraft"]
+            minecraft_version = str(minecraft.get("version") or "").strip()
+            if not minecraft_version:
+                raise ValueError("The CurseForge manifest does not specify a Minecraft version.")
+            pack_name = str(manifest.get("name") or os.path.splitext(os.path.basename(archive_path))[0]).strip() or "Imported CurseForge Pack"
+            pack_id = str(uuid.uuid4())
+            modpack_root = os.path.abspath(os.path.join(self.config_dir, "modpacks"))
+            os.makedirs(modpack_root, exist_ok=True)
+            staging_dir = os.path.join(modpack_root, f".import-{pack_id}")
+            final_dir = os.path.join(modpack_root, pack_id)
+            os.makedirs(staging_dir)
+
+            self.root.after(0, lambda: self.update_download_task(task_id, 8, detail="Importing overrides…"))
+            with tempfile.TemporaryDirectory() as extract_dir:
+                _safe_extract_zip(archive_path, extract_dir)
+                overrides_name = str(manifest.get("overrides") or "overrides").replace("\\", "/").strip("/")
+                overrides_dir = os.path.realpath(os.path.join(extract_dir, overrides_name))
+                extract_root = os.path.realpath(extract_dir)
+                if os.path.commonpath((extract_root, overrides_dir)) != extract_root:
+                    raise ValueError("The CurseForge overrides path is unsafe.")
+                if os.path.isdir(overrides_dir):
+                    shutil.copytree(overrides_dir, staging_dir, dirs_exist_ok=True)
+
+            raw_files = manifest.get("files", [])
+            required_files = [record for record in raw_files if isinstance(record, dict) and record.get("required", True)] if isinstance(raw_files, list) else []
+            installed_files = []
+            if api_key and required_files:
+                mods_dir = os.path.join(staging_dir, "mods")
+                os.makedirs(mods_dir, exist_ok=True)
+                for index, record in enumerate(required_files, start=1):
+                    if self.download_tasks.get(task_id, {}).get("cancel_event") and self.download_tasks[task_id]["cancel_event"].is_set():
+                        raise RuntimeError("Cancelled")
+                    project_id = record.get("projectID")
+                    file_id = record.get("fileID")
+                    if not project_id or not file_id:
+                        raise ValueError("A CurseForge file entry is missing its project or file ID.")
+                    self.root.after(0, lambda i=index, total=len(required_files): self.update_download_task(task_id, 10 + (i - 1) / max(1, total) * 85, detail=f"Downloading mod {i} of {total}…"))
+                    response = requests.get(
+                        f"https://api.curseforge.com/v1/mods/{project_id}/files/{file_id}/download-url",
+                        headers={"x-api-key": api_key}, timeout=(10, 45),
+                    )
+                    if response.status_code in (401, 403):
+                        raise PermissionError("CurseForge rejected the API key. Check that it is valid and has access to file downloads.")
+                    response.raise_for_status()
+                    download_url = response.json().get("data")
+                    if not isinstance(download_url, str) or not download_url.startswith("https://"):
+                        raise ValueError(f"CurseForge did not return a valid download URL for file {file_id}.")
+                    filename = os.path.basename(urllib.parse.unquote(urllib.parse.urlparse(download_url).path)) or f"curseforge-{project_id}-{file_id}.jar"
+                    target = os.path.join(mods_dir, filename)
+                    _atomic_download(download_url, target, cancel_event=self.download_tasks.get(task_id, {}).get("cancel_event"))
+                    installed_files.append({"project_id": project_id, "file_id": file_id, "filename": filename})
+
+            os.replace(staging_dir, final_dir)
+            staging_dir = None
+            pack = {
+                "id": pack_id,
+                "name": pack_name,
+                "loader": self._curseforge_loader_from_manifest(manifest),
+                "mc_version": minecraft_version,
+                "version_name": str(manifest.get("version") or ""),
+                "source": "curseforge",
+                "mods": installed_files,
+                "curseforge_files": required_files,
+                "linked_installation_id": None,
+            }
+
+            def complete_import():
+                self.modpacks.append(pack)
+                self.save_modpacks()
+                self.refresh_modpacks_list()
+                self.update_active_modpack_dropdown()
+                self.complete_download_task(task_id)
+                if required_files and not api_key:
+                    self.toast_manager.show("Imported overrides; add a CurseForge API key to download listed mods.", kind="warning", duration=6000)
+                else:
+                    self.toast_manager.show(f"Imported {pack_name}", kind="success")
+
+            self.root.after(0, complete_import)
+        except Exception as exc:
+            logging.exception("CurseForge import failed")
+            if staging_dir and os.path.isdir(staging_dir):
+                try:
+                    shutil.rmtree(staging_dir)
+                except OSError:
+                    pass
+            message = str(exc)
+            self.root.after(0, lambda: [
+                self.fail_download_task(task_id, "Import failed"),
+                custom_showerror("CurseForge Import Failed", message, parent=self.root),
+            ])
 
     def show_create_modpack_dialog(self):
         dialog = tk.Toplevel(self.root)
@@ -8351,13 +8907,13 @@ class MinecraftLauncher:
             self.mods_canvas.itemconfig(self.mods_canvas_window, width=event.width)
         
         self.mods_canvas.bind("<Configure>", on_canvas_configure)
-        self.mods_canvas.configure(yscrollcommand=self._on_scrollbar_update) # This method likely used for infinite scroll logic? need to check
+        self.mods_canvas.configure(yscrollcommand=self._on_scrollbar_update)
         
         self.mods_canvas.pack(side="left", fill="both", expand=True)
         self.mods_scrollbar.pack(side="right", fill="y")
         
         # Smooth mousewheel for Mods Tab with infinite scroll check
-        self.last_scroll_check = 0
+        self.last_scroll_check = 0.0
         
         def _mods_smooth_scroll(event):
             self._smooth_scroll(self.mods_canvas, event)
@@ -8369,9 +8925,15 @@ class MinecraftLauncher:
         
         self._bind_wheel_events(self.mods_canvas, _mods_smooth_scroll, f"mods_{id(self.mods_canvas)}")
         frame.bind("<Enter>", lambda e: self._bind_smooth_scroll(self.mods_canvas, self.mods_scrollable_frame))
+        self.mods_canvas._nlc_after_scroll = self._check_scroll_position  # type: ignore[attr-defined]
 
         self.mod_search_timer = None
+        self._mod_load_more_after_id = None
+        self._mod_search_generation = 0
+        self._mod_page_size = 20
         self.cached_mod_images = {}
+        self.mod_image_loading = set()
+        self.mod_image_waiters = {}
         
         # Pagination State
         self.mod_offset = 0
@@ -8389,23 +8951,48 @@ class MinecraftLauncher:
         self._check_scroll_position()
 
     def _check_scroll_position(self):
-        if self.mod_loading or self.mod_end_reached: return
+        if self.mod_loading or self.mod_end_reached or getattr(self, "_mod_load_more_after_id", None):
+            return
         try:
-            if self.mods_canvas.yview()[1] > 0.85:
-                self.load_more_mods()
-        except: pass
+            # Keep enough content below the viewport that pagination feels
+            # seamless, without immediately chaining page requests.
+            if self.mods_canvas.yview()[1] >= 0.90:
+                self._mod_load_more_after_id = self.root.after(90, self._run_scheduled_mod_page)
+        except tk.TclError:
+            return
+
+    def _run_scheduled_mod_page(self):
+        self._mod_load_more_after_id = None
+        self.load_more_mods()
 
     def schedule_mod_search(self, *args):
         if self.mod_search_timer:
-            self.root.after_cancel(self.mod_search_timer)
-        self.mod_search_timer = self.root.after(800, lambda: self.search_mods_thread(reset=True))
+            try:
+                self.root.after_cancel(self.mod_search_timer)
+            except tk.TclError:
+                pass
+        self.mod_search_timer = self.root.after(800, self._run_debounced_mod_search)
+
+    def _run_debounced_mod_search(self):
+        self.mod_search_timer = None
+        self.search_mods_thread(reset=True)
 
     def load_more_mods(self):
         if self.mod_loading or self.mod_end_reached: return
         self.search_mods_thread(reset=False)
 
     def search_mods_thread(self, reset=False):
-        if self.mod_loading and reset == False: return
+        if self.mod_loading and not reset:
+            return
+        if reset:
+            self._mod_search_generation += 1
+            if self._mod_load_more_after_id:
+                try:
+                    self.root.after_cancel(self._mod_load_more_after_id)
+                except tk.TclError:
+                    pass
+                self._mod_load_more_after_id = None
+        generation = self._mod_search_generation
         self.mod_loading = True
         
         query = self.mod_search_var.get().strip()
@@ -8435,13 +9022,10 @@ class MinecraftLauncher:
             for w in self.mods_scrollable_frame.winfo_children(): w.destroy()
             tk.Label(self.mods_scrollable_frame, text="Searching...", 
                      font=("Segoe UI", 12), fg=COLORS['accent_blue'], bg=COLORS['main_bg']).pack(pady=20)
-        
-        threading.Thread(target=self._perform_mod_search, args=(query, loader, version_facet, reset), daemon=True).start()
 
-    def _perform_mod_search(self, query, loader, version_facet, reset):
         payload = {
             "query": query,
-            "limit": 20,
+            "limit": self._mod_page_size,
             "offset": self.mod_offset,
             "facets": []
         }
@@ -8456,11 +9040,18 @@ class MinecraftLauncher:
             payload["facets"].append(f'categories:{loader}')
         if version_facet:
             payload["facets"].append(f'versions:{version_facet}')
-            
-        # Use Agent
-        self.send_agent_request("search_mods", payload, lambda res: self._on_mod_search_result(res, reset))
 
-    def _on_mod_search_result(self, result, reset):
+        # The helper process performs network work; no extra Python thread is
+        # required here.  A generation token rejects stale responses from a
+        # query/filter that the user has already replaced.
+        self.send_agent_request(
+            "search_mods", payload,
+            lambda res, g=generation, is_reset=reset: self._on_mod_search_result(res, is_reset, g),
+        )
+
+    def _on_mod_search_result(self, result, reset, generation=None):
+        if generation is not None and generation != self._mod_search_generation:
+            return
         if not result or result.get("status") != "success":
             self.mod_loading = False
             msg = result.get("msg", "Unknown error") if result else "No response"
@@ -8475,13 +9066,15 @@ class MinecraftLauncher:
         else:
             self.mod_end_reached = True
 
-        self._display_mod_results(hits, reset)
+        self._display_mod_results(hits, reset, generation)
 
     def _display_mod_error(self, msg):
         tk.Label(self.mods_scrollable_frame, text=f"Error: {msg}", 
                  fg=COLORS['error_red'], bg=COLORS['main_bg']).pack(pady=20)
 
-    def _display_mod_results(self, hits, reset):
+    def _display_mod_results(self, hits, reset, generation=None):
+        if generation is not None and generation != self._mod_search_generation:
+            return
         if reset:
             for w in self.mods_scrollable_frame.winfo_children(): w.destroy()
             if not hits:
@@ -8517,7 +9110,7 @@ class MinecraftLauncher:
         info_frame.pack(side="left", fill="both", expand=True)
         
         tk.Label(info_frame, text=mod.get("title", "Unknown"), font=("Segoe UI", 12, "bold"), 
-                 fg="white", bg=COLORS['card_bg'], anchor="w").pack(fill="x")
+                 fg="white", bg=COLORS['card_bg'], anchor="w", justify="left", wraplength=460).pack(fill="x")
         
         # Desc
         desc = mod.get("description", "")
@@ -8623,30 +9216,18 @@ class MinecraftLauncher:
                 target_path = os.path.join(target_dir, filename)
                 
                 self.root.after(0, lambda: self.update_download_task(task_id, 0, detail=f"Downloading {filename}..."))
-                
-                with requests.get(download_url, stream=True) as d_r:
-                    d_r.raise_for_status()
-                    total_downloaded = 0
-                    with open(target_path, 'wb') as f:
-                        for chunk in d_r.iter_content(chunk_size=8192):
-                            # Check Cancel
-                            if task_id in self.download_tasks and self.download_tasks[task_id]['cancel_event'].is_set():
-                                raise Exception("Cancelled by user")
-                                
-                            f.write(chunk)
-                            total_downloaded += len(chunk)
-                            
-                            # Speed Limit
-                            if getattr(self, 'limit_download_speed_enabled', False):
-                                limit_kb = getattr(self, 'max_download_speed', 2048)
-                                if limit_kb > 0:
-                                    try: time.sleep(len(chunk) / (limit_kb * 1024))
-                                    except: pass
-
-                            if size > 0:
-                                prog = (total_downloaded / size) * 100
-                                # Throttle UI updates? 100 updates per mod is fine.
-                                self.root.after(0, lambda p=prog: self.update_download_task(task_id, p))
+                cancel_event = self.download_tasks.get(task_id, {}).get('cancel_event')
+                rate_limit = getattr(self, 'max_download_speed', 2048) if getattr(self, 'limit_download_speed_enabled', False) else 0
+                _atomic_download(
+                    download_url,
+                    target_path,
+                    cancel_event=cancel_event,
+                    rate_limit_kib=rate_limit,
+                    expected_sha1=(primary_file.get("hashes") or {}).get("sha1"),
+                    progress=lambda current, total: self.root.after(
+                        0, lambda: self.update_download_task(task_id, (current / total) * 100)
+                    ) if total else None,
+                )
                             
                 success = True
                 
@@ -8670,11 +9251,11 @@ class MinecraftLauncher:
             
             # Post-Op UI Update
             def finish():
-                self.complete_download_task(task_id)
                 if success:
+                    self.complete_download_task(task_id)
                     btn_widget.destroy() # Remove install button (or replace with checkmark)
-                    pass 
                 else:
+                    self.fail_download_task(task_id, "Download failed — retry available")
                     btn_widget.config(state="normal", text="Install", bg=COLORS['play_btn_green'])
             
             self.root.after(0, finish)
@@ -8715,15 +9296,12 @@ class MinecraftLauncher:
                 target_path = os.path.join(target_dir, filename)
                 
                 self.root.after(0, lambda: self.update_download_task(task_id, 0, detail=f"Downloading {filename}..."))
-                
-                with requests.get(download_url, stream=True) as d_r:
-                    d_r.raise_for_status()
-                    total_downloaded = 0
-                    with open(target_path, 'wb') as f:
-                        for chunk in d_r.iter_content(chunk_size=8192):
-                            if task_id in self.download_tasks and self.download_tasks[task_id]["cancel_event"].is_set():
-                                raise Exception("Cancelled")
-                            if chunk: f.write(chunk)
+                _atomic_download(
+                    download_url,
+                    target_path,
+                    cancel_event=self.download_tasks.get(task_id, {}).get("cancel_event"),
+                    expected_sha1=(primary_file.get("hashes") or {}).get("sha1"),
+                )
                 
                 self.root.after(0, lambda: self.complete_download_task(task_id))
                 self.root.after(0, lambda: btn_widget.config(text="✔ Installed", bg=COLORS['success_green'], fg="white"))
@@ -8921,23 +9499,16 @@ class MinecraftLauncher:
              
              # Download .mrpack to temp
              self.root.after(0, lambda: self.update_download_task(task_id, 5, detail=f"Downloading {version_name}..."))
-             import tempfile
              with tempfile.TemporaryDirectory() as temp_dir:
                  mr_path = os.path.join(temp_dir, "pack.mrpack")
-                 with requests.get(mrpack_file['url'], stream=True) as d_r:
-                     d_r.raise_for_status()
-                     with open(mr_path, 'wb') as f:
-                         for chunk in d_r.iter_content(chunk_size=8192):
-                             if task_id in self.download_tasks and self.download_tasks[task_id]['cancel_event'].is_set():
-                                 raise Exception("Cancelled")
-                             f.write(chunk)
+                 cancel_event = self.download_tasks.get(task_id, {}).get('cancel_event')
+                 _atomic_download(mrpack_file['url'], mr_path, cancel_event=cancel_event)
                          
                  # Extract
                  if task_id in self.download_tasks and self.download_tasks[task_id]['cancel_event'].is_set(): raise Exception("Cancelled")
 
                  self.root.after(0, lambda: self.update_download_task(task_id, 10, detail="Extracting..."))
-                 with zipfile.ZipFile(mr_path, 'r') as zf:
-                     zf.extractall(temp_dir)
+                 _safe_extract_zip(mr_path, temp_dir)
                      
                  # Read index.json
                  index_path = os.path.join(temp_dir, "modrinth.index.json")
@@ -8959,8 +9530,9 @@ class MinecraftLauncher:
                      if task_id in self.download_tasks and self.download_tasks[task_id]['cancel_event'].is_set():
                          raise Exception("Cancelled")
 
-                     d_url = file_def['downloads'][0]
-                     f_path = file_def['path'] 
+                     downloads = file_def.get('downloads') or []
+                     d_url = downloads[0] if downloads else ""
+                     f_path = str(file_def.get('path') or "")
                      f_name = os.path.basename(f_path)
                      
                      # Allow subdirectories 
@@ -8969,19 +9541,20 @@ class MinecraftLauncher:
                      # If path starts with 'mods/', it goes to target_dir.
                      # If path is 'config/', we ignore for now as requested (simple implementation)
                      if f_path.startswith("mods/"):
-                         dest = os.path.join(self.get_modpack_dir(new_id), f_path) # e.g. pack/mods/fabric-api.jar
+                         pack_dir = os.path.abspath(self.get_modpack_dir(new_id))
+                         dest = os.path.abspath(os.path.join(pack_dir, f_path))
+                         if not d_url or os.path.commonpath((pack_dir, dest)) != pack_dir:
+                             raise ValueError(f"Unsafe or incomplete modpack entry: {f_path}")
                          # Ensure dir exists
                          os.makedirs(os.path.dirname(dest), exist_ok=True)
                          
                          self.root.after(0, lambda n=f_name: self.update_download_task(task_id, detail=f"Downloading {n}"))
-                         
-                         with requests.get(d_url, stream=True) as mf:
-                             mf.raise_for_status()
-                             with open(dest, 'wb') as out:
-                                 for chunk in mf.iter_content(chunk_size=8192):
-                                     if task_id in self.download_tasks and self.download_tasks[task_id]['cancel_event'].is_set():
-                                         raise Exception("Cancelled")
-                                     out.write(chunk)
+                         _atomic_download(
+                             d_url,
+                             dest,
+                             cancel_event=cancel_event,
+                             expected_sha1=(file_def.get("hashes") or {}).get("sha1"),
+                         )
                                  
                      completed_files += 1
                      if total_files > 0:
@@ -9016,24 +9589,45 @@ class MinecraftLauncher:
         if url in self.cached_mod_images:
             label.config(image=self.cached_mod_images[url], text="", width=64, height=64)
             return
+        if url in self.mod_image_loading:
+            self.mod_image_waiters.setdefault(url, []).append(label)
+            return
+        self.mod_image_loading.add(url)
+        self.mod_image_waiters[url] = [label]
 
         def fetch():
             try:
                 r = requests.get(url, timeout=5)
                 if r.status_code == 200:
-                    data = r.content
-                    img = Image.open(io.BytesIO(data))
-                    img = img.resize((64, 64), Image.Resampling.LANCZOS)
-                    photo = ImageTk.PhotoImage(img)
-                    
+                    with Image.open(io.BytesIO(r.content)) as source:
+                        image = source.convert("RGBA").resize((64, 64), Image.Resampling.LANCZOS)
+
+                    # PIL decoding is safe off-thread; Tk PhotoImage creation
+                    # is not.  Keeping all Tk operations on the UI thread
+                    # avoids intermittent freezes when a result page appears.
                     def update_ui():
-                        if label.winfo_exists():
-                            self.cached_mod_images[url] = photo 
-                            label.config(image=photo, text="", width=64, height=64)
-                            # label.image = photo # tk bug prevention # already doing it via dict? No need to set attr if we have dict ref
-                    
+                        self.mod_image_loading.discard(url)
+                        try:
+                            photo = ImageTk.PhotoImage(image)
+                            self.cached_mod_images[url] = photo
+                            for waiting_label in self.mod_image_waiters.pop(url, []):
+                                if waiting_label.winfo_exists():
+                                    waiting_label.config(image=photo, text="", width=64, height=64)
+                        except tk.TclError:
+                            pass
+
                     self.root.after(0, update_ui)
-            except: pass
+                    return
+            except (requests.RequestException, OSError, ValueError) as exc:
+                logging.debug("Could not load Modrinth icon %s: %s", url, exc)
+            finally:
+                # Success is released by update_ui; failures must also be
+                # released so the image can be retried after a transient error.
+                if url in self.mod_image_loading:
+                    try:
+                        self.root.after(0, lambda: (self.mod_image_loading.discard(url), self.mod_image_waiters.pop(url, None)))
+                    except tk.TclError:
+                        pass
         
         threading.Thread(target=fetch, daemon=True).start()
 
@@ -9761,9 +10355,11 @@ class MinecraftLauncher:
             except:
                 pass
         
-        # Bind to canvas resize and content changes
+        # Preserve the scrollregion updater when tracking scrollbar visibility;
+        # replacing this binding made Addons appear to stop scrolling whenever
+        # a collapsible card changed height.
         canvas.bind("<Configure>", lambda e: [on_canvas_configure(e), update_scrollbar_visibility()])
-        scroll_frame.bind("<Configure>", lambda e: update_scrollbar_visibility())
+        scroll_frame.bind("<Configure>", lambda e: update_scrollbar_visibility(), add="+")
 
         self.addons_canvas = canvas
         self.addons_scroll_frame = scroll_frame
@@ -10352,6 +10948,8 @@ How to use:
             self.third_party_addons_path_lbl.config(text=f"Folder: {addons_dir}")
         if hasattr(self, 'third_party_addons_status_lbl'):
             self.third_party_addons_status_lbl.config(text="Scanning third-party addons...")
+        self._show_skeleton_list(self.third_party_addons_cards_frame, rows=2, card_height=82, padx=0, pady=6)
+        self._refresh_addons_scroll_bindings()
 
         payload = {
             "minecraft_dir": self.minecraft_dir,
@@ -10649,7 +11247,7 @@ How to use:
         if not custom_askyesno("Delete Screenshot", f"Delete '{os.path.basename(path)}'?", parent=self.root):
             return
         try:
-            addon_delete_screenshot(path)
+            addon_delete_screenshot(path, self.minecraft_dir)
             self.save_config(sync_ui=False)
             self.render_screenshot_browser()
         except Exception as e:
@@ -11358,6 +11956,18 @@ How to use:
             try:
                 with open(self.config_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
+                    if not isinstance(data, dict):
+                        raise ValueError("Configuration root must be a JSON object.")
+
+                    # Old, partially-written, or hand-edited configuration
+                    # should not crash the launcher.  Keep valid records and
+                    # let the regular atomic save migrate the rest.
+                    raw_profiles = data.get("profiles", [])
+                    data["profiles"] = [item for item in raw_profiles if isinstance(item, dict)] if isinstance(raw_profiles, list) else []
+                    raw_installations = data.get("installations", [])
+                    data["installations"] = [item for item in raw_installations if isinstance(item, dict)] if isinstance(raw_installations, list) else []
+                    if not isinstance(data.get("addons", {}), dict):
+                        data["addons"] = {}
 
                     # First Run Check (Must be done before any save_config triggers)
                     self.first_run = not data.get("first_run_completed", False)
@@ -11410,13 +12020,22 @@ How to use:
                     self.last_version = data.get("last_version", "")
                     self.auto_download_mod = data.get("auto_download_mod", False)
                     self.auto_download_var.set(self.auto_download_mod)
-                    self.ram_allocation = data.get("ram_allocation", DEFAULT_RAM)
+                    try:
+                        self.ram_allocation = max(512, int(data.get("ram_allocation", DEFAULT_RAM)))
+                    except (TypeError, ValueError):
+                        self.ram_allocation = DEFAULT_RAM
                     self.ram_var.set(self.ram_allocation)
                     self.ram_entry_var.set(str(self.ram_allocation))
 
                     # Downloads & Features
-                    self.max_concurrent_packs = data.get("max_concurrent_packs", 1)
-                    self.max_concurrent_mods = data.get("max_concurrent_mods", 3)
+                    try:
+                        self.max_concurrent_packs = max(1, min(3, int(data.get("max_concurrent_packs", 1))))
+                    except (TypeError, ValueError):
+                        self.max_concurrent_packs = 1
+                    try:
+                        self.max_concurrent_mods = max(1, min(8, int(data.get("max_concurrent_mods", 3))))
+                    except (TypeError, ValueError):
+                        self.max_concurrent_mods = 3
                     self.limit_download_speed_enabled = data.get("limit_download_speed_enabled", False)
                     self.max_download_speed = data.get("max_download_speed", 2048) # KB/s
                     self.enable_modrinth = True
@@ -11497,6 +12116,7 @@ How to use:
                 self.first_run = True # Error implies we should probable re-onboard or fallback
         else: 
             print("Config file not found, creating default")
+            self.create_default_profile()
             self.first_run = True # Explicitly true for no config
 
         # --- Default Wallpaper Fallback ---
@@ -11590,8 +12210,11 @@ How to use:
     def _write_config_payload(self, config):
         tmp_path = f"{self.config_file}.tmp"
         try:
+            os.makedirs(os.path.dirname(self.config_file), exist_ok=True)
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(config, f, indent=4)
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(tmp_path, self.config_file)
         except Exception as e:
             try:
@@ -11651,16 +12274,51 @@ How to use:
         self.update_active_profile()
 
     def load_versions(self):
-        pass
+        """Warm the metadata cache without blocking launcher startup.
+
+        The installation editor owns the actual selector; this cache keeps it
+        responsive when users open it for the first time.
+        """
+        if getattr(self, "_version_load_started", False):
+            return
+        self._version_load_started = True
+
+        def fetch():
+            try:
+                versions = minecraft_launcher_lib.utils.get_version_list()
+                cleaned = [
+                    {"id": str(item.get("id")), "type": str(item.get("type", "release"))}
+                    for item in versions if isinstance(item, dict) and item.get("id")
+                ]
+                self.cached_vanilla_versions = cleaned
+                self.log(f"Loaded {len(cleaned)} Minecraft versions.")
+            except Exception as exc:
+                self.cached_vanilla_versions = []
+                self.log(f"Could not load Minecraft version metadata: {exc}")
+            finally:
+                self._version_load_started = False
+
+        threading.Thread(target=fetch, daemon=True, name="version-metadata").start()
 
     def _apply_version_list(self, loader, display_list):
-        pass
+        """Compatibility hook for older UI surfaces that expose a combobox."""
+        for widget_name in ("version_combo", "version_dropdown"):
+            widget = getattr(self, widget_name, None)
+            if widget is None:
+                continue
+            try:
+                widget["values"] = display_list
+                if display_list and not self.version_var.get():
+                    self.version_var.set(display_list[0])
+            except (tk.TclError, TypeError):
+                pass
 
     def on_loader_change(self, event):
-        pass
+        self.load_versions()
+        self.save_config()
 
     def on_version_change(self, event):
-        pass
+        self.save_config()
 
     def launch_installation(self, idx, server_address=None, server_port=None):
         if 0 <= idx < len(self.installations):
@@ -12187,6 +12845,9 @@ How to use:
     def start_launch(self, force_update=False, server_address=None, server_port=None):
         # Close any open menus
         self._close_all_menus()
+        if self._launch_in_progress:
+            self.toast_manager.show("Minecraft is already being prepared.", kind="info")
+            return
         
         if not self.installations: return
         
@@ -12200,9 +12861,8 @@ How to use:
         resolution_width = inst.get("resolution_width")
         resolution_height = inst.get("resolution_height")
         
-        if not version_id or version_id == "latest-release":
-            # Heuristic for latest release if not specific
-            version_id = minecraft_launcher_lib.utils.get_latest_version()["release"]
+        if not version_id:
+            version_id = "latest-release"
 
         # Get username from current profile or entry
         username = DEFAULT_USERNAME
@@ -12225,7 +12885,8 @@ How to use:
         
         self.update_rpc("Launching...", f"Version: {version_id} ({loader})")
 
-        self.launch_btn.config(state="disabled", text="LAUNCHING...")
+        self._launch_in_progress = True
+        self.launch_btn.config(state="disabled", text="PREPARING...")
         self.launch_opts_btn.config(state="disabled")
         # self.set_status("Launching Minecraft...") # Redundant with overlay
         inst_id = inst.get("id")
@@ -12237,10 +12898,19 @@ How to use:
 
     def launch_logic(self, version, username, loader, force_update=False, inst_id=None, custom_java_executable="", resolution_width=None, resolution_height=None, server_address=None, server_port=None):
         mods_backup_path = None
+        modpack_stage_path = None
+        modpack_sync_active = False
         # Callback wrapper to update overlay
         def update_status(t):
             self.log(f"Status: {t}")
-            self.root.after(0, lambda: self.update_progress_label.config(text=t) if hasattr(self, 'update_progress_label') else None)
+            status_text = str(t)
+            def apply_status():
+                if hasattr(self, 'update_progress_label'):
+                    self.update_progress_label.config(text=status_text)
+                if hasattr(self, 'launch_btn') and self._launch_in_progress:
+                    compact = status_text.upper().replace("DOWNLOADING", "DOWNLOADING")
+                    self.launch_btn.config(text=(compact[:20] + "…") if len(compact) > 21 else compact)
+            self.root.after(0, apply_status)
 
         def update_progress(v):
             if hasattr(self, 'update_progress_bar'):
@@ -12269,6 +12939,10 @@ How to use:
         })
         local_skin_server = None
         try:
+            if version in ("latest-release", "latest-snapshot"):
+                update_status("Resolving Minecraft version…")
+                latest = minecraft_launcher_lib.utils.get_latest_version()
+                version = latest["snapshot" if version == "latest-snapshot" else "release"]
             launch_id = version
             normalized_java_executable = self._normalize_java_executable_input(custom_java_executable)
             
@@ -12456,29 +13130,52 @@ How to use:
                 # For offline local server, token can be anything usually, but validation might fail if not careful.
                 # Authlib Injector usually disables signature checks.
 
-            # --- MODPACK SWAP ---
-            try:
-                if inst_id:
-                     pack = next((p for p in self.modpacks if p.get('linked_installation_id') == inst_id), None)
-                     if pack:
-                         self.log(f"Loading Modpack: {pack['name']}")
-                         mods_dir = os.path.join(self.minecraft_dir, "mods")
-                         pack_mods_dir = os.path.join(self.get_modpack_dir(pack['id']), "mods")
-                         
-                         # Only swap if pack has mods folder
-                         if os.path.exists(pack_mods_dir):
-                             timestamp = int(time.time())
-                             mods_backup_path = os.path.join(self.minecraft_dir, f"mods_backup_{timestamp}")
-                             
-                             if os.path.exists(mods_dir):
-                                 # Rename current to backup
-                                 os.rename(mods_dir, mods_backup_path)
-                             
-                             # Copy pack mods to live folder
-                             shutil.copytree(pack_mods_dir, mods_dir)
-                             self.log("Swapped mods folder for modpack.")
-            except Exception as e:
-                self.log(f"Modpack swap error: {e}")
+            # --- MODPACK SYNC ---
+            # The game still launches from the shared Minecraft directory, so
+            # make a fresh, transactional copy of the linked pack's mods just
+            # before building its command.  This deliberately also applies an
+            # empty/missing pack mods folder: removing mods from a modpack must
+            # not accidentally launch the global mods from a previous profile.
+            if inst_id:
+                pack = next((p for p in self.modpacks if p.get('linked_installation_id') == inst_id), None)
+                if pack:
+                    pack_name = str(pack.get('name') or 'modpack')
+                    update_status(f"Updating {pack_name}…")
+                    self.log(f"Updating linked modpack before launch: {pack_name}")
+
+                    mods_dir = os.path.abspath(os.path.join(self.minecraft_dir, "mods"))
+                    pack_root = os.path.abspath(self.get_modpack_dir(pack['id']))
+                    pack_mods_dir = os.path.abspath(os.path.join(pack_root, "mods"))
+                    if os.path.commonpath((pack_root, pack_mods_dir)) != pack_root:
+                        raise ValueError("The linked modpack has an unsafe mods path.")
+                    if os.path.exists(pack_mods_dir) and not os.path.isdir(pack_mods_dir):
+                        raise ValueError("The linked modpack's mods path is not a folder.")
+
+                    os.makedirs(self.minecraft_dir, exist_ok=True)
+                    sync_token = uuid.uuid4().hex
+                    modpack_stage_path = os.path.join(self.minecraft_dir, f".nlc_modpack_stage_{sync_token}")
+                    if os.path.isdir(pack_mods_dir):
+                        shutil.copytree(pack_mods_dir, modpack_stage_path)
+                    else:
+                        os.makedirs(modpack_stage_path)
+
+                    if os.path.lexists(mods_dir):
+                        mods_backup_path = os.path.join(self.minecraft_dir, f"mods_backup_{sync_token}")
+                        os.rename(mods_dir, mods_backup_path)
+                    try:
+                        os.rename(modpack_stage_path, mods_dir)
+                        modpack_stage_path = None
+                        modpack_sync_active = True
+                    except Exception:
+                        # Do not leave the launcher using a partial pack if the
+                        # final rename fails (for example, due to an antivirus
+                        # lock).  Restore the original state before reporting
+                        # the launch failure.
+                        if mods_backup_path and os.path.lexists(mods_backup_path):
+                            os.rename(mods_backup_path, mods_dir)
+                            mods_backup_path = None
+                        raise
+                    self.log("Linked modpack is up to date for this launch.")
 
             options = {
                 "username": username, 
@@ -12530,6 +13227,7 @@ How to use:
                 errors='replace',
                 creationflags=creationflags
             )
+            self.root.after(0, lambda: self.launch_btn.config(text="RUNNING") if hasattr(self, 'launch_btn') else None)
             session_started_at = time.time()
             
             if process.stdout:
@@ -12567,15 +13265,29 @@ How to use:
             self.root.after(0, lambda: custom_showerror("Launch Error", err_msg))
             self.root.after(0, lambda: self.update_rpc("Idle", "In Launcher"))
         finally:
-            if mods_backup_path and os.path.exists(mods_backup_path):
+            # If the final swap failed after the original folder was moved,
+            # this fallback also repairs it before the launcher returns to an
+            # idle state.
+            if modpack_sync_active or (mods_backup_path and os.path.lexists(mods_backup_path)):
                 try:
                     current_mods = os.path.join(self.minecraft_dir, "mods")
-                    if os.path.exists(current_mods):
-                        shutil.rmtree(current_mods) 
-                    os.rename(mods_backup_path, current_mods)
-                    self.log("Restored original mods folder.")
+                    if os.path.isdir(current_mods):
+                        shutil.rmtree(current_mods)
+                    elif os.path.lexists(current_mods):
+                        os.remove(current_mods)
+                    if mods_backup_path and os.path.lexists(mods_backup_path):
+                        os.rename(mods_backup_path, current_mods)
+                        self.log("Restored original mods folder.")
+                    else:
+                        self.log("Removed temporary modpack mods folder.")
                 except Exception as e:
                     self.log(f"Error restoring mods: {e}")
+
+            if modpack_stage_path and os.path.isdir(modpack_stage_path):
+                try:
+                    shutil.rmtree(modpack_stage_path)
+                except OSError as e:
+                    self.log(f"Error cleaning modpack staging folder: {e}")
 
             if local_skin_server:
                 self.log("Stopping local skin server...")
@@ -12583,6 +13295,7 @@ How to use:
                 except: pass
                 
             def reset_ui():
+                self._launch_in_progress = False
                 self.launch_btn.config(state="normal", text="PLAY")
                 self.launch_opts_btn.config(state="normal")
                 self.update_skin_indicator()
