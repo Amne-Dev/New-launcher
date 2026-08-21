@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.8] - 2026-08-21
+
+### Added
+
+- **CurseForge Modpack Import**: Import local CurseForge exports directly from the Modpacks page. Overrides are imported safely, and an optional CurseForge API key can download the mod files listed in the manifest.
+- **Loading Skeletons**: Added lightweight placeholder loading states throughout long-running launcher views, so content feels responsive while it is being fetched or prepared.
+
+### Changed
+
+- **Installed Mods Browser**: Reworked the **Show Mods** popup to render large mod lists in small batches. Grid/List switching, searching, resizing, and scrolling stay responsive even with very large modpacks.
+- **Modpack Launch Preparation**: Linked modpacks are now synchronized automatically immediately before launch. The Play button shows the update step, then starts Minecraft with the pack's current mods.
+- **Scrolling**: Improved smooth mouse-wheel behavior and scroll-region updates across launcher pages, including the Addons and installed-mods views.
+- **Modrinth UI**: Removed the redundant result-count and status-feedback elements from the Modrinth browsing page for a cleaner results view.
+
+### Fixed
+
+- **Stale Modpack Mods at Launch**: Removing all mods from a linked pack no longer causes the launcher to fall back to global mods. The temporary launch-time mods folder is cleaned up and the original folder is restored after the game closes.
+- **Large Modpack Freezes**: Opening the installed-mods popup no longer blocks the launcher while every mod card is created.
+- **Scroll Binding Regression**: Dynamic Addons content retains working mouse-wheel scrolling after it refreshes.
+
 ## [2.7] - 2026-04-04
 
 ### Added

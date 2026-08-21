@@ -11,12 +11,12 @@ from tkinter import filedialog, messagebox, ttk
 import winreg
 
 
-APP_NAME = "New Launcher"
-APP_VERSION = "2.7.1"
+APP_NAME = "NLC"
+APP_VERSION = "2.8"
 APP_PUBLISHER = "@amne-dev on github"
 APP_EXE = "NewLauncher.exe"
 AGENT_EXE = "agent.exe"
-SHORTCUT_NAME = "New Launcher"
+SHORTCUT_NAME = "NLC"
 SETUP_EXE_NAME = "NLCSetup.exe"
 PAYLOAD_DIR_NAME = "payload"
 CHUNK_SIZE = 1024 * 1024
