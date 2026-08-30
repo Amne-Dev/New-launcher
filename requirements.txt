@@ -4,3 +4,4 @@ Pillow
 pypresence
 skinpy
 pystray
+PySide6
