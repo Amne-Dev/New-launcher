@@ -10,8 +10,46 @@ from nlc.net.http import get_http_session, DEFAULT_TIMEOUT
 logger = logging.getLogger(__name__)
 
 MSA_CLIENT_ID = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb"
+MSA_REDIRECT_URI = "https://login.microsoftonline.com/common/oauth2/nativeclient"
 DEVICE_CODE_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode"
 TOKEN_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token"
+
+import http.server
+import urllib.parse
+
+class MicrosoftLoginHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        pass
+
+    def do_GET(self):
+        if '?' in self.path:
+            query = self.path.split('?', 1)[1]
+            params = urllib.parse.parse_qs(query)
+            if 'code' in params:
+                self.server.auth_code = params['code'][0]  # type: ignore
+                self.server.auth_state = params.get('state', [None])[0]  # type: ignore
+                self.send_response(200)
+                self.send_header('Content-type', 'text/html')
+                self.end_headers()
+                html = """
+                <html>
+                <head><title>Login Successful</title></head>
+                <body style="font-family: 'Segoe UI', sans-serif; text-align: center; padding-top: 50px; background-color: #212121; color: white;">
+                    <h1>Login Successful!</h1>
+                    <p>You can verify the login in the launcher.</p>
+                    <p>This window will close automatically.</p>
+                    <script>setTimeout(function(){window.close()}, 2000);</script>
+                </body>
+                </html>
+                """
+                self.wfile.write(html.encode("utf-8"))
+                return
+            if 'error' in params:
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(b"Login failed or cancelled.")
+                return
+        self.send_error(404)
 
 class MicrosoftDeviceAuth:
     """Manages Microsoft Device Code authentication flow with safe timeouts."""

@@ -136,3 +136,28 @@ def custom_showerror(title: str, message: str, parent=None):
 def custom_askyesno(title: str, message: str, parent=None) -> bool:
     box = CustomMessagebox(title, message, type="yesno", parent=parent)
     return bool(box.result)
+
+def _build_missing_skin_head(size: int = 35):
+    """Build a pixel-art Steve placeholder question mark head when skin is missing."""
+    try:
+        from PIL import Image, ImageDraw, ImageTk
+        from nlc.storage.paths import RESAMPLE_NEAREST
+        pattern = [
+            "..###...",
+            ".#...#..",
+            "....#...",
+            "...#....",
+            "...#....",
+            "........",
+            "...#....",
+            "........",
+        ]
+        img = Image.new("RGBA", (8, 8), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        for y, row in enumerate(pattern):
+            for x, cell in enumerate(row):
+                if cell == "#":
+                    draw.point((x, y), fill=(255, 255, 255, 255))
+        return ImageTk.PhotoImage(img.resize((size, size), RESAMPLE_NEAREST))
+    except Exception:
+        return None

@@ -1,0 +1,5860 @@
+"""
+nlc.ui.app - Main application window and coordinator (MinecraftLauncher)
+Inherits all screen mixins and manages window lifecycle, chrome, navigation,
+and launch execution.
+"""
+
+import os
+import sys
+import io
+import time
+import json
+import uuid
+import glob
+import math
+import shutil
+import base64
+import certifi
+import urllib.parse
+import zipfile
+import tempfile
+import socket
+import logging
+import platform
+import threading
+import traceback
+import subprocess
+from datetime import datetime
+from typing import Any, cast
+
+import tkinter as tk
+from tkinter import font, ttk, messagebox, filedialog, scrolledtext
+from PIL import Image, ImageTk, ImageDraw
+import minecraft_launcher_lib
+import requests
+
+from nlc.ui.theme import COLORS, FONT_FAMILY
+from nlc.storage.paths import resource_path, get_minecraft_dir, is_version_installed, RESAMPLE_NEAREST, FLIP_LEFT_RIGHT, AFFINE
+from nlc.storage.config import (
+    CURRENT_VERSION, DEFAULT_RAM, DEFAULT_USERNAME, INSTALL_MARK,
+    LOADERS, MOD_COMPATIBLE_LOADERS, ConfigManager
+)
+from nlc.core.versions import format_version_display, normalize_version_text
+from nlc.core.launch import safe_extract_zip, patch_minecraft_launcher_launch_helpers
+from nlc.core.discord_rpc import DiscordRPCManager
+from nlc.net.skin_server import LocalSkinServer
+from nlc.net.ms_auth import MicrosoftDeviceAuth, MSA_CLIENT_ID, MSA_REDIRECT_URI
+from nlc.net.elyby_auth import ElyByAuth
+from nlc.ui.components.dialogs import (
+    CustomMessagebox, custom_showinfo, custom_showwarning, custom_showerror, custom_askyesno,
+    _build_missing_skin_head
+)
+from nlc.ui.components.toasts import ToastManager, PopupManager
+from nlc.ui.components.skin_renderer import SkinRenderer3D
+from nlc.ui.components.downloads import DownloadManager, DownloadQueueMixin
+from nlc.ui.screens.accounts import AccountsScreenMixin
+from nlc.ui.screens.settings import SettingsScreenMixin
+from nlc.ui.screens.addons import AddonsScreenMixin
+from nlc.ui.screens.modpacks import ModpacksScreenMixin
+from nlc.ui.screens.mods import ModsScreenMixin
+from nlc.ui.screens.locker import LockerScreenMixin
+from nlc.ui.screens.installations import InstallationsScreenMixin
+from nlc.ui.screens.play import PlayScreenMixin
+
+try:
+    from pypresence import Presence
+    RPC_AVAILABLE = True
+except ImportError:
+    RPC_AVAILABLE = False
+
+try:
+    from pystray import MenuItem as TrayItem, Icon as TrayIcon
+    TRAY_AVAILABLE = True
+except ImportError:
+    TrayItem = None
+    TrayIcon = None
+    TRAY_AVAILABLE = False
+
+# Fallback helper functions for backwards compatibility
+_ORIGINAL_PIL_PHOTOIMAGE = getattr(ImageTk, "PhotoImage", None)
+_IMAGETK_FALLBACK_WARNED = False
+
+def _safe_pil_photoimage(image, *args, **kwargs):
+    global _IMAGETK_FALLBACK_WARNED
+    try:
+        return _ORIGINAL_PIL_PHOTOIMAGE(image, *args, **kwargs)
+    except Exception as exc:
+        if not _IMAGETK_FALLBACK_WARNED:
+            logging.warning("ImageTk.PhotoImage failed (%s); using tkinter.PhotoImage PNG fallback.", exc)
+            _IMAGETK_FALLBACK_WARNED = True
+        with io.BytesIO() as png_buffer:
+            image.save(png_buffer, format="PNG")
+            encoded = base64.b64encode(png_buffer.getvalue()).decode("ascii")
+        return tk.PhotoImage(data=encoded, format="png")
+
+
+ImageTk.PhotoImage = _safe_pil_photoimage
+
+
+def _center_window_on_parent(win, parent=None, width=None, height=None):
+    try:
+        if parent is not None and hasattr(parent, "winfo_exists") and parent.winfo_exists():
+            try:
+                parent.update_idletasks()
+            except Exception:
+                pass
+
+        try:
+            win.update_idletasks()
+        except Exception:
+            pass
+
+        final_w = width if width is not None else win.winfo_width()
+        final_h = height if height is not None else win.winfo_height()
+
+        if not final_w or final_w <= 1:
+            final_w = win.winfo_reqwidth()
+        if not final_h or final_h <= 1:
+            final_h = win.winfo_reqheight()
+
+        screen_w = win.winfo_screenwidth()
+        screen_h = win.winfo_screenheight()
+        x = (screen_w - final_w) // 2
+        y = (screen_h - final_h) // 2
+
+        if parent is not None and hasattr(parent, "winfo_exists") and parent.winfo_exists():
+            try:
+                parent_x = parent.winfo_rootx()
+                parent_y = parent.winfo_rooty()
+                parent_w = parent.winfo_width()
+                parent_h = parent.winfo_height()
+                if parent_w > 1 and parent_h > 1:
+                    x = parent_x + (parent_w - final_w) // 2
+                    y = parent_y + (parent_h - final_h) // 2
+            except Exception:
+                pass
+
+        x = max(0, min(x, max(0, screen_w - final_w)))
+        y = max(0, min(y, max(0, screen_h - final_h)))
+        win.geometry(f"{int(final_w)}x{int(final_h)}+{int(x)}+{int(y)}")
+    except Exception:
+        pass
+
+
+def _resolve_dialog_parent(preferred_parent=None, fallback_widget=None):
+    candidates = []
+    if preferred_parent is not None:
+        candidates.append(preferred_parent)
+    if fallback_widget is not None:
+        try:
+            manager = getattr(fallback_widget, "_nlc_app", None)
+            if manager is not None and getattr(manager, "root", None) is not None:
+                candidates.append(manager.root)
+        except Exception:
+            pass
+        try:
+            top = fallback_widget.winfo_toplevel()
+            if top is not None:
+                candidates.append(top)
+        except Exception:
+            pass
+    default_root = getattr(tk, "_default_root", None)
+    if default_root is not None:
+        candidates.append(default_root)
+
+    seen = set()
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        ident = id(candidate)
+        if ident in seen:
+            continue
+        seen.add(ident)
+        try:
+            if candidate.winfo_exists():
+                return candidate
+        except Exception:
+            continue
+    return None
+
+
+def _schedule_window_centering(win, parent=None, width=None, height=None):
+    owner = _resolve_dialog_parent(parent, win)
+    try:
+        win._nlc_center_owner = owner  # type: ignore[attr-defined]
+        win._nlc_center_width = width  # type: ignore[attr-defined]
+        win._nlc_center_height = height  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
+    def apply_center(target=win, target_owner=owner, target_width=width, target_height=height):
+        try:
+            if not target.winfo_exists():
+                return
+            if os.name == "nt":
+                try:
+                    if str(target.state()) == "withdrawn":
+                        return
+                except Exception:
+                    pass
+            _center_window_on_parent(target, target_owner, width=target_width, height=target_height)
+        except Exception:
+            pass
+
+    apply_center()
+
+    delays = (0, 30, 120, 240, 420, 760) if os.name == "nt" else (0, 30, 120)
+    for delay in delays:
+        try:
+            win.after(delay, apply_center)
+        except Exception:
+            pass
+
+    if not getattr(win, "_nlc_center_hooks", False):
+        try:
+            win.bind(
+                "<Map>",
+                lambda _event, w=win: _schedule_window_centering(
+                    w,
+                    getattr(w, "_nlc_center_owner", None),
+                    getattr(w, "_nlc_center_width", None),
+                    getattr(w, "_nlc_center_height", None),
+                ),
+                add="+",
+            )
+        except Exception:
+            pass
+        try:
+            win._nlc_center_hooks = True  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+
+def _resolve_requests_ca_bundle():
+    env_vars = ("REQUESTS_CA_BUNDLE", "SSL_CERT_FILE", "CURL_CA_BUNDLE")
+    for var_name in env_vars:
+        path = os.environ.get(var_name)
+        if not path:
+            continue
+        if os.path.exists(path):
+            return path
+        try:
+            os.environ.pop(var_name, None)
+        except Exception:
+            pass
+
+    if certifi is not None:
+        try:
+            path = certifi.where()
+            if path and os.path.exists(path):
+                return path
+        except Exception:
+            pass
+
+    for bundled in ("certifi/cacert.pem", "cacert.pem"):
+        try:
+            path = resource_path(bundled)
+            if path and os.path.exists(path):
+                return path
+        except Exception:
+            pass
+
+    return None
+
+
+_REQUESTS_CA_BUNDLE = _resolve_requests_ca_bundle()
+_ORIG_REQUESTS_SESSION_REQUEST = requests.sessions.Session.request
+
+
+def _patched_requests_session_request(session, method, url, **kwargs):
+    if kwargs.get("verify", None) is None and _REQUESTS_CA_BUNDLE:
+        kwargs["verify"] = _REQUESTS_CA_BUNDLE
+
+    # A missing timeout leaves the UI's worker threads hanging indefinitely on a
+    # broken connection.  Individual calls can still request a longer timeout.
+    kwargs.setdefault("timeout", (10, 60))
+
+    try:
+        return _ORIG_REQUESTS_SESSION_REQUEST(session, method, url, **kwargs)
+    except OSError as exc:
+        if "Could not find a suitable TLS CA certificate bundle" not in str(exc):
+            raise
+        for var_name in ("REQUESTS_CA_BUNDLE", "SSL_CERT_FILE", "CURL_CA_BUNDLE"):
+            try:
+                os.environ.pop(var_name, None)
+            except Exception:
+                pass
+        # Never silently fall back to an unverified TLS connection.  Requests
+        # will use its bundled/default trust store after the invalid override
+        # has been cleared.
+        retry_kwargs = dict(kwargs)
+        retry_kwargs.pop("verify", None)
+        logging.warning("Invalid TLS CA bundle path; retrying with the default trust store: %s", url)
+        return _ORIG_REQUESTS_SESSION_REQUEST(session, method, url, **retry_kwargs)
+
+
+requests.sessions.Session.request = _patched_requests_session_request # type: ignore
+
+# --- Helpers ---
+# Moved to utils.py
+
+# --- Color Scheme (Official Launcher Look) ---
+# Moved to config.py
+
+# --- Helpers ---
+# Moved to utils.py
+
+# LOADERS, etc moved to config.py
+
+def format_version_display(version_id):
+    return f"{INSTALL_MARK}{version_id}" if is_version_installed(version_id) else version_id
+
+def normalize_version_text(value):
+    if not value:
+        return ""
+    return value.replace(INSTALL_MARK, "").strip()
+
+
+def _safe_extract_zip(archive, destination):
+    """Extract a ZIP without allowing its entries to escape *destination*."""
+    destination_path = os.path.realpath(destination)
+    with zipfile.ZipFile(archive, "r") as zip_file:
+        for member in zip_file.infolist():
+            # Unix symlinks encoded in ZIP metadata can redirect a later file
+            # outside the target folder even when the filename looks harmless.
+            is_symlink = ((member.external_attr >> 16) & 0o170000) == 0o120000
+            member_path = os.path.realpath(os.path.join(destination_path, member.filename))
+            if is_symlink or os.path.commonpath((destination_path, member_path)) != destination_path:
+                raise ValueError(f"Unsafe archive entry rejected: {member.filename}")
+        zip_file.extractall(destination_path)
+
+
+def _atomic_download(url, destination, *, cancel_event=None, chunk_size=64 * 1024, progress=None, headers=None, rate_limit_kib=0, expected_sha1=None):
+    """Download to a sibling temporary file, then atomically publish it."""
+    destination = os.path.abspath(destination)
+    os.makedirs(os.path.dirname(destination), exist_ok=True)
+    temporary = f"{destination}.{uuid.uuid4().hex}.part"
+    try:
+        with requests.get(url, stream=True, headers=headers, timeout=(10, 60)) as response:
+            response.raise_for_status()
+            total = int(response.headers.get("Content-Length") or 0)
+            downloaded = 0
+            started_at = time.monotonic()
+            with open(temporary, "wb") as output:
+                for chunk in response.iter_content(chunk_size=chunk_size):
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise RuntimeError("Cancelled")
+                    if not chunk:
+                        continue
+                    output.write(chunk)
+                    downloaded += len(chunk)
+                    if rate_limit_kib:
+                        target_elapsed = downloaded / (max(1, rate_limit_kib) * 1024)
+                        remaining = target_elapsed - (time.monotonic() - started_at)
+                        if remaining > 0:
+                            time.sleep(remaining)
+                    if progress is not None:
+                        progress(downloaded, total)
+        if expected_sha1:
+            digest = hashlib.sha1()
+            with open(temporary, "rb") as downloaded_file:
+                for block in iter(lambda: downloaded_file.read(1024 * 1024), b""):
+                    digest.update(block)
+            if digest.hexdigest().lower() != str(expected_sha1).lower():
+                raise ValueError("Downloaded file failed checksum verification.")
+        os.replace(temporary, destination)
+        return destination
+    finally:
+        try:
+            if os.path.exists(temporary):
+                os.remove(temporary)
+        except OSError:
+            logging.warning("Could not remove incomplete download: %s", temporary)
+
+
+def _get_lib_name_without_version(lib):
+    return ":".join(str(lib.get("name", "")).split(":")[:-1])
+
+
+def _safe_inherit_json(original_data, path):
+    inherit_version = original_data["inheritsFrom"]
+
+    with open(os.path.join(path, "versions", inherit_version, inherit_version + ".json"), encoding="utf-8") as f:
+        new_data = json.load(f)
+
+    original_libs = {}
+    for current_lib in original_data.get("libraries", []):
+        lib_name = _get_lib_name_without_version(current_lib)
+        original_libs[lib_name] = True
+
+    lib_list = original_data.get("libraries", [])
+    for current_lib in new_data.get("libraries", []):
+        lib_name = _get_lib_name_without_version(current_lib)
+        if lib_name not in original_libs:
+            lib_list.append(current_lib)
+
+    new_data["libraries"] = lib_list
+
+    for key, value in original_data.items():
+        if key == "libraries":
+            continue
+
+        if isinstance(value, list) and isinstance(new_data.get(key), list):
+            new_data[key] = value + new_data[key]
+        elif isinstance(value, dict) and isinstance(new_data.get(key), dict):
+            target_dict = new_data[key]
+            for child_key, child_value in value.items():
+                if isinstance(child_value, list):
+                    existing_list = target_dict.get(child_key, [])
+                    if not isinstance(existing_list, list):
+                        existing_list = []
+                    target_dict[child_key] = existing_list + child_value
+                else:
+                    target_dict[child_key] = child_value
+        else:
+            new_data[key] = value
+
+    return new_data
+
+
+def _safe_get_minecraft_arguments(data, version_data, path, options, classpath):
+    arglist = []
+    version_id = version_data.get("id", "<unknown>")
+
+    for entry in data:
+        if isinstance(entry, str):
+            arglist.append(
+                minecraft_launcher_lib.command.replace_arguments(
+                    entry, version_data, path, options, classpath
+                )
+            )
+            continue
+
+        if "compatibilityRules" in entry and not minecraft_launcher_lib.command.parse_rule_list(entry["compatibilityRules"], options):
+            continue
+
+        if "rules" in entry and not minecraft_launcher_lib.command.parse_rule_list(entry["rules"], options):
+            continue
+
+        if "value" not in entry:
+            logging.warning(
+                "Skipping malformed launch argument without 'value' for version %s: %s",
+                version_id,
+                entry,
+            )
+            continue
+
+        argument_value = entry.get("value")
+        if isinstance(argument_value, str):
+            arglist.append(
+                minecraft_launcher_lib.command.replace_arguments(
+                    argument_value, version_data, path, options, classpath
+                )
+            )
+            continue
+
+        if isinstance(argument_value, list):
+            for value in argument_value:
+                arglist.append(
+                    minecraft_launcher_lib.command.replace_arguments(
+                        value, version_data, path, options, classpath
+                    )
+                )
+            continue
+
+        logging.warning(
+            "Skipping malformed launch argument value for version %s: %r",
+            version_id,
+            argument_value,
+        )
+
+    return arglist
+
+
+def _patch_minecraft_launcher_launch_helpers():
+    try:
+        minecraft_launcher_lib.command.inherit_json = _safe_inherit_json
+        minecraft_launcher_lib.command.get_arguments = _safe_get_minecraft_arguments
+    except Exception:
+        logging.exception("Failed to patch minecraft-launcher-lib command helpers")
+
+
+_patch_minecraft_launcher_launch_helpers()
+
+
+def _get_streamer_hidden_name():
+    return "Hidden Account"
+
+
+def _get_widget_hwnd(widget):
+    if os.name != "nt":
+        return 0
+    try:
+        return int(widget.winfo_id())
+    except Exception:
+        return 0
+
+
+def _iter_widget_hwnds(widget):
+    if os.name != "nt":
+        return []
+    try:
+        user32 = ctypes.windll.user32
+        base_hwnd = int(widget.winfo_id())
+    except Exception:
+        return []
+
+    try:
+        root_hwnd = int(user32.GetAncestor(base_hwnd, 2))  # GA_ROOT
+    except Exception:
+        root_hwnd = 0
+    if root_hwnd > 0:
+        return [root_hwnd]
+    if base_hwnd > 0:
+        return [base_hwnd]
+    return []
+
+
+def _ensure_window_icon(window, owner=None):
+    try:
+        icon_ico = resource_path("logo.ico")
+        if os.path.exists(icon_ico):
+            window.iconbitmap(icon_ico)
+    except Exception:
+        pass
+
+    try:
+        shared_photo = None
+        if owner is not None:
+            shared_photo = getattr(owner, "_nlc_icon_photo", None)
+        if shared_photo is None:
+            shared_photo = getattr(window, "_nlc_icon_photo", None)
+        if shared_photo is None:
+            icon_png = resource_path("logo.png")
+            if os.path.exists(icon_png):
+                shared_photo = tk.PhotoImage(file=icon_png)
+        if shared_photo is not None:
+            window._nlc_icon_photo = shared_photo
+            window.iconphoto(True, shared_photo)
+    except Exception:
+        pass
+
+
+def _detach_window_owner(window):
+    if os.name != "nt":
+        return
+    try:
+        set_window_long = getattr(ctypes.windll.user32, "SetWindowLongPtrW", ctypes.windll.user32.SetWindowLongW)
+        GWL_HWNDPARENT = -8
+        SWP_NOSIZE = 0x0001
+        SWP_NOMOVE = 0x0002
+        SWP_NOZORDER = 0x0004
+        SWP_NOACTIVATE = 0x0010
+        SWP_FRAMECHANGED = 0x0020
+
+        for hwnd in _iter_widget_hwnds(window):
+            try:
+                set_window_long(hwnd, GWL_HWNDPARENT, 0)
+                ctypes.windll.user32.SetWindowPos(
+                    hwnd, 0, 0, 0, 0, 0,
+                    SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED
+                )
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+
+def _force_taskbar_button(window):
+    if os.name != "nt":
+        return
+    try:
+        _detach_window_owner(window)
+
+        get_window_long = getattr(ctypes.windll.user32, "GetWindowLongPtrW", ctypes.windll.user32.GetWindowLongW)
+        set_window_long = getattr(ctypes.windll.user32, "SetWindowLongPtrW", ctypes.windll.user32.SetWindowLongW)
+
+        GWL_EXSTYLE = -20
+        WS_EX_TOOLWINDOW = 0x00000080
+        WS_EX_APPWINDOW = 0x00040000
+        SWP_NOSIZE = 0x0001
+        SWP_NOMOVE = 0x0002
+        SWP_NOZORDER = 0x0004
+        SWP_NOACTIVATE = 0x0010
+        SWP_FRAMECHANGED = 0x0020
+        SWP_SHOWWINDOW = 0x0040
+
+        for hwnd in _iter_widget_hwnds(window):
+            try:
+                ex_style = int(get_window_long(hwnd, GWL_EXSTYLE))
+                new_style = (ex_style & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW
+                if new_style != ex_style:
+                    set_window_long(hwnd, GWL_EXSTYLE, new_style)
+                # Always commit frame change so Explorer updates taskbar grouping immediately.
+                ctypes.windll.user32.SetWindowPos(
+                    hwnd, 0, 0, 0, 0, 0,
+                    SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW
+                )
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+
+def _prime_taskbar_window(window):
+    if os.name != "nt":
+        return
+
+    def enforce():
+        try:
+            if not window.winfo_exists():
+                return
+            _force_taskbar_button(window)
+        except Exception:
+            pass
+
+    try:
+        window.wm_attributes("-toolwindow", False)
+    except Exception:
+        pass
+
+    def schedule_prime(_event=None):
+        try:
+            if not window.winfo_exists():
+                return
+        except Exception:
+            return
+        window.after_idle(enforce)
+        window.after(80, enforce)
+        window.after(180, enforce)
+        window.after(320, lambda: _refresh_taskbar_registration(window))
+        window.after(650, lambda: _refresh_taskbar_registration(window))
+
+    if not getattr(window, "_nlc_taskbar_hooks", False):
+        try:
+            window.bind("<Map>", schedule_prime, add="+")
+        except Exception:
+            pass
+        try:
+            window.bind("<FocusIn>", lambda _event=None: window.after(40, enforce), add="+")
+        except Exception:
+            pass
+        try:
+            window._nlc_taskbar_hooks = True  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+    schedule_prime()
+
+
+def _refresh_taskbar_registration(window):
+    if os.name != "nt":
+        return False
+    try:
+        user32 = ctypes.windll.user32
+        SWP_NOSIZE = 0x0001
+        SWP_NOMOVE = 0x0002
+        SWP_NOZORDER = 0x0004
+        SWP_NOACTIVATE = 0x0010
+        SWP_FRAMECHANGED = 0x0020
+        RDW_INVALIDATE = 0x0001
+        RDW_UPDATENOW = 0x0100
+        RDW_FRAME = 0x0400
+        did_refresh = False
+        for hwnd in _iter_widget_hwnds(window):
+            try:
+                user32.SetWindowPos(
+                    hwnd, 0, 0, 0, 0, 0,
+                    SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED
+                )
+                user32.RedrawWindow(hwnd, None, None, RDW_INVALIDATE | RDW_UPDATENOW | RDW_FRAME)
+                did_refresh = True
+            except Exception:
+                continue
+        return did_refresh
+    except Exception:
+        return False
+
+
+class MinecraftLauncher(
+    AccountsScreenMixin,
+    SettingsScreenMixin,
+    AddonsScreenMixin,
+    ModpacksScreenMixin,
+    ModsScreenMixin,
+    LockerScreenMixin,
+    InstallationsScreenMixin,
+    PlayScreenMixin,
+    DownloadQueueMixin,
+):
+    def __init__(self, root):
+        self.root = root
+        self.download_manager = DownloadManager(self)
+        self.root.title("NLC | New launcher")
+        
+        # Determine config path early for logging
+        app_data = os.getenv('APPDATA')
+        if os.path.exists("launcher_config.json"):
+             self.config_dir = os.path.abspath(os.path.dirname("launcher_config.json"))
+        elif app_data:
+             self.config_dir = os.path.join(app_data, ".nlc")
+        else:
+             self.config_dir = os.path.join(os.path.expanduser("~"), ".nlc")
+
+        # Initialize Logging
+        self.setup_logging()
+
+        # Global Exception Hook
+        def handle_exception(exc_type, exc_value, exc_traceback):
+            if issubclass(exc_type, KeyboardInterrupt):
+                sys.__excepthook__(exc_type, exc_value, exc_traceback)
+                return
+            
+            logging.error("Uncaught exception", exc_info=(exc_type, exc_value, exc_traceback))
+            traceback.print_exception(exc_type, exc_value, exc_traceback)
+            
+            # Show error dialog if GUI is up
+            if self.root:
+                 # Truncate for message box
+                 tb_lines = traceback.format_exception(exc_type, exc_value, exc_traceback)
+                 start_idx = max(0, len(tb_lines) - 5)
+                 err_text = "".join(tb_lines[start_idx:])
+                 self.root.after(0, lambda: messagebox.showerror("Critical Error", f"An unexpected error occurred:\n{exc_value}\n\nSee logs for full details."))
+
+        sys.excepthook = handle_exception
+
+        try:
+            self.root.iconbitmap(resource_path("logo.ico"))
+        except Exception:
+            pass
+        try:
+            self.root._nlc_app = self  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        self.popup_manager = PopupManager(self.root)
+        self.toast_manager = ToastManager(self.root)
+        self.root._nlc_popup_manager = self.popup_manager  # type: ignore[attr-defined]
+        _ensure_window_icon(self.root, owner=self.root)
+        if os.name != 'nt':
+            try:
+                self.root.option_add("*Button.highlightThickness", 0)
+                self.root.option_add("*Entry.highlightThickness", 0)
+                self.root.option_add("*Listbox.highlightThickness", 0)
+                self.root.option_add("*Text.highlightThickness", 0)
+                self.root.option_add("*Canvas.highlightThickness", 0)
+                self.root.option_add("*Checkbutton.highlightThickness", 0)
+                self.root.option_add("*Radiobutton.highlightThickness", 0)
+                self.root.option_add("*Scale.highlightThickness", 0)
+            except Exception:
+                pass
+            
+        # Center Window
+        w, h = 1080, 720
+        ws = self.root.winfo_screenwidth()
+        hs = self.root.winfo_screenheight()
+        x = (ws/2) - (w/2)
+        y = (hs/2) - (h/2)
+        self.root.geometry('%dx%d+%d+%d' % (w, h, x, y))
+        
+        self.root.configure(bg=COLORS['main_bg'])
+        self.minecraft_dir = get_minecraft_dir()
+        self.custom_titlebar_enabled = True # Will be overridden by config, but default to true on windows
+        self.neo_style_enabled = True # Will be overridden by config
+        if os.name != 'nt':
+            self.custom_titlebar_enabled = False
+        self._custom_chrome_applied = False
+        self._window_is_maximized = False
+        self.root.update_idletasks()
+        self._windowed_geometry = (
+            self.root.winfo_x(),
+            self.root.winfo_y(),
+            max(1, self.root.winfo_width()),
+            max(1, self.root.winfo_height())
+        )
+        self._last_nonmax_geometry = self._windowed_geometry
+        self._drag_start_x = 0
+        self._drag_start_y = 0
+        self._drag_win_x = 0
+        self._drag_win_y = 0
+        self._drag_last_x = 0
+        self._drag_last_y = 0
+        self._drag_active = False
+        self._drag_target_x = 0
+        self._drag_target_y = 0
+        self._drag_apply_after_id = None
+        self._drag_preview_enabled = (os.name == 'nt')
+        self._drag_preview_win = None
+        self._drag_preview_w = 0
+        self._drag_preview_h = 0
+        self._drag_preview_logo = None
+        self._window_animating = False
+        self._window_anim_after_id = None
+        self._transition_overlay_win = None
+        self._pre_minimize_geometry = None
+        self._pre_minimize_anchor_geometry = None
+        self._pre_minimize_was_maximized = False
+        self._taskbar_refresh_done = False
+        self._original_win_style = None
+        self._use_native_drag = False
+        self._onboarding_wizard = None
+        self._onboarding_overlay = None
+        self._onboarding_focus_bindings = []
+        self._dialog_windows = []
+        self._dialog_focus_bindings = []
+        self._dialog_raise_scheduled = False
+        self._dialog_raise_after_id = None
+        self._dialog_last_raise_ts = 0.0
+        self._dialog_raise_min_interval = 0.12
+        self.window_shell = None
+        self.window_content = self.root
+        self._update_in_progress = False
+        self._update_shutdown_started = False
+        self._config_save_after_id = None
+        self._config_save_delay_ms = 250
+        self._config_sync_ui_pending = False
+        self._launch_in_progress = False
+        
+        # Download Queue State
+        self.download_tasks = {} # id -> {ui_elements, data}
+        self.addons_config: dict[str, Any] = {} # Addons configuration
+        self.download_queue_visible = False
+        
+        # Config Priority: 
+        # 1. Local "launcher_config.json" (Portable / Dev mode)
+        # 2. AppData/.nlc (Standard Install)
+        
+        local_config = "launcher_config.json"
+        
+        if os.path.exists(local_config):
+            self.config_file = os.path.abspath(local_config)
+            self.config_dir = os.path.dirname(self.config_file)
+            print(f"Using local config: {self.config_file}")
+        else:
+            app_data = os.getenv('APPDATA')
+            if app_data:
+                self.config_dir = os.path.join(app_data, ".nlc")
+            else:
+                self.config_dir = os.path.join(os.path.expanduser("~"), ".nlc")
+                
+            if not os.path.exists(self.config_dir):
+                os.makedirs(self.config_dir, exist_ok=True)
+                
+            self.config_file = os.path.join(self.config_dir, "launcher_config.json")
+            print(f"Using global config: {self.config_file}")
+        
+        # --- Pre-load Accent Color & Custom Titlebar ---
+        self.accent_color_name = "Green"
+        try:
+            if os.path.exists(self.config_file):
+                with open(self.config_file, "r", encoding="utf-8") as f:
+                    _d = json.load(f)
+                    self.accent_color_name = _d.get("accent_color", "Green")
+                    
+                    # Pre-load custom titlebar setting BEFORE window creation
+                    if "custom_titlebar_enabled" in _d:
+                        self.custom_titlebar_enabled = _d["custom_titlebar_enabled"] and os.name == 'nt'
+                    
+                    self.neo_style_enabled = _d.get("neo_style_enabled", True)
+                    if self.neo_style_enabled:
+                        # Apply OLED Black Neo Style
+                        COLORS['sidebar_bg'] = '#000000'
+                        COLORS['main_bg'] = '#050505'
+                        COLORS['tab_bar_bg'] = '#050505'
+                        COLORS['bottom_bar_bg'] = '#000000'
+                        COLORS['card_bg'] = '#111111'
+                        COLORS['input_bg'] = '#1A1A1A'
+                        COLORS['input_border'] = '#333333'
+                        COLORS['separator'] = '#1F1F1F'
+                    
+                    _colors = {
+                        "Green": "#2D8F36",
+                        "Blue": "#3498DB",
+                        "Orange": "#E67E22",
+                        "Purple": "#9B59B6",
+                        "Red": "#E74C3C"
+                    }
+                    if self.accent_color_name in _colors:
+                        c = _colors[self.accent_color_name]
+                        COLORS['play_btn_green'] = c
+                        COLORS['active_tab_border'] = c
+                        COLORS['success_green'] = c
+                        # We keep accent_blue as blue unless requested otherwise, 
+                        # but play_btn_green is the main brand color used everywhere.
+        except Exception as e:
+            print(f"Error pre-loading config: {e}")
+
+        self.last_version = ""
+        self.profiles = [] # List of {"name": str, "type": "offline", "skin_path": str, "uuid": str} (ACCOUNTS)
+        self.installations = [] # List of {"name": str, "version": str, "loader": str, "last_played": str, "created": str} (GAME PROFILES)
+        self.current_profile_index = -1
+        self.skin_path = ""  # Initialize before load_from_config
+        self.auto_download_mod = False
+        self.enable_modrinth = True
+        self.installed_mods_view_mode = "grid"
+        self.mod_available_online = False
+        self.ram_allocation = DEFAULT_RAM
+        self.java_args = ""
+        self.loader_var = tk.StringVar(value="Vanilla")
+        self.version_var = tk.StringVar()
+        self.rpc_enabled = True # Default True
+        self.rpc_show_version = True # Default True
+        self.rpc_show_server = True # Default True
+        self.rpc = None
+        self.rpc_connected = False
+        self.auto_update_check = True # Default True
+        self.icon_cache = {}
+        self.hero_img_raw = None
+        self.first_run = True # Default for new installs
+
+        # Addons Config
+        self.addons_config = {
+            "p3_reload_menu": False,
+            "gh_sync_enabled": False,
+            "gh_repo": "",
+            "gh_token": "",
+            "playtime_tracker": {},
+            "saved_servers": []
+        }
+        self.screenshot_thumbnail_cache = {}
+        self.quick_join_installation_labels = {}
+        self.third_party_addons = []
+        self.third_party_addon_input_vars = {}
+        
+        # Agent / Background Process
+        self.agent_process = None
+        self.agent_callbacks = {}
+        self.agent_lock = threading.Lock()
+
+        self.start_time = None
+        self.current_tab = None
+        self.log_file_path = None
+
+        self.setup_logging()
+        self.setup_tray()
+        
+        self.modpacks = []
+        self.load_modpacks()
+
+        # Smooth scrolling state
+        self._scroll_velocities = {}  # canvas_id -> velocity
+        self._scroll_anim_ids = {}    # canvas_id -> after_id
+
+        self.setup_styles()
+        self.setup_window_chrome()
+        self.create_layout()
+        self.load_from_config()
+        # Refresh UI with loaded data
+        self.update_installation_dropdown()
+        self.refresh_installations_list()
+        self.load_versions()
+        
+        # Auto Update Check
+        if self.auto_update_check:
+            self.check_for_updates()
+            
+        # Start Background Agent
+        self.start_agent_process()
+            
+        # Onboarding / What's New Trigger
+        if self.first_run:
+            self.last_version = CURRENT_VERSION
+            self.root.after(500, self.show_onboarding_wizard)
+        elif getattr(self, "last_version", "") and self.last_version != CURRENT_VERSION:
+            self.root.after(1000, lambda: self.show_whats_new(CURRENT_VERSION))
+            self.last_version = CURRENT_VERSION
+            self.save_config()
+
+    def load_modpacks(self):
+        self.modpacks = []
+        try:
+            mp_file = os.path.join(self.config_dir, "modpacks.json")
+            if os.path.exists(mp_file):
+                with open(mp_file, "r") as f:
+                    loaded = json.load(f)
+                    if not isinstance(loaded, list):
+                        raise ValueError("Modpacks configuration must be a list.")
+                    self.modpacks = [pack for pack in loaded if isinstance(pack, dict)]
+        except Exception as e:
+            self.log(f"Error loading modpacks: {e}")
+
+    def save_modpacks(self):
+        try:
+            mp_file = os.path.join(self.config_dir, "modpacks.json")
+            with open(mp_file, "w") as f:
+                json.dump(self.modpacks, f, indent=4)
+        except Exception as e:
+            self.log(f"Error saving modpacks: {e}")
+
+    def get_modpack_dir(self, pack_id):
+        # IDs are persisted user data; do not let a malformed config traverse
+        # out of the launcher's modpack storage before a delete/copy operation.
+        safe_id = os.path.basename(str(pack_id or "").strip())
+        if not safe_id or safe_id in {".", ".."}:
+            raise ValueError("Invalid modpack identifier.")
+        root = os.path.abspath(os.path.join(getattr(self, 'config_dir', os.getcwd()), "modpacks"))
+        base = os.path.abspath(os.path.join(root, safe_id))
+        if os.path.commonpath((root, base)) != root:
+            raise ValueError("Modpack path is outside launcher storage.")
+        if not os.path.exists(base):
+            os.makedirs(base, exist_ok=True)
+        return base
+
+    def setup_styles(self):
+        style = ttk.Style()
+        style.theme_use('clam')
+        
+        # Combobox
+        style.configure("Launcher.TCombobox",
+                       fieldbackground=COLORS['input_bg'],
+                       background=COLORS['input_bg'],
+                       foreground=COLORS['text_primary'],
+                       arrowcolor=COLORS['text_primary'],
+                       bordercolor=COLORS['input_border'],
+                       lightcolor=COLORS['input_bg'],
+                       darkcolor=COLORS['input_bg'],
+                       relief="flat")
+        style.map('Launcher.TCombobox',
+                 fieldbackground=[('readonly', COLORS['input_bg'])],
+                 selectbackground=[('readonly', COLORS['input_bg'])],
+                 selectforeground=[('readonly', COLORS['text_primary'])])
+        
+        # Progressbar
+        style.configure("Launcher.Horizontal.TProgressbar",
+                       troughcolor="#212121",
+                       background=COLORS['success_green'],
+                       bordercolor="#212121",
+                       lightcolor="#212121",
+                       darkcolor="#212121",
+                       borderwidth=0,
+                       thickness=15)
+        
+        # Scrollbar (Custom Dark)
+        # Note: 'clam' theme Scrollbars are tricky. 
+        # We need to use 'Vertical.TScrollbar' and define the layout or element options clearly.
+        # Alternatively, using standard Tk Scrollbar with colors if ttk fails, but let's try to fix style map.
+        
+        style.layout("Launcher.Vertical.TScrollbar", 
+                    [('Vertical.Scrollbar.trough',
+                      {'children': [('Vertical.Scrollbar.thumb', 
+                                    {'expand': '1', 'sticky': 'nswe'})],
+                       'sticky': 'ns'})]) # type: ignore
+                       
+        style.configure("Launcher.Vertical.TScrollbar",
+                       background="#3A3B3C",
+                       troughcolor=COLORS['main_bg'],
+                       bordercolor=COLORS['main_bg'],
+                       arrowcolor=COLORS['text_secondary'],
+                       lightcolor="#3A3B3C",
+                       darkcolor="#3A3B3C",
+                       relief="flat",
+                       borderwidth=0)
+        
+        style.map("Launcher.Vertical.TScrollbar",
+                 background=[('pressed', '#505050'), ('active', '#4a4a4a')],
+                 arrowcolor=[('pressed', COLORS['text_primary']), ('active', COLORS['text_primary'])])
+
+    def _set_custom_window_chrome(self, enabled):
+        if not self.custom_titlebar_enabled:
+            return
+        try:
+            if os.name != 'nt':
+                if enabled and not self._custom_chrome_applied:
+                    self.root.overrideredirect(True)
+                    self._custom_chrome_applied = True
+                elif not enabled and self._custom_chrome_applied:
+                    self.root.overrideredirect(False)
+                    self._custom_chrome_applied = False
+                return
+
+            hwnd = self._get_native_hwnd()
+            if not hwnd:
+                return
+            get_window_long = getattr(ctypes.windll.user32, "GetWindowLongPtrW", ctypes.windll.user32.GetWindowLongW)
+            set_window_long = getattr(ctypes.windll.user32, "SetWindowLongPtrW", ctypes.windll.user32.SetWindowLongW)
+
+            GWL_STYLE = -16
+            SWP_NOSIZE = 0x0001
+            SWP_NOMOVE = 0x0002
+            SWP_NOZORDER = 0x0004
+            SWP_NOACTIVATE = 0x0010
+            SWP_FRAMECHANGED = 0x0020
+            WS_POPUP = 0x80000000
+            WS_CAPTION = 0x00C00000
+            WS_THICKFRAME = 0x00040000
+            WS_MINIMIZEBOX = 0x00020000
+            WS_MAXIMIZEBOX = 0x00010000
+            WS_SYSMENU = 0x00080000
+
+            current_style = int(get_window_long(hwnd, GWL_STYLE))
+            if self._original_win_style is None:
+                self._original_win_style = current_style
+
+            if enabled:
+                new_style = (current_style & ~(WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU)) | WS_POPUP
+                if new_style != current_style:
+                    set_window_long(hwnd, GWL_STYLE, new_style)
+                    ctypes.windll.user32.SetWindowPos(
+                        hwnd, 0, 0, 0, 0, 0,
+                        SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED
+                    )
+                self._custom_chrome_applied = True
+                self.root.after(10, self._ensure_taskbar_visibility)
+            elif not enabled and self._custom_chrome_applied:
+                restore_style = int(self._original_win_style) if self._original_win_style is not None else current_style
+                set_window_long(hwnd, GWL_STYLE, restore_style)
+                ctypes.windll.user32.SetWindowPos(
+                    hwnd, 0, 0, 0, 0, 0,
+                    SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED
+                )
+                self._custom_chrome_applied = False
+        except Exception:
+            pass
+
+    def _get_native_hwnd(self):
+        if os.name != 'nt':
+            return 0
+        try:
+            base_hwnd = int(self.root.winfo_id())
+            GA_ROOT = 2
+            user32 = ctypes.windll.user32
+            root_hwnd = user32.GetAncestor(base_hwnd, GA_ROOT)
+            return int(root_hwnd) if root_hwnd else base_hwnd
+        except Exception:
+            return 0
+
+    def _ensure_taskbar_visibility(self):
+        if not self.custom_titlebar_enabled or os.name != 'nt':
+            return
+        try:
+            hwnd = self._get_native_hwnd()
+            if not hwnd:
+                return
+            get_window_long = getattr(ctypes.windll.user32, "GetWindowLongPtrW", ctypes.windll.user32.GetWindowLongW)
+            set_window_long = getattr(ctypes.windll.user32, "SetWindowLongPtrW", ctypes.windll.user32.SetWindowLongW)
+
+            GWL_EXSTYLE = -20
+            WS_EX_TOOLWINDOW = 0x00000080
+            WS_EX_APPWINDOW = 0x00040000
+            SWP_NOSIZE = 0x0001
+            SWP_NOMOVE = 0x0002
+            SWP_NOZORDER = 0x0004
+            SWP_NOACTIVATE = 0x0010
+            SWP_FRAMECHANGED = 0x0020
+
+            ex_style = int(get_window_long(hwnd, GWL_EXSTYLE))
+            new_style = (ex_style & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW
+            if new_style != ex_style:
+                set_window_long(hwnd, GWL_EXSTYLE, new_style)
+                ctypes.windll.user32.SetWindowPos(
+                    hwnd, 0, 0, 0, 0, 0,
+                    SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED
+                )
+            if not self._taskbar_refresh_done:
+                self._taskbar_refresh_done = True
+                self.root.after(30, self._refresh_taskbar_window)
+        except Exception:
+            pass
+
+    def _refresh_taskbar_window(self):
+        if not self.custom_titlebar_enabled or os.name != 'nt':
+            return
+        try:
+            if str(self.root.state()) == 'withdrawn':
+                return
+            geom = self.root.geometry()
+            self.root.withdraw()
+            self.root.after(20, lambda g=geom: self._restore_from_taskbar_refresh(g))
+        except Exception:
+            pass
+
+    def _restore_from_taskbar_refresh(self, geom):
+        try:
+            self.root.deiconify()
+            self.root.geometry(geom)
+            self.root.lift()
+            self._set_custom_window_chrome(True)
+        except Exception:
+            pass
+
+    def _on_root_map_restore_chrome(self, event):
+        if not self.custom_titlebar_enabled:
+            return
+        if event and event.widget != self.root:
+            return
+        self.root.after(30, lambda: self._set_custom_window_chrome(True))
+        self.root.after(60, self._ensure_taskbar_visibility)
+
+    def _start_native_drag(self, window=None):
+        if not self._use_native_drag or os.name != 'nt':
+            return False
+        try:
+            target = window if window is not None else self.root
+            hwnd = self._get_native_hwnd_for_widget(target)
+            if not hwnd:
+                return False
+            user32 = ctypes.windll.user32
+            user32.ReleaseCapture()
+            user32.SendMessageW(hwnd, 0x00A1, 0x0002, 0)  # WM_NCLBUTTONDOWN + HTCAPTION
+            return True
+        except Exception:
+            return False
+
+    def _begin_window_drag(self, event):
+        if not self.custom_titlebar_enabled:
+            return
+        if self._window_is_maximized or str(self.root.state()) == "zoomed":
+            ratio = (event.x_root - self.root.winfo_x()) / max(1, self.root.winfo_width())
+            ratio = min(max(ratio, 0.1), 0.9)
+            
+            # Instantly unmaximize without animation so dragging isn't interrupted
+            self.root.state("normal")
+            target = getattr(self, '_windowed_geometry', None) or getattr(self, '_last_nonmax_geometry', None)
+            if not target:
+                target = self._build_default_windowed_geometry()
+            
+            w = target[2]
+            h = target[3]
+            
+            self._window_is_maximized = False
+            if hasattr(self, 'window_max_btn'):
+                self.window_max_btn.config(text="□")
+            try:
+                self._update_titlebar_controls_offset()
+                self._set_custom_window_chrome(True)
+                self._ensure_taskbar_visibility()
+            except Exception:
+                pass
+            
+            x = int(event.x_root - (w * ratio))
+            y = max(0, event.y_root - 12)
+            self.root.geometry(f"{max(1, int(w))}x{max(1, int(h))}+{int(x)}+{int(y)}")
+            self.root.update_idletasks()
+
+        self._drag_start_x = event.x_root
+        self._drag_start_y = event.y_root
+        self._drag_win_x = self.root.winfo_x()
+        self._drag_win_y = self.root.winfo_y()
+        self._drag_last_x = event.x_root
+        self._drag_last_y = event.y_root
+        self._drag_target_x = self._drag_win_x
+        self._drag_target_y = self._drag_win_y
+        self._drag_active = True
+        self._open_drag_preview()
+
+    def _open_drag_preview(self):
+        if not self._drag_preview_enabled or self._drag_preview_win is not None:
+            return
+        try:
+            self.root.update_idletasks()
+            self._drag_preview_w = max(500, self.root.winfo_width())
+            self._drag_preview_h = max(320, self.root.winfo_height())
+
+            preview = tk.Toplevel(self.root)
+            preview.overrideredirect(True)
+            preview.configure(bg="#0f0f0f")
+            try:
+                preview.attributes("-topmost", True)
+            except Exception:
+                pass
+            preview.geometry(
+                f"{self._drag_preview_w}x{self._drag_preview_h}+{self._drag_target_x}+{self._drag_target_y}"
+            )
+
+            shell = tk.Frame(preview, bg="#0f0f0f", highlightthickness=1, highlightbackground="#2f2f2f")
+            shell.pack(fill="both", expand=True)
+            center = tk.Frame(shell, bg="#0f0f0f")
+            center.place(relx=0.5, rely=0.5, anchor="center")
+
+            logo_path = resource_path("logo.png")
+            if os.path.exists(logo_path):
+                try:
+                    img = Image.open(logo_path).convert("RGBA")
+                    img = img.resize((92, 92), Image.Resampling.LANCZOS)
+                    self._drag_preview_logo = ImageTk.PhotoImage(img)
+                    tk.Label(center, image=self._drag_preview_logo, bg="#0f0f0f").pack(pady=(0, 14))
+                except Exception:
+                    pass
+
+            tk.Label(
+                center,
+                text="NLC",
+                font=("Segoe UI", 22, "bold"),
+                fg="white",
+                bg="#0f0f0f"
+            ).pack()
+            tk.Label(
+                center,
+                text="Drag anywhere you want",
+                font=("Segoe UI", 11),
+                fg="#A0A0A0",
+                bg="#0f0f0f"
+            ).pack(pady=(8, 0))
+
+            self._drag_preview_win = preview
+            self.root.withdraw()
+        except Exception:
+            self._drag_preview_win = None
+
+    def _apply_window_drag_target(self):
+        self._drag_apply_after_id = None
+        if not self._drag_active:
+            return
+        if self._drag_preview_win and self._drag_preview_win.winfo_exists():
+            self._drag_preview_win.geometry(
+                f"{self._drag_preview_w}x{self._drag_preview_h}+{self._drag_target_x}+{self._drag_target_y}"
+            )
+        else:
+            self.root.geometry(f"+{self._drag_target_x}+{self._drag_target_y}")
+
+    def _schedule_window_drag_apply(self):
+        if self._drag_apply_after_id is not None:
+            return
+        self._drag_apply_after_id = self.root.after(8, self._apply_window_drag_target)
+
+    def _do_window_drag(self, event):
+        if not self.custom_titlebar_enabled or not self._drag_active:
+            return
+        target_x = self._drag_win_x + (event.x_root - self._drag_start_x)
+        target_y = self._drag_win_y + (event.y_root - self._drag_start_y)
+        if target_x == self._drag_target_x and target_y == self._drag_target_y:
+            return
+        self._drag_target_x = target_x
+        self._drag_target_y = target_y
+        self._schedule_window_drag_apply()
+
+    def _end_window_drag(self, _event=None):
+        if self._drag_apply_after_id is not None:
+            try:
+                self.root.after_cancel(self._drag_apply_after_id)
+            except Exception:
+                pass
+            self._drag_apply_after_id = None
+        if self._drag_active:
+            if self._drag_preview_win and self._drag_preview_win.winfo_exists():
+                try:
+                    self.root.deiconify()
+                    self.root.geometry(
+                        f"{self._drag_preview_w}x{self._drag_preview_h}+{self._drag_target_x}+{self._drag_target_y}"
+                    )
+                    self._set_custom_window_chrome(True)
+                    self.root.lift()
+                    self.root.focus_force()
+                except Exception:
+                    pass
+                try:
+                    self._drag_preview_win.destroy()
+                except Exception:
+                    pass
+                self._drag_preview_win = None
+                self._drag_preview_logo = None
+            else:
+                self.root.geometry(f"+{self._drag_target_x}+{self._drag_target_y}")
+        elif self._drag_preview_win and self._drag_preview_win.winfo_exists():
+            try:
+                self._drag_preview_win.destroy()
+            except Exception:
+                pass
+            self._drag_preview_win = None
+            self._drag_preview_logo = None
+            try:
+                self.root.deiconify()
+                self._set_custom_window_chrome(True)
+            except Exception:
+                pass
+        self._drag_active = False
+
+    def _bind_drag_widget(self, widget):
+        widget.bind("<ButtonPress-1>", self._begin_window_drag)
+        widget.bind("<B1-Motion>", self._do_window_drag)
+        widget.bind("<ButtonRelease-1>", self._end_window_drag)
+        widget.bind("<Double-Button-1>", lambda _e: self._toggle_window_maximize())
+
+    def _get_work_area(self):
+        if os.name == 'nt':
+            try:
+                class _RECT(ctypes.Structure):
+                    _fields_ = [
+                        ("left", ctypes.c_long),
+                        ("top", ctypes.c_long),
+                        ("right", ctypes.c_long),
+                        ("bottom", ctypes.c_long),
+                    ]
+
+                class _MONITORINFO(ctypes.Structure):
+                    _fields_ = [
+                        ("cbSize", wintypes.DWORD),
+                        ("rcMonitor", _RECT),
+                        ("rcWork", _RECT),
+                        ("dwFlags", wintypes.DWORD),
+                    ]
+
+                hwnd = self._get_native_hwnd()
+                user32 = ctypes.windll.user32
+                MONITOR_DEFAULTTONEAREST = 2
+                monitor = user32.MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)
+                if monitor:
+                    mi = _MONITORINFO()
+                    mi.cbSize = ctypes.sizeof(_MONITORINFO)
+                    ok = user32.GetMonitorInfoW(monitor, ctypes.byref(mi))
+                    if ok:
+                        return (
+                            int(mi.rcWork.left),
+                            int(mi.rcWork.top),
+                            int(mi.rcWork.right - mi.rcWork.left),
+                            int(mi.rcWork.bottom - mi.rcWork.top),
+                        )
+            except Exception:
+                pass
+        return 0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+
+    def _get_current_geometry_tuple(self):
+        return (
+            int(self.root.winfo_x()),
+            int(self.root.winfo_y()),
+            max(1, int(self.root.winfo_width())),
+            max(1, int(self.root.winfo_height())),
+        )
+
+    def _is_geometry_maximized_like(self, geom, tolerance=14):
+        try:
+            wx, wy, ww, wh = self._get_work_area()
+            x, y, w, h = geom
+            right = int(x) + int(w)
+            bottom = int(y) + int(h)
+            work_right = int(wx) + int(ww)
+            work_bottom = int(wy) + int(wh)
+            return (
+                int(x) <= int(wx) + tolerance
+                and int(y) <= int(wy) + tolerance
+                and right >= work_right - tolerance
+                and bottom >= work_bottom - tolerance
+            )
+        except Exception:
+            return False
+
+    def _build_default_windowed_geometry(self):
+        wx, wy, ww, wh = self._get_work_area()
+        dw = max(900, min(1100, int(ww * 0.78)))
+        dh = max(620, min(760, int(wh * 0.78)))
+        dx = wx + max(0, (ww - dw) // 2)
+        dy = wy + max(0, (wh - dh) // 2)
+        return (dx, dy, dw, dh)
+
+    def _set_geometry_tuple(self, geom):
+        x, y, w, h = geom
+        self.root.geometry(f"{max(1, int(w))}x{max(1, int(h))}+{int(x)}+{int(y)}")
+
+    def _cancel_window_animation(self):
+        if self._window_anim_after_id is not None:
+            try:
+                self.root.after_cancel(self._window_anim_after_id)
+            except Exception:
+                pass
+            self._window_anim_after_id = None
+        self._window_animating = False
+        self._destroy_transition_overlay()
+
+    def _animate_window_geometry(self, start_geom, end_geom, duration=150, steps=12, on_done=None, apply_geometry=None, cancel_existing=True):
+        if cancel_existing:
+            self._cancel_window_animation()
+        self._window_animating = True
+        step_delay = max(8, int(duration / max(1, steps)))
+        apply_cb = apply_geometry if apply_geometry is not None else self._set_geometry_tuple
+
+        sx, sy, sw, sh = start_geom
+        ex, ey, ew, eh = end_geom
+
+        def tick(i):
+            t = i / max(1, steps)
+            # Smoothstep easing
+            eased = t * t * (3 - 2 * t)
+            nx = round(sx + (ex - sx) * eased)
+            ny = round(sy + (ey - sy) * eased)
+            nw = round(sw + (ew - sw) * eased)
+            nh = round(sh + (eh - sh) * eased)
+            apply_cb((nx, ny, nw, nh))
+
+            if i >= steps:
+                self._window_animating = False
+                self._window_anim_after_id = None
+                if on_done:
+                    on_done()
+                return
+            self._window_anim_after_id = self.root.after(step_delay, lambda: tick(i + 1))
+
+        tick(0)
+
+    def _destroy_transition_overlay(self):
+        overlay = self._transition_overlay_win
+        self._transition_overlay_win = None
+        if overlay is not None:
+            try:
+                if overlay.winfo_exists():
+                    overlay.destroy()
+            except Exception:
+                pass
+
+    def _set_transition_overlay_geometry(self, geom):
+        overlay = self._transition_overlay_win
+        if overlay is None:
+            self._set_geometry_tuple(geom)
+            return
+        try:
+            if overlay.winfo_exists():
+                x, y, w, h = geom
+                overlay.geometry(f"{max(1, int(w))}x{max(1, int(h))}+{int(x)}+{int(y)}")
+                return
+        except Exception:
+            pass
+        self._set_geometry_tuple(geom)
+
+    def _create_transition_overlay(self, geom, subtitle=""):
+        if os.name != 'nt' or not self.custom_titlebar_enabled:
+            return False
+        try:
+            self._destroy_transition_overlay()
+            x, y, w, h = geom
+            overlay = tk.Toplevel(self.root)
+            overlay.overrideredirect(True)
+            overlay.configure(bg="#0d0d0d")
+            try:
+                overlay.attributes("-topmost", True)
+            except Exception:
+                pass
+            overlay.geometry(f"{max(1, int(w))}x{max(1, int(h))}+{int(x)}+{int(y)}")
+
+            shell = tk.Frame(overlay, bg="#0d0d0d", highlightthickness=1, highlightbackground="#2f2f2f")
+            shell.pack(fill="both", expand=True)
+
+            center = tk.Frame(shell, bg="#0d0d0d")
+            center.place(relx=0.5, rely=0.5, anchor="center")
+            tk.Label(
+                center,
+                text="NLC",
+                font=("Segoe UI", 22, "bold"),
+                fg="white",
+                bg="#0d0d0d"
+            ).pack()
+            if subtitle:
+                tk.Label(
+                    center,
+                    text=subtitle,
+                    font=("Segoe UI", 11),
+                    fg="#A0A0A0",
+                    bg="#0d0d0d"
+                ).pack(pady=(8, 0))
+            self._transition_overlay_win = overlay
+            return True
+        except Exception:
+            self._destroy_transition_overlay()
+            return False
+
+    def _run_transition_with_overlay(self, start_geom, end_geom, duration=150, steps=12, subtitle="", finalize=None, on_done=None):
+        self._cancel_window_animation()
+        overlay_ready = self._create_transition_overlay(start_geom, subtitle=subtitle)
+        apply_cb = self._set_transition_overlay_geometry if overlay_ready else self._set_geometry_tuple
+
+        def finish():
+            try:
+                if finalize:
+                    finalize()
+            finally:
+                self._destroy_transition_overlay()
+                if on_done:
+                    on_done()
+
+        if start_geom == end_geom:
+            finish()
+            return
+
+        self._animate_window_geometry(
+            start_geom,
+            end_geom,
+            duration=duration,
+            steps=steps,
+            on_done=finish,
+            apply_geometry=apply_cb,
+            cancel_existing=False
+        )
+
+    def _toggle_window_maximize(self):
+        if self._drag_active:
+            return
+        if self._window_animating:
+            return
+        current_state = str(self.root.state())
+        current_geom = self._get_current_geometry_tuple()
+        is_geom_max = self._is_geometry_maximized_like(current_geom, tolerance=24)
+        currently_maximized = self._window_is_maximized or current_state == "zoomed" or is_geom_max
+        if currently_maximized:
+            if current_state == "zoomed":
+                self.root.state("normal")
+                self.root.update_idletasks()
+            start = self._get_current_geometry_tuple()
+            target = self._windowed_geometry if self._windowed_geometry else self._last_nonmax_geometry
+            if not target:
+                target = self._build_default_windowed_geometry()
+            if self._is_geometry_maximized_like(target, tolerance=20):
+                target = self._build_default_windowed_geometry()
+
+            def on_restore_done():
+                self._window_is_maximized = False
+                self._windowed_geometry = target
+                self._last_nonmax_geometry = target
+                if hasattr(self, 'window_max_btn'):
+                    self.window_max_btn.config(text="□")
+                self._update_titlebar_controls_offset()
+                self._set_custom_window_chrome(True)
+                self._ensure_taskbar_visibility()
+
+            def finalize_restore():
+                self.root.state("normal")
+                self._set_geometry_tuple(target)
+
+            self._run_transition_with_overlay(
+                start,
+                target,
+                duration=150,
+                steps=12,
+                subtitle="Restoring window",
+                finalize=finalize_restore,
+                on_done=on_restore_done
+            )
+        else:
+            if current_state == "zoomed":
+                self.root.state("normal")
+                self.root.update_idletasks()
+            start = self._get_current_geometry_tuple()
+            if current_state == "normal" and not self._is_geometry_maximized_like(start, tolerance=20):
+                self._windowed_geometry = start
+                self._last_nonmax_geometry = start
+            x, y, w, h = self._get_work_area()
+            target = (x, y, max(1, w), max(1, h))
+
+            def on_max_done():
+                self._window_is_maximized = True
+                if hasattr(self, 'window_max_btn'):
+                    self.window_max_btn.config(text="❐")
+                self._update_titlebar_controls_offset()
+                self._set_custom_window_chrome(True)
+                self._ensure_taskbar_visibility()
+
+            def finalize_max():
+                self.root.state("normal")
+                self._set_geometry_tuple(target)
+
+            self._run_transition_with_overlay(
+                start,
+                target,
+                duration=150,
+                steps=12,
+                subtitle="Maximizing window",
+                finalize=finalize_max,
+                on_done=on_max_done
+            )
+
+    def _minimize_window(self):
+        if self._drag_active:
+            return
+        if str(self.root.state()) == "iconic":
+            return
+        self._cancel_window_animation()
+        start = self._get_current_geometry_tuple()
+        self._pre_minimize_geometry = start
+        self._pre_minimize_was_maximized = bool(self._window_is_maximized or str(self.root.state()) == "zoomed")
+        wx, wy, ww, wh = self._get_work_area()
+        tw = max(280, int(start[2] * 0.45))
+        th = max(180, int(start[3] * 0.45))
+        tx = wx + (ww - tw) // 2
+        ty = wy + wh - th - 10
+        self._pre_minimize_anchor_geometry = (tx, ty, tw, th)
+
+        def finalize_min():
+            self.root.state("iconic")
+
+        self._run_transition_with_overlay(
+            start,
+            self._pre_minimize_anchor_geometry,
+            duration=130,
+            steps=10,
+            subtitle="Minimizing window",
+            finalize=finalize_min
+        )
+
+    def _sync_window_state(self, event=None):
+        if not self.custom_titlebar_enabled:
+            return
+        if event and event.widget != self.root:
+            return
+        if self._drag_active or self._window_animating:
+            return
+        try:
+            state = str(self.root.state())
+            wx, wy, ww, wh = self._get_work_area()
+            rx, ry, rw, rh = self._get_current_geometry_tuple()
+            is_geom_max = self._is_geometry_maximized_like((rx, ry, rw, rh), tolerance=14)
+            is_max = (state == "zoomed") or (state == "normal" and is_geom_max)
+            if is_max != self._window_is_maximized:
+                self._window_is_maximized = is_max
+                if hasattr(self, 'window_max_btn'):
+                    self.window_max_btn.config(text="❐" if is_max else "□")
+                self._update_titlebar_controls_offset()
+            if not self._window_is_maximized and state == "normal" and not is_geom_max:
+                self._windowed_geometry = (rx, ry, rw, rh)
+                self._last_nonmax_geometry = self._windowed_geometry
+        except Exception:
+            pass
+
+    def _update_titlebar_controls_offset(self):
+        if not hasattr(self, 'window_controls_frame'):
+            return
+        try:
+            if self._window_is_maximized:
+                self.window_controls_frame.pack_configure(padx=(0, 10))
+            else:
+                self.window_controls_frame.pack_configure(padx=(0, 10))
+        except Exception:
+            pass
+
+    def setup_window_chrome(self):
+        self.window_content = self.root
+        if not self.custom_titlebar_enabled:
+            return
+
+        shell = tk.Frame(
+            self.root,
+            bg=COLORS.get('sidebar_bg', '#141414'),
+            highlightthickness=0,
+            bd=0
+        )
+        shell.pack(fill="both", expand=True)
+        self.window_shell = shell
+
+        titlebar = tk.Frame(shell, bg=COLORS.get('tab_bar_bg', '#252526'), height=36)
+        titlebar.pack(fill="x", side="top")
+        titlebar.pack_propagate(False)
+        self.window_titlebar = titlebar
+
+        left = tk.Frame(titlebar, bg=titlebar.cget("bg"))
+        left.pack(side="left", fill="y")
+        badge = tk.Label(left, text="NLC", bg=COLORS.get('play_btn_green', '#2D8F36'),
+                         fg="white", font=("Segoe UI", 8, "bold"), padx=8, pady=4)
+        badge.pack(side="left", padx=(8, 8), pady=6)
+        title_lbl = tk.Label(left, text="New Launcher", font=("Segoe UI", 10, "bold"),
+                             bg=titlebar.cget("bg"), fg=COLORS.get('text_primary', 'white'))
+        title_lbl.pack(side="left")
+
+        self._bind_drag_widget(titlebar)
+        self._bind_drag_widget(left)
+        self._bind_drag_widget(badge)
+        self._bind_drag_widget(title_lbl)
+
+        controls = tk.Frame(titlebar, bg=titlebar.cget("bg"))
+        controls.pack(side="right", fill="y")
+        self.window_controls_frame = controls
+
+        def style_btn(btn, hover_bg, leave_bg=None):
+            normal_bg = leave_bg if leave_bg is not None else titlebar.cget("bg")
+            btn.config(bg=normal_bg, activebackground=hover_bg, activeforeground="white")
+            btn.bind("<Enter>", lambda _e, b=btn, c=hover_bg: b.config(bg=c))
+            btn.bind("<Leave>", lambda _e, b=btn, c=normal_bg: b.config(bg=c))
+
+        btn_font = ("Segoe UI Symbol", 10)
+
+        min_btn = tk.Button(controls, text="—", font=btn_font, fg=COLORS.get('text_primary', 'white'),
+                            bd=0, relief="flat", width=4, cursor="hand2", command=self._minimize_window)
+        min_btn.pack(side="left", fill="y")
+        style_btn(min_btn, "#3A3A3A")
+
+        self.window_max_btn = tk.Button(
+            controls,
+            text="□",
+            font=btn_font,
+            fg=COLORS.get('text_primary', 'white'),
+            bd=0,
+            relief="flat",
+            width=4,
+            cursor="hand2",
+            command=self._toggle_window_maximize
+        )
+        self.window_max_btn.pack(side="left", fill="y")
+        style_btn(self.window_max_btn, "#3A3A3A")
+
+        close_btn = tk.Button(controls, text="✕", font=btn_font, fg="white",
+                              bd=0, relief="flat", width=4, cursor="hand2", command=self._on_close)
+        close_btn.pack(side="left", fill="y")
+        style_btn(close_btn, "#C42B1C")
+
+        self.window_content = tk.Frame(shell, bg=COLORS['main_bg'])
+        self.window_content.pack(fill="both", expand=True)
+
+        self.root.bind("<Map>", self._on_root_map_restore_chrome, add="+")
+        self.root.bind("<Configure>", self._sync_window_state, add="+")
+        self._set_custom_window_chrome(True)
+        self.root.after(120, self._ensure_taskbar_visibility)
+
+    def _get_native_hwnd_for_widget(self, widget):
+        if os.name != 'nt':
+            return 0
+        try:
+            base_hwnd = int(widget.winfo_id())
+            GA_ROOT = 2
+            user32 = ctypes.windll.user32
+            root_hwnd = user32.GetAncestor(base_hwnd, GA_ROOT)
+            return int(root_hwnd) if root_hwnd else base_hwnd
+        except Exception:
+            return 0
+
+    def _prepare_dialog_window(self, win, owner=None):
+        owner_win = owner if owner is not None else self.root
+        _ensure_window_icon(win, owner=owner_win)
+        self._register_dialog_window(win)
+        if os.name == 'nt':
+            try:
+                win.transient(None)
+            except Exception:
+                pass
+            try:
+                win.grab_release()
+            except Exception:
+                pass
+            _prime_taskbar_window(win)
+            try:
+                win.after(140, lambda w=win: _prime_taskbar_window(w) if w.winfo_exists() else None)
+            except Exception:
+                pass
+            try:
+                win.after(20, lambda w=win: (w.lift(), w.focus_force()) if w.winfo_exists() else None)
+            except Exception:
+                pass
+
+    def _apply_custom_toplevel_chrome(self, win, title_text, close_command=None):
+        owner = _resolve_dialog_parent(getattr(win, "master", None), self.root)
+        if os.name == 'nt':
+            try:
+                win.withdraw()
+            except Exception:
+                pass
+
+        def finalize_windows_dialog():
+            if os.name != 'nt':
+                return
+            try:
+                if not win.winfo_exists():
+                    return
+                win.deiconify()
+                _schedule_window_centering(win, owner)
+                win.lift()
+                win.focus_force()
+            except Exception:
+                pass
+
+        def schedule_windows_finalize():
+            if os.name != 'nt':
+                return
+            finalize_windows_dialog()
+            for delay in (40, 140, 320, 700):
+                try:
+                    win.after(delay, finalize_windows_dialog)
+                except Exception:
+                    pass
+
+        if not (self.custom_titlebar_enabled and os.name == 'nt'):
+            self._prepare_dialog_window(win)
+            _schedule_window_centering(win, owner)
+            schedule_windows_finalize()
+            return win
+        existing_content = getattr(win, "_custom_content_root", None)
+        if existing_content and existing_content.winfo_exists():
+            title_label = getattr(win, "_custom_title_label", None)
+            if title_label and title_label.winfo_exists():
+                try:
+                    title_label.config(text=title_text)
+                except Exception:
+                    pass
+            self._prepare_dialog_window(win)
+            _schedule_window_centering(win, owner)
+            schedule_windows_finalize()
+            return existing_content
+
+        try:
+            win.overrideredirect(True)
+        except Exception:
+            self._prepare_dialog_window(win)
+            _schedule_window_centering(win, owner)
+            schedule_windows_finalize()
+            return win
+
+        shell = tk.Frame(win, bg=COLORS.get('sidebar_bg', '#141414'), highlightthickness=0, bd=0)
+        shell.pack(fill="both", expand=True)
+
+        titlebar = tk.Frame(shell, bg=COLORS.get('tab_bar_bg', '#252526'), height=34)
+        titlebar.pack(fill="x", side="top")
+        titlebar.pack_propagate(False)
+
+        left = tk.Frame(titlebar, bg=titlebar.cget("bg"))
+        left.pack(side="left", fill="y")
+        badge = tk.Label(left, text="NLC", bg=COLORS.get('play_btn_green', '#2D8F36'),
+                         fg="white", font=("Segoe UI", 8, "bold"), padx=8, pady=3)
+        badge.pack(side="left", padx=(8, 8), pady=6)
+        title_lbl = tk.Label(left, text=title_text, bg=titlebar.cget("bg"),
+                             fg=COLORS.get('text_primary', 'white'), font=("Segoe UI", 9, "bold"))
+        title_lbl.pack(side="left")
+
+        drag_state = {"native": False, "sx": 0, "sy": 0, "wx": 0, "wy": 0, "lx": 0, "ly": 0}
+
+        def drag_start(event):
+            drag_state["native"] = False
+            drag_state["sx"] = event.x_root
+            drag_state["sy"] = event.y_root
+            drag_state["wx"] = win.winfo_x()
+            drag_state["wy"] = win.winfo_y()
+            drag_state["lx"] = event.x_root
+            drag_state["ly"] = event.y_root
+
+        def drag_move(event):
+            if drag_state["native"]:
+                return
+            dx = event.x_root - drag_state["lx"]
+            dy = event.y_root - drag_state["ly"]
+            if dx == 0 and dy == 0:
+                return
+            win.geometry(f"+{win.winfo_x() + dx}+{win.winfo_y() + dy}")
+            drag_state["lx"] = event.x_root
+            drag_state["ly"] = event.y_root
+
+        for drag_widget in (titlebar, left, badge, title_lbl):
+            drag_widget.bind("<ButtonPress-1>", drag_start)
+            drag_widget.bind("<B1-Motion>", drag_move)
+
+        close_btn = tk.Button(
+            titlebar,
+            text="✕",
+            font=("Segoe UI Symbol", 10),
+            fg="white",
+            bg=titlebar.cget("bg"),
+            bd=0,
+            relief="flat",
+            width=4,
+            cursor="hand2",
+            command=close_command if close_command else win.destroy
+        )
+        close_btn.pack(side="right", fill="y")
+        close_btn.bind("<Enter>", lambda _e: close_btn.config(bg="#C42B1C"))
+        close_btn.bind("<Leave>", lambda _e: close_btn.config(bg=titlebar.cget("bg")))
+
+        body = tk.Frame(shell, bg=win.cget("bg"))
+        body.pack(fill="both", expand=True)
+        try:
+            win._custom_content_root = body  # type: ignore[attr-defined]
+            win._custom_title_label = title_lbl  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        self._prepare_dialog_window(win)
+        _schedule_window_centering(win, owner)
+        schedule_windows_finalize()
+        return body
+
+    def _get_toplevel_content_root(self, parent):
+        content_root = getattr(parent, "_custom_content_root", None)
+        if content_root and content_root.winfo_exists():
+            return content_root
+        return parent
+
+    def _clear_toplevel_content(self, parent):
+        content_root = self._get_toplevel_content_root(parent)
+        for widget in content_root.winfo_children():
+            widget.destroy()
+        return content_root
+
+    def _clear_dialog_focus_bindings(self):
+        pending_after = getattr(self, "_dialog_raise_after_id", None)
+        if pending_after is not None:
+            try:
+                self.root.after_cancel(pending_after)
+            except Exception:
+                pass
+            self._dialog_raise_after_id = None
+        self._dialog_raise_scheduled = False
+        for seq, bind_id in getattr(self, "_dialog_focus_bindings", []):
+            try:
+                self.root.unbind(seq, bind_id)
+            except Exception:
+                pass
+        self._dialog_focus_bindings = []
+
+    def _cleanup_dialog_windows(self):
+        cleaned = []
+        for win in getattr(self, "_dialog_windows", []):
+            try:
+                if win is not None and win.winfo_exists():
+                    cleaned.append(win)
+            except Exception:
+                continue
+        self._dialog_windows = cleaned
+
+    def _register_dialog_window(self, win):
+        if win is None:
+            return
+        self._cleanup_dialog_windows()
+        if win not in self._dialog_windows:
+            self._dialog_windows.append(win)
+            try:
+                win.bind("<Destroy>", lambda _e, w=win: self._unregister_dialog_window(w), add="+")
+            except Exception:
+                pass
+            try:
+                win.bind("<FocusIn>", self._schedule_dialog_raise, add="+")
+            except Exception:
+                pass
+        try:
+            if not hasattr(win, "_nlc_force_above_launcher"):
+                win._nlc_force_above_launcher = True  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        self._bind_dialog_focus_tracking()
+        self._schedule_dialog_raise()
+
+    def _unregister_dialog_window(self, win):
+        if getattr(self, "_dialog_windows", None):
+            self._dialog_windows = [w for w in self._dialog_windows if w is not win]
+        if not self._dialog_windows:
+            self._clear_dialog_focus_bindings()
+
+    def _is_dialog_above_root(self, win):
+        try:
+            return bool(int(win.tk.call("wm", "stackorder", str(win), "isabove", str(self.root))))
+        except Exception:
+            return False
+
+    def _raise_single_dialog_above_launcher(self, win):
+        if os.name != "nt":
+            try:
+                win.transient(self.root)
+            except Exception:
+                pass
+            if self._is_dialog_above_root(win):
+                return
+            try:
+                win.lift(self.root)
+            except Exception:
+                win.lift()
+            return
+
+        try:
+            win.lift(self.root)
+        except Exception:
+            try:
+                win.lift()
+            except Exception:
+                return
+
+        # Windows sometimes ignores plain lift() for custom/override windows.
+        # Briefly toggling topmost forces z-order update, then immediately reverts.
+        try:
+            if not bool(getattr(win, "_nlc_force_above_launcher", False)):
+                return
+            now = time.time()
+            last = float(getattr(win, "_nlc_last_topmost_bump", 0.0))
+            if now - last < 0.35:
+                return
+            win._nlc_last_topmost_bump = now  # type: ignore[attr-defined]
+            win.attributes("-topmost", True)
+            win.after(
+                35,
+                lambda w=win: (w.winfo_exists() and w.attributes("-topmost", False))
+            )
+        except Exception:
+            pass
+
+    def _raise_dialogs_above_launcher(self):
+        self._dialog_raise_scheduled = False
+        self._dialog_raise_after_id = None
+        self._dialog_last_raise_ts = time.time()
+        try:
+            if str(self.root.state()) in ("iconic", "withdrawn"):
+                return
+        except Exception:
+            return
+
+        self._cleanup_dialog_windows()
+        if not self._dialog_windows:
+            self._clear_dialog_focus_bindings()
+            return
+
+        for win in self._dialog_windows:
+            try:
+                if str(win.state()) in ("iconic", "withdrawn"):
+                    continue
+                self._raise_single_dialog_above_launcher(win)
+            except Exception:
+                continue
+
+    def _schedule_dialog_raise(self, _event=None):
+        if self._dialog_raise_scheduled:
+            return
+        now = time.time()
+        elapsed = now - float(getattr(self, "_dialog_last_raise_ts", 0.0))
+        min_interval = float(getattr(self, "_dialog_raise_min_interval", 0.12))
+        wait_s = max(0.0, min_interval - elapsed)
+        delay_ms = int(wait_s * 1000)
+        self._dialog_raise_scheduled = True
+        try:
+            if delay_ms <= 0:
+                self.root.after_idle(self._raise_dialogs_above_launcher)
+            else:
+                self._dialog_raise_after_id = self.root.after(delay_ms, self._raise_dialogs_above_launcher)
+        except Exception:
+            self._dialog_raise_scheduled = False
+            self._dialog_raise_after_id = None
+
+    def _bind_dialog_focus_tracking(self):
+        self._clear_dialog_focus_bindings()
+        bindings = []
+        for seq in ("<FocusIn>", "<Map>", "<Activate>"):
+            try:
+                bind_id = self.root.bind(seq, self._schedule_dialog_raise, add="+")
+                if bind_id:
+                    bindings.append((seq, bind_id))
+            except Exception:
+                pass
+        self._dialog_focus_bindings = bindings
+
+    def _clear_onboarding_focus_bindings(self):
+        for seq, bind_id in getattr(self, "_onboarding_focus_bindings", []):
+            try:
+                self.root.unbind(seq, bind_id)
+            except Exception:
+                pass
+        self._onboarding_focus_bindings = []
+
+    def _cancel_onboarding_raise_burst(self):
+        pass
+
+    def _raise_onboarding_above_launcher(self):
+        wizard = getattr(self, "_onboarding_wizard", None)
+        if not wizard:
+            self._clear_onboarding_focus_bindings()
+            self._cancel_onboarding_raise_burst()
+            return
+        try:
+            if not wizard.winfo_exists():
+                self._onboarding_wizard = None
+                self._clear_onboarding_focus_bindings()
+                self._cancel_onboarding_raise_burst()
+                return
+            if str(self.root.state()) in ("iconic", "withdrawn"):
+                return
+            if str(wizard.state()) == "withdrawn":
+                wizard.deiconify()
+
+            if os.name != "nt":
+                wizard.transient(self.root)
+                wizard.lift(self.root)
+                try:
+                    wizard.attributes("-topmost", True)
+                except Exception:
+                    pass
+            else:
+                wizard.lift()
+                try:
+                    wizard.focus_force()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _schedule_onboarding_raise(self, _event=None):
+        try:
+            self.root.after_idle(self._raise_onboarding_above_launcher)
+        except Exception:
+            pass
+
+    def _bind_onboarding_focus_tracking(self):
+        self._clear_onboarding_focus_bindings()
+        bindings = []
+        for seq in ("<FocusIn>", "<Map>"):
+            try:
+                bind_id = self.root.bind(seq, self._schedule_onboarding_raise, add="+")
+                if bind_id:
+                    bindings.append((seq, bind_id))
+            except Exception:
+                pass
+        self._onboarding_focus_bindings = bindings
+
+    def _focus_main_window(self):
+        try:
+            state = str(self.root.state())
+            if state in ("iconic", "withdrawn"):
+                self.root.deiconify()
+            self.root.lift()
+            if os.name == 'nt':
+                try:
+                    self.root.attributes("-topmost", True)
+                    self.root.after(
+                        40,
+                        lambda: self.root.winfo_exists() and self.root.attributes("-topmost", False)
+                    )
+                except Exception:
+                    pass
+            try:
+                self.root.focus_force()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def create_layout(self):
+        root_parent = self.window_content if self.window_content is not None else self.root
+        # 1. Sidebar (Left) - width 250px for proper menu
+        neo_mode = getattr(self, 'neo_style_enabled', True)
+        sb_width = 240 if neo_mode else 200
+        self.sidebar = tk.Frame(root_parent, bg=COLORS['sidebar_bg'], width=sb_width)
+        self.sidebar.pack(side="left", fill="y")
+        self.sidebar.pack_propagate(False)
+        
+        # --- Sidebar Profile Section (Top Left) ---
+        self.profile_frame = tk.Frame(self.sidebar, bg=COLORS['sidebar_bg'], cursor="hand2")
+        self.profile_frame.pack(fill="x", ipady=10, padx=10, pady=10)
+        self.profile_frame.bind("<Button-1>", lambda e: self.toggle_profile_menu())
+        
+        # Profile Icon
+        self.sidebar_head_label = tk.Label(self.profile_frame, bg=COLORS['sidebar_bg'])
+        self.sidebar_head_label.pack(side="left", padx=(5, 10))
+        self.sidebar_head_label.bind("<Button-1>", lambda e: self.toggle_profile_menu())
+        
+        # Profile Text Container
+        self.sidebar_text_frame = tk.Frame(self.profile_frame, bg=COLORS['sidebar_bg'])
+        self.sidebar_text_frame.pack(side="left", fill="x")
+        self.sidebar_text_frame.bind("<Button-1>", lambda e: self.toggle_profile_menu())
+        
+        self.sidebar_username = tk.Label(self.sidebar_text_frame, text="Steve", font=("Segoe UI", 11, "bold"),
+                                        bg=COLORS['sidebar_bg'], fg=COLORS['text_primary'], anchor="w")
+        self.sidebar_username.pack(fill="x")
+        self.sidebar_username.bind("<Button-1>", lambda e: self.toggle_profile_menu())
+        
+        self.sidebar_acct_type = tk.Label(self.sidebar_text_frame, text="Offline", font=("Segoe UI", 8),
+                                         bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'], anchor="w")
+        self.sidebar_acct_type.pack(fill="x")
+        self.sidebar_acct_type.bind("<Button-1>", lambda e: self.toggle_profile_menu())
+
+        tk.Frame(self.sidebar, bg=COLORS.get('separator', '#454545'), height=1).pack(fill="x", padx=10, pady=(0, 20)) # Separator
+
+        # --- Sidebar Menu Items ---
+        self.sidebar_items = []
+        self.nav_buttons = {}
+
+        if neo_mode:
+            # Unified Navigation for Neo Mode
+            self.sidebar_nav_frame = tk.Frame(self.sidebar, bg=COLORS['sidebar_bg'])
+            self.sidebar_nav_frame.pack(fill="both", expand=True)
+
+            def _neo_nav(parent, text, tab_name, icon_name=None, action=None):
+                frame = tk.Frame(parent, bg=COLORS['sidebar_bg'], cursor="hand2", padx=15, pady=8)
+                frame.pack(fill="x")
+                self.sidebar_items.append(frame)
+
+                if icon_name:
+                    icon_path = f"icons/{icon_name}" if not icon_name.startswith("icons/") else icon_name
+                    img = getattr(self, "get_icon_image", lambda x, y: None)(icon_path, (20, 20))
+                    if img:
+                        lbl_img = tk.Label(frame, image=img, bg=COLORS['sidebar_bg'], cursor="hand2")
+                        lbl_img.image = img # type: ignore
+                        lbl_img.pack(side="left", padx=(0, 10))
+                    else:
+                        tk.Label(frame, text="*", font=("Segoe UI", 12), bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'], cursor="hand2").pack(side="left", padx=(0, 10))
+                
+                lbl = tk.Label(frame, text=text, font=("Segoe UI", 10, "bold"), bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'], cursor="hand2")
+                lbl.pack(side="left")
+
+                def on_click(e):
+                    if action:
+                        action()
+                        self.set_active_sidebar(frame)
+                        return
+                    self.set_active_sidebar(frame)
+                    self.show_tab(tab_name)
+
+                frame.bind("<Button-1>", on_click)
+                lbl.bind("<Button-1>", on_click)
+                for c in frame.winfo_children():
+                    c.bind("<Button-1>", on_click)
+
+                self._attach_sidebar_hover(frame)
+
+                if tab_name == "Play":
+                    self.minecraft_btn_frame = frame # type: ignore
+                    frame.is_active = True # type: ignore
+                    lbl.config(fg="white")
+
+            def build_main_sidebar():
+                for widget in self.sidebar_nav_frame.winfo_children():
+                    widget.destroy()
+                self.sidebar_items = [item for item in getattr(self, 'sidebar_items', []) if item.winfo_exists() and item.master != self.sidebar_nav_frame]
+                
+                tk.Label(self.sidebar_nav_frame, text="GAMES", font=("Segoe UI", 8, "bold"), fg="#505050", bg=COLORS['sidebar_bg']).pack(anchor="w", padx=15, pady=(0,5))
+                _neo_nav(self.sidebar_nav_frame, "Minecraft Java", "Play", "grass_block_side.png")
+                _neo_nav(self.sidebar_nav_frame, "Installations", "Installations", "crafting_table_front.png")
+                _neo_nav(self.sidebar_nav_frame, "Modpacks", "Modpacks", "shulker_box.png")
+
+                tk.Label(self.sidebar_nav_frame, text="DISCOVER", font=("Segoe UI", 8, "bold"), fg="#505050", bg=COLORS['sidebar_bg']).pack(anchor="w", padx=15, pady=(15,5))
+                _neo_nav(self.sidebar_nav_frame, "Modrinth", "Modrinth", "crafting_table_top.png", action=build_modrinth_sidebar)
+                _neo_nav(self.sidebar_nav_frame, "Addons", "Addons", "beacon.png")
+                _neo_nav(self.sidebar_nav_frame, "Locker", "Locker", "enchanting_table_side.png")
+
+            def build_modrinth_sidebar():
+                for widget in self.sidebar_nav_frame.winfo_children():
+                    widget.destroy()
+                self.sidebar_items = [item for item in getattr(self, 'sidebar_items', []) if item.winfo_exists() and item.master != self.sidebar_nav_frame]
+                
+                _neo_nav(self.sidebar_nav_frame, "← Back", "Back", None, action=build_main_sidebar)
+                
+                tk.Label(self.sidebar_nav_frame, text="MODRINTH NETWORK", font=("Segoe UI", 8, "bold"), fg="#505050", bg=COLORS['sidebar_bg']).pack(anchor="w", padx=15, pady=(10,5))
+                
+                def nav_modrinth(mode):
+                    def _action():
+                        self.show_tab("Mods")
+                        if hasattr(self, 'switch_modrinth_mode'):
+                            self.switch_modrinth_mode(mode)
+                    return _action
+
+                _neo_nav(self.sidebar_nav_frame, "Mods", "Mods", "comparator_on.png", action=nav_modrinth("mod"))
+                _neo_nav(self.sidebar_nav_frame, "Resource Packs", "Resource Packs", "painting.png", action=nav_modrinth("resourcepack"))
+                _neo_nav(self.sidebar_nav_frame, "Modpacks", "Modpacks", "shulker_box.png", action=nav_modrinth("modpack"))
+                _neo_nav(self.sidebar_nav_frame, "Shaders", "Shaders", "glowstone.png", action=nav_modrinth("shader"))
+
+            build_main_sidebar()
+
+        else:
+            # Classic Navigation
+            # Minecraft: Java Edition (Highlighted)
+            java_btn_frame = tk.Frame(self.sidebar, bg=COLORS.get('hover_bg', '#3A3B3C'), cursor="hand2", padx=10, pady=10) # Lighter grey highlight
+        # Settings Link (Gear) - Packed to bottom first to be at the very bottom
+        self._create_sidebar_link("Settings", lambda: self.open_global_settings(), is_action=True, pack_side="bottom", icon="⚙")
+
+        # GitHub Link - Packed to bottom next to be above Settings
+        self._create_sidebar_link("GitHub", "https://github.com/Amne-Dev/New-launcher", pack_side="bottom")
+
+        # Download Queue UI (Initially hidden or empty)
+        self.create_download_queue_ui()
+
+        # 2. Main Content Area
+        self.content_area = tk.Frame(root_parent, bg=COLORS['main_bg'])
+        self.content_area.pack(side="right", fill="both", expand=True)
+        
+        # 3. Top Navigation Bar (Only for Classic)
+        if not neo_mode:
+            self.nav_bar = tk.Frame(self.content_area, bg=COLORS['tab_bar_bg'], height=60)
+            self.nav_bar.pack(fill="x", side="top")
+            self.nav_bar.pack_propagate(False)
+            
+            self.create_nav_btn("Play", lambda: self.show_tab("Play"))
+            self.create_nav_btn("Installations", lambda: self.show_tab("Installations"))
+            self.create_nav_btn("Modpacks", lambda: self.show_tab("Modpacks"))
+            self.create_nav_btn("Locker", lambda: self.show_tab("Locker"))
+        else:
+            self.nav_bar = None # Clear it
+
+        # 4. Tab Container
+        self.tab_container = tk.Frame(self.content_area, bg=COLORS['main_bg'])
+        self.tab_container.pack(fill="both", expand=True)
+        
+        # Initialize Tabs
+        self.tabs = {}
+        self.create_play_tab()
+        self.create_locker_tab()
+        self.create_installations_tab()
+        # Modrinth Tabs Lazy Loading
+        # self.create_mods_tab()
+        self.create_modpacks_tab()
+        self.create_settings_tab()
+        self.create_addons_tab()
+        
+        # Trigger play selection
+        if neo_mode and hasattr(self, 'minecraft_btn_frame'):
+             self.set_active_sidebar(self.minecraft_btn_frame) # type: ignore
+        self.show_tab("Play")
+
+    def apply_accent_color(self, name):
+        # Update Data
+        self.accent_color_name = name
+        
+        _colors = {
+            "Green": "#2D8F36", "Blue": "#3498DB", "Orange": "#E67E22", "Purple": "#9B59B6", "Red": "#E74C3C"
+        }
+        if name in _colors:
+            c = _colors[name]
+            COLORS['play_btn_green'] = c
+            COLORS['active_tab_border'] = c
+            COLORS['success_green'] = c
+            COLORS['accent_blue'] = c
+            
+            # Update Styles
+            style = ttk.Style()
+            style.configure("Launcher.Horizontal.TProgressbar", background=c)
+            
+            # Update UI Elements
+            # 1. Play Button
+            if hasattr(self, 'play_container'): self.play_container.config(bg=c)
+            if hasattr(self, 'launch_btn'): self.launch_btn.config(bg=c, activebackground=c)
+            if hasattr(self, 'launch_opts_btn'): self.launch_opts_btn.config(bg=c, activebackground=c)
+            
+            # 2. Installations Tab
+            if hasattr(self, 'new_inst_btn'): self.new_inst_btn.config(bg=c)
+            if hasattr(self, 'inst_list_frame'): self.refresh_installations_list()
+
+            # 3. Locker Tab
+            if hasattr(self, 'locker_btns'): self.refresh_locker_view()
+
+            # 4. Settings Tab (Rebuild to apply new colors to pickers/checkboxes)
+            if "Settings" in self.tabs:
+                self.tabs["Settings"].destroy()
+                self.create_settings_tab()
+                # If currently on settings, ensure it's packed
+                if self.current_tab == "Settings":
+                    self.tabs["Settings"].pack(fill="both", expand=True)
+
+            self.save_config()
+
+    def perform_auto_update(self, asset_url, version):
+        if self._update_in_progress:
+            return
+        self._update_in_progress = True
+
+        # 1. Download
+        self.update_status_lbl.config(text=f"Downloading update {version}...", fg=COLORS['accent_blue'])
+        
+        # Show Progress Bar
+        self.root.after(0, self.show_update_progress)
+        
+        threading.Thread(target=self._download_update_thread, args=(asset_url,), daemon=True).start()
+
+
+    def _download_update_thread(self, url):
+        try:
+            # Save to a persistent directory (avoid Temp/MEI issues)
+            updates_dir = os.path.join(self.config_dir, "updates")
+            if not os.path.exists(updates_dir):
+                os.makedirs(updates_dir)
+            
+            # Determine filename
+            filename = "NewLauncher_Update.exe"
+            path = os.path.join(updates_dir, filename)
+            part_path = path + ".part"
+            
+            self.root.after(0, lambda: self.update_progress_label.config(text="Connecting to update server...") if hasattr(self, "update_progress_label") else None)
+
+            # Download with explicit connect/read timeouts and throttled UI updates.
+            with requests.get(url, stream=True, timeout=(8, 25)) as r:
+                r.raise_for_status()
+                total_size = int(r.headers.get('content-length', 0))
+                block_size = 1024 * 64
+                wrote = 0
+                last_ui_tick = 0.0
+
+                with open(part_path, 'wb') as f:
+                    for data in r.iter_content(block_size):
+                        if not data:
+                            continue
+                        wrote += len(data)
+                        f.write(data)
+
+                        # Throttle to avoid flooding Tk event queue, which can look like a freeze.
+                        now = time.monotonic()
+                        if (now - last_ui_tick) >= 0.08:
+                            last_ui_tick = now
+                            if total_size > 0:
+                                self.root.after(0, lambda c=wrote, t=total_size: self.update_download_progress(c, t))
+                            else:
+                                self.root.after(
+                                    0,
+                                    lambda b=wrote: self.update_status_lbl.config(
+                                        text=f"Downloading update... {b // (1024 * 1024)} MB",
+                                        fg=COLORS['accent_blue']
+                                    )
+                                )
+
+                # Final UI update to 100% for known-size downloads.
+                if total_size > 0:
+                    self.root.after(0, lambda c=wrote, t=total_size: self.update_download_progress(c, t))
+
+            if wrote <= 0:
+                raise RuntimeError("Downloaded file is empty.")
+
+            with open(part_path, "rb") as f:
+                mz = f.read(2)
+            if mz != b"MZ":
+                raise RuntimeError("Downloaded update is not a valid Windows executable.")
+
+            os.replace(part_path, path)
+            
+            # On Finish
+            self.root.after(0, self.hide_update_progress)
+            self.root.after(0, lambda: self.update_status_lbl.config(text="Update downloaded.", fg=COLORS['success_green']))
+            self.root.after(0, lambda: self._on_download_complete(path))
+            
+        except Exception as e:
+            print(f"Update download failed: {e}")
+            try:
+                if 'part_path' in locals() and os.path.exists(part_path): # type: ignore
+                    os.remove(part_path) # type: ignore
+            except Exception:
+                pass
+            self.root.after(0, self.hide_update_progress)
+            self.root.after(0, self._reset_update_state)
+            self.root.after(0, lambda err=str(e): self.update_status_lbl.config(text=f"Update failed: {err}", fg=COLORS['error_red']))
+
+    def _on_download_complete(self, path):
+         # Define custom buttons for the dialog
+        btns = [
+             ("Yes, Install", True, "primary"), 
+             ("I'll do it myself", "manual", "secondary"), 
+             ("No", False, "secondary")
+        ]
+        
+        # Use underlying message box class directly for custom buttons since askyesno only supports yes/no
+        mbox = CustomMessagebox("Update Available", "Update downloaded successfully.\nInstall now? (The launcher will restart)", 
+                                type="yesno", buttons=btns, parent=self.root)
+        result = mbox.result
+
+        if result is True:
+            if path.endswith(".exe"):
+                self._launch_updater_and_exit(path)
+            else:
+                custom_showinfo("Manual Install", f"Update saved to:\n{path}\nPlease run it manually.")
+                self._reset_update_state()
+        elif result == "manual":
+             webbrowser.open("https://github.com/Amne-Dev/New-launcher/releases/latest")
+             self._reset_update_state()
+        else:
+            self._reset_update_state()
+
+    def _reset_update_state(self):
+        self._update_in_progress = False
+
+    def _launch_updater_and_exit(self, path):
+        try:
+            if not os.path.isfile(path):
+                raise FileNotFoundError(path)
+
+            self.update_status_lbl.config(text="Launching installer...", fg=COLORS['accent_blue'])
+            self.root.after(0, self.hide_update_progress)
+
+            launched = False
+            if os.name == 'nt':
+                try:
+                    creationflags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                    subprocess.Popen([path], cwd=os.path.dirname(path), close_fds=True, creationflags=creationflags)
+                    launched = True
+                except Exception:
+                    # Fallback, e.g. if creation flags fail in specific environments.
+                    os.startfile(path)
+                    launched = True
+            else:
+                subprocess.Popen([path], cwd=os.path.dirname(path), close_fds=True)
+                launched = True
+
+            if launched:
+                self._begin_update_shutdown()
+            else:
+                raise RuntimeError("Failed to start updater.")
+        except Exception as e:
+            custom_showerror("Error", f"Could not launch update: {e}")
+            self._reset_update_state()
+
+    def _begin_update_shutdown(self):
+        if self._update_shutdown_started:
+            return
+        self._update_shutdown_started = True
+
+        def _shutdown():
+            try:
+                self.stop_agent_process()
+            except Exception:
+                pass
+            try:
+                if hasattr(self, 'tray_icon') and self.tray_icon:
+                    self.tray_icon.stop()
+            except Exception:
+                pass
+            try:
+                self.root.destroy()
+            except Exception:
+                pass
+            os._exit(0)
+
+        # Small delay lets spawned updater initialize before process exit.
+        self.root.after(160, _shutdown)
+
+    def show_whats_new(self, version):
+        """Fetches the changelog for the current version and displays it on first launch after update."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("What's New")
+        dialog.geometry("600x480")
+        dialog.config(bg=COLORS['main_bg'])
+        try:
+            x = self.root.winfo_x() + (self.root.winfo_width() // 2) - 300
+            y = self.root.winfo_y() + (self.root.winfo_height() // 2) - 240
+            dialog.geometry(f"+{x}+{y}")
+        except: pass
+        if os.name != "nt":
+            dialog.transient(self.root)
+        
+        dialog_root = self._apply_custom_toplevel_chrome(dialog, f"What's New in v{version}")
+        
+        # Header
+        header = tk.Frame(dialog_root, bg=COLORS['sidebar_bg'], pady=15, padx=20)
+        header.pack(fill="x")
+        tk.Label(header, text="✨ Launcher Updated! ✨", font=("Segoe UI", 16, "bold"), 
+                 bg=COLORS['sidebar_bg'], fg=COLORS['accent_blue']).pack(anchor="center")
+        tk.Label(header, text=f"You are now running version {version}", font=("Segoe UI", 10), 
+                 bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary']).pack(anchor="center")
+        
+        # Content
+        content_frame = tk.Frame(dialog_root, bg=COLORS['main_bg'], padx=20, pady=20)
+        content_frame.pack(fill="both", expand=True)
+
+        text_area = scrolledtext.ScrolledText(content_frame, font=("Segoe UI", 10), bg=COLORS['input_bg'], fg=COLORS['text_primary'],
+                                              relief="flat", wrap="word", state="normal")
+        text_area.pack(fill="both", expand=True)
+        text_area.insert("1.0", "Fetching release notes from GitHub...\n\n")
+        text_area.config(state="disabled")
+
+        # Footer
+        footer = tk.Frame(dialog_root, bg=COLORS['sidebar_bg'], pady=15)
+        footer.pack(fill="x", side="bottom")
+        self._make_btn(footer, "Awesome, Let's Game!", style="primary", font_size=10, 
+                       command=dialog.destroy).pack(anchor="center")
+
+        def fetch_changelog():
+            try:
+                # We specifically load the changelog for this version tag.
+                url = f"https://api.github.com/repos/Amne-Dev/New-launcher/releases/tags/v{version}"
+                r = requests.get(url, timeout=5)
+                if r.status_code == 200:
+                    data = r.json()
+                    body = data.get("body", "No description provided for this release.")
+                    
+                    self.root.after(0, lambda b=body: update_text(b))
+                else:
+                    self.root.after(0, lambda: update_text(f"Could not load release notes automatically (Status {r.status_code}).\nCheck out the GitHub releases page!"))
+            except Exception as e:
+                self.root.after(0, lambda: update_text(f"Failed to fetch release notes: {e}"))
+
+        def update_text(msg):
+            try:
+                if text_area.winfo_exists():
+                    text_area.config(state="normal")
+                    text_area.delete("1.0", "end")
+                    text_area.insert("1.0", msg)
+                    text_area.config(state="disabled")
+            except: pass
+
+        threading.Thread(target=fetch_changelog, daemon=True).start()
+
+    def show_onboarding_wizard(self):
+        """Shows the First Run Wizard — modern redesign with step indicators and smooth transitions."""
+        existing_wizard = getattr(self, "_onboarding_wizard", None)
+        if existing_wizard:
+            try:
+                if existing_wizard.winfo_exists():
+                    if str(existing_wizard.state()) == "withdrawn":
+                        existing_wizard.deiconify()
+                    self._schedule_onboarding_raise()
+                    existing_wizard.focus_force()
+                    if os.name != "nt":
+                        existing_wizard.grab_set()
+                    return
+            except Exception:
+                self._onboarding_wizard = None
+                self._onboarding_overlay = None
+
+        try:
+            # Clean up stale bindings/windows from prior onboarding implementations.
+            self._clear_onboarding_focus_bindings()
+
+            stale_overlay = getattr(self, "_onboarding_overlay", None)
+            if stale_overlay and stale_overlay.winfo_exists():
+                try:
+                    stale_overlay.destroy()
+                except Exception:
+                    pass
+            self._onboarding_overlay = None
+
+            self.root.update_idletasks()
+            rx, ry = self.root.winfo_rootx(), self.root.winfo_rooty()
+            rw, rh = self.root.winfo_width(), self.root.winfo_height()
+
+            # ── Wizard Window ──
+            wizard = tk.Toplevel(self.root)
+            wizard.withdraw()
+            wizard.title("Welcome")
+            wizard.configure(bg=COLORS['main_bg'])
+            if os.name != "nt":
+                wizard.transient(self.root)
+            wizard.resizable(False, False)
+
+            wiz_w, wiz_h = 660, 520
+            x = rx + (rw // 2) - (wiz_w // 2)
+            y = ry + (rh // 2) - (wiz_h // 2)
+            wizard.geometry(f"{wiz_w}x{wiz_h}+{x}+{y}")
+
+            wizard.deiconify()
+            wizard.lift()
+            wizard.focus_force()
+            if os.name != "nt":
+                wizard.grab_set()
+            self._onboarding_wizard = wizard
+
+            def cleanup_onboarding_state(*_):
+                if getattr(self, "_onboarding_wizard", None) is wizard:
+                    self._onboarding_wizard = None
+                    self._clear_onboarding_focus_bindings()
+                    self._cancel_onboarding_raise_burst()
+            wizard.bind("<Destroy>", cleanup_onboarding_state, add="+")
+            wizard.bind("<FocusIn>", self._schedule_onboarding_raise, add="+")
+
+            wizard_root = self._apply_custom_toplevel_chrome(wizard, "Welcome Setup")
+            self._bind_onboarding_focus_tracking()
+            self._schedule_onboarding_raise()
+
+            # ── Rounded border effect ──
+            border_frame = tk.Frame(wizard_root, bg="#3A3A3A", padx=1, pady=1)
+            border_frame.pack(fill="both", expand=True)
+            inner = tk.Frame(border_frame, bg=COLORS['main_bg'])
+            inner.pack(fill="both", expand=True)
+
+            # ── Step indicator (top bar) ──
+            STEPS = ["Account", "Preferences", "Theme", "Ready"]
+            step_bar = tk.Frame(inner, bg="#1A1A1A", height=52)
+            step_bar.pack(fill="x")
+            step_bar.pack_propagate(False)
+
+            # Logo/title at left
+            tk.Label(step_bar, text="NEW LAUNCHER", font=("Segoe UI", 9, "bold"),
+                     bg="#1A1A1A", fg="#606060").pack(side="left", padx=18)
+
+            # Step dots at right
+            dots_frame = tk.Frame(step_bar, bg="#1A1A1A")
+            dots_frame.pack(side="right", padx=18)
+            dot_labels = []
+            for i, step_name in enumerate(STEPS):
+                dot_f = tk.Frame(dots_frame, bg="#1A1A1A")
+                dot_f.pack(side="left", padx=6)
+                dot = tk.Label(dot_f, text="●", font=("Segoe UI", 8),
+                              bg="#1A1A1A", fg="#404040")
+                dot.pack()
+                lbl = tk.Label(dot_f, text=step_name, font=("Segoe UI", 7),
+                              bg="#1A1A1A", fg="#505050")
+                lbl.pack()
+                dot_labels.append((dot, lbl))
+
+            def update_dots(active_idx):
+                for i, (dot, lbl) in enumerate(dot_labels):
+                    if i < active_idx:
+                        dot.config(fg=COLORS.get('success_green', '#2D8F36'))
+                        lbl.config(fg=COLORS.get('success_green', '#2D8F36'))
+                    elif i == active_idx:
+                        dot.config(fg="white")
+                        lbl.config(fg="white")
+                    else:
+                        dot.config(fg="#404040")
+                        lbl.config(fg="#505050")
+
+            # ── Content area ──
+            content = tk.Frame(inner, bg=COLORS['main_bg'])
+            content.pack(fill="both", expand=True)
+
+            self.wizard_account_data = {}
+
+            def clear_page():
+                for w in content.winfo_children():
+                    w.destroy()
+
+            def make_btn(parent, text, bg_color, command, width=20, font_size=10, bold=True):
+                """Utility to create consistent styled buttons."""
+                weight = "bold" if bold else ""
+                b = tk.Button(parent, text=text, font=("Segoe UI", font_size, weight),
+                             bg=bg_color, fg="white", activebackground=bg_color,
+                             activeforeground="white", relief="flat", cursor="hand2",
+                             command=command, bd=0)
+                b.config(padx=16, pady=8)
+                return b
+
+            def make_link(parent, text, command):
+                """Utility to create text-link buttons."""
+                l = tk.Label(parent, text=text, font=("Segoe UI", 9),
+                            bg=COLORS['main_bg'], fg="#808080", cursor="hand2")
+                l.bind("<Button-1>", lambda e: command())
+                l.bind("<Enter>", lambda e: l.config(fg="white"))
+                l.bind("<Leave>", lambda e: l.config(fg="#808080"))
+                return l
+
+            # ═══════════════════════════════════════════════════
+            # STEP 0 — Account Type Selection
+            # ═══════════════════════════════════════════════════
+            def show_step_account_type():
+                clear_page()
+                update_dots(0)
+
+                # Spacer
+                tk.Frame(content, bg=COLORS['main_bg'], height=30).pack()
+
+                tk.Label(content, text="Welcome to New Launcher",
+                        font=("Segoe UI", 22, "bold"), fg="white",
+                        bg=COLORS['main_bg']).pack()
+                tk.Label(content, text="Choose how you want to sign in",
+                        font=("Segoe UI", 11), fg="#909090",
+                        bg=COLORS['main_bg']).pack(pady=(6, 30))
+
+                # Card container
+                cards = tk.Frame(content, bg=COLORS['main_bg'])
+                cards.pack()
+
+                options = [
+                    ("Microsoft", "#0078D7", "Official Mojang account", show_step_microsoft),
+                    ("Ely.by", "#3498DB", "Third-party auth server", show_step_elyby),
+                    ("Offline", "#555555", "Play without authentication", show_step_offline),
+                ]
+
+                for name, color, desc, cmd in options:
+                    card = tk.Frame(cards, bg=COLORS['card_bg'], cursor="hand2",
+                                   highlightbackground="#404040", highlightthickness=1)
+                    card.pack(side="left", padx=8, ipadx=0, ipady=0)
+                    card.config(width=175, height=140)
+                    card.pack_propagate(False)
+
+                    # Color accent strip at top
+                    strip = tk.Frame(card, bg=color, height=4)
+                    strip.pack(fill="x")
+
+                    # Inner content
+                    inner_card = tk.Frame(card, bg=COLORS['card_bg'], cursor="hand2")
+                    inner_card.pack(fill="both", expand=True, padx=16, pady=14)
+
+                    tk.Label(inner_card, text=name, font=("Segoe UI", 13, "bold"),
+                            fg="white", bg=COLORS['card_bg'], cursor="hand2",
+                            anchor="w").pack(anchor="w")
+                    tk.Label(inner_card, text=desc, font=("Segoe UI", 8),
+                            fg="#808080", bg=COLORS['card_bg'], cursor="hand2",
+                            anchor="w", wraplength=140).pack(anchor="w", pady=(4, 0))
+
+                    # Hover + click
+                    def on_enter(e, c=card):
+                        c.config(highlightbackground="#808080")
+                    def on_leave(e, c=card):
+                        c.config(highlightbackground="#404040")
+                    def on_click(e, fn=cmd):
+                        fn()
+
+                    for w in [card, inner_card] + inner_card.winfo_children():
+                        w.bind("<Enter>", on_enter)
+                        w.bind("<Leave>", on_leave)
+                        w.bind("<Button-1>", on_click)
+                    card.bind("<Enter>", on_enter)
+                    card.bind("<Leave>", on_leave)
+                    card.bind("<Button-1>", on_click)
+
+            # ═══════════════════════════════════════════════════
+            # STEP 1a — Microsoft Login
+            # ═══════════════════════════════════════════════════
+            def show_step_microsoft():
+                clear_page()
+                update_dots(0)
+
+                tk.Frame(content, bg=COLORS['main_bg'], height=20).pack()
+                tk.Label(content, text="Microsoft Account",
+                        font=("Segoe UI", 18, "bold"), fg="white",
+                        bg=COLORS['main_bg']).pack()
+
+                status_lbl = tk.Label(content, text="Connecting to Microsoft...",
+                                     font=("Segoe UI", 10), bg=COLORS['main_bg'],
+                                     fg="#909090", wraplength=450)
+                status_lbl.pack(pady=(12, 8))
+
+                # Code display box
+                code_frame = tk.Frame(content, bg=COLORS['card_bg'],
+                                     highlightbackground="#404040", highlightthickness=1)
+                code_frame.pack(pady=10, ipadx=30, ipady=12)
+
+                code_lbl = tk.Label(code_frame, text="--------",
+                                   font=("Consolas", 28, "bold"), bg=COLORS['card_bg'],
+                                   fg="white")
+                code_lbl.pack()
+
+                url_lbl = tk.Label(content, text="", font=("Segoe UI", 10, "underline"),
+                                  bg=COLORS['main_bg'], fg="#3498DB", cursor="hand2")
+                url_lbl.pack(pady=4)
+
+                btn_row = tk.Frame(content, bg=COLORS['main_bg'])
+                btn_row.pack(pady=12)
+
+                copy_btn = make_btn(btn_row, "Copy Code", "#404040",
+                                   lambda: None, font_size=9, bold=False)
+                copy_btn.pack(side="left", padx=6)
+                copy_btn.config(state="disabled")
+
+                make_link(btn_row, "Cancel", show_step_account_type).pack(side="left", padx=12)
+
+                url_lbl.bind("<Button-1>", lambda e: webbrowser.open(url_lbl.cget("text")) if url_lbl.cget("text") else None)
+
+                # Instructions
+                inst_lbl = tk.Label(content, text="",
+                                   font=("Segoe UI", 9), bg=COLORS['main_bg'],
+                                   fg="#707070", justify="center")
+                inst_lbl.pack(pady=(8, 0))
+
+                def run_flow():
+                    try:
+                        client_id = MSA_CLIENT_ID
+                        scope = "XboxLive.signin offline_access"
+                        if not wizard.winfo_exists(): return
+                        status_lbl.config(text="Requesting device code...")
+
+                        r = requests.post("https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode",
+                                          data={"client_id": client_id, "scope": scope})
+                        if r.status_code != 200:
+                            if wizard.winfo_exists():
+                                status_lbl.config(text=f"Error: {r.text}", fg=COLORS['error_red'])
+                            return
+
+                        data = r.json()
+                        user_code = data.get("user_code")
+                        verification_uri = data.get("verification_uri")
+                        device_code = data.get("device_code")
+                        interval = data.get("interval", 5)
+
+                        if wizard.winfo_exists():
+                            code_lbl.config(text=user_code)
+                            url_lbl.config(text=verification_uri)
+                            status_lbl.config(text="Enter the code above at the link below")
+                            inst_lbl.config(text="1. Click the link  2. Paste the code  3. Sign in with Microsoft")
+                            copy_btn.config(state="normal",
+                                command=lambda: (self.root.clipboard_clear(),
+                                                 self.root.clipboard_append(user_code),
+                                                 copy_btn.config(text="Copied!", fg="#2D8F36"),
+                                                 self.root.after(1500, lambda: copy_btn.config(text="Copy Code", fg="white") if copy_btn.winfo_exists() else None)))
+
+                        while wizard.winfo_exists():
+                            time.sleep(interval)
+                            r_poll = requests.post("https://login.microsoftonline.com/consumers/oauth2/v2.0/token",
+                                data={"grant_type": "device_code", "client_id": client_id, "device_code": device_code})
+
+                            if r_poll.status_code == 200:
+                                token_data = r_poll.json()
+                                access_token = token_data["access_token"]
+                                refresh_token = token_data["refresh_token"]
+
+                                if wizard.winfo_exists(): status_lbl.config(text="Authenticating with Xbox Live...")
+                                xbl = minecraft_launcher_lib.microsoft_account.authenticate_with_xbl(access_token)
+
+                                if wizard.winfo_exists(): status_lbl.config(text="Authenticating with XSTS...")
+                                xsts = minecraft_launcher_lib.microsoft_account.authenticate_with_xsts(xbl["Token"])
+
+                                if wizard.winfo_exists(): status_lbl.config(text="Authenticating with Minecraft...")
+                                mc_auth = minecraft_launcher_lib.microsoft_account.authenticate_with_minecraft(
+                                    xbl["DisplayClaims"]["xui"][0]["uhs"], xsts["Token"])
+
+                                if wizard.winfo_exists(): status_lbl.config(text="Fetching profile...")
+                                profile = minecraft_launcher_lib.microsoft_account.get_profile(mc_auth["access_token"])
+
+                                self.wizard_account_data = {
+                                    "name": profile["name"], "uuid": profile["id"],
+                                    "type": "microsoft", "skin_path": "",
+                                    "access_token": mc_auth["access_token"],
+                                    "refresh_token": refresh_token
+                                }
+                                if wizard.winfo_exists():
+                                    wizard.after(0, save_account_and_continue)
+                                break
+
+                            err = r_poll.json()
+                            err_code = err.get("error")
+                            if err_code == "authorization_pending": continue
+                            elif err_code == "slow_down": interval += 2
+                            elif err_code == "expired_token":
+                                if wizard.winfo_exists():
+                                    status_lbl.config(text="Code expired. Please try again.", fg=COLORS['error_red'])
+                                break
+                            else:
+                                if wizard.winfo_exists():
+                                    status_lbl.config(text=f"Error: {err.get('error_description', 'Unknown')}", fg=COLORS['error_red'])
+                                break
+                    except Exception as e:
+                        print(f"Wizard Login Error: {e}")
+                        if wizard.winfo_exists():
+                            status_lbl.config(text=f"Error: {e}", fg=COLORS['error_red'])
+
+                threading.Thread(target=run_flow, daemon=True).start()
+
+            # ═══════════════════════════════════════════════════
+            # STEP 1b — Offline
+            # ═══════════════════════════════════════════════════
+            def show_step_offline():
+                clear_page()
+                update_dots(0)
+
+                tk.Frame(content, bg=COLORS['main_bg'], height=40).pack()
+                tk.Label(content, text="Offline Mode",
+                        font=("Segoe UI", 18, "bold"), fg="white",
+                        bg=COLORS['main_bg']).pack()
+                tk.Label(content, text="Enter a username to play without authentication",
+                        font=("Segoe UI", 10), fg="#808080",
+                        bg=COLORS['main_bg']).pack(pady=(6, 30))
+
+                form = tk.Frame(content, bg=COLORS['main_bg'])
+                form.pack(fill="x", padx=180)
+
+                tk.Label(form, text="USERNAME", font=("Segoe UI", 8, "bold"),
+                        fg="#707070", bg=COLORS['main_bg']).pack(anchor="w")
+                name_var = tk.StringVar(value="Player")
+                e = tk.Entry(form, textvariable=name_var, font=("Segoe UI", 12),
+                            bg=COLORS['input_bg'], fg="white", relief="flat",
+                            insertbackground="white", bd=0)
+                e.pack(fill="x", ipady=8, pady=(4, 0))
+                # Underline accent
+                tk.Frame(form, bg="#555555", height=2).pack(fill="x")
+                e.focus_set()
+
+                btn_frame = tk.Frame(form, bg=COLORS['main_bg'])
+                btn_frame.pack(fill="x", pady=(24, 0))
+
+                def do_next():
+                    name = name_var.get().strip() or "Player"
+                    self.wizard_account_data = {
+                        "name": name, "type": "offline",
+                        "skin_path": "", "uuid": ""
+                    }
+                    save_account_and_continue()
+
+                make_btn(btn_frame, "Continue", COLORS.get('success_green', '#2D8F36'),
+                        do_next).pack(fill="x")
+                make_link(btn_frame, "← Back", show_step_account_type).pack(anchor="w", pady=(12, 0))
+
+            # ═══════════════════════════════════════════════════
+            # STEP 1c — Ely.by
+            # ═══════════════════════════════════════════════════
+            def show_step_elyby():
+                clear_page()
+                update_dots(0)
+
+                tk.Frame(content, bg=COLORS['main_bg'], height=30).pack()
+                tk.Label(content, text="Ely.by Login",
+                        font=("Segoe UI", 18, "bold"), fg="white",
+                        bg=COLORS['main_bg']).pack()
+                tk.Label(content, text="Sign in with your Ely.by credentials",
+                        font=("Segoe UI", 10), fg="#808080",
+                        bg=COLORS['main_bg']).pack(pady=(6, 24))
+
+                form = tk.Frame(content, bg=COLORS['main_bg'])
+                form.pack(fill="x", padx=180)
+
+                tk.Label(form, text="USERNAME / EMAIL", font=("Segoe UI", 8, "bold"),
+                        fg="#707070", bg=COLORS['main_bg']).pack(anchor="w")
+                ue = tk.Entry(form, font=("Segoe UI", 11), bg=COLORS['input_bg'],
+                             fg="white", relief="flat", insertbackground="white", bd=0)
+                ue.pack(fill="x", ipady=7, pady=(4, 0))
+                tk.Frame(form, bg="#555555", height=2).pack(fill="x")
+
+                tk.Frame(form, bg=COLORS['main_bg'], height=14).pack()
+
+                tk.Label(form, text="PASSWORD", font=("Segoe UI", 8, "bold"),
+                        fg="#707070", bg=COLORS['main_bg']).pack(anchor="w")
+                pe = tk.Entry(form, font=("Segoe UI", 11), bg=COLORS['input_bg'],
+                             fg="white", relief="flat", show="●",
+                             insertbackground="white", bd=0)
+                pe.pack(fill="x", ipady=7, pady=(4, 0))
+                tk.Frame(form, bg="#555555", height=2).pack(fill="x")
+
+                err_lbl = tk.Label(form, text="", font=("Segoe UI", 9),
+                                  bg=COLORS['main_bg'], fg=COLORS['error_red'])
+                err_lbl.pack(anchor="w", pady=(8, 0))
+
+                ue.focus_set()
+
+                btn_frame = tk.Frame(form, bg=COLORS['main_bg'])
+                btn_frame.pack(fill="x", pady=(16, 0))
+
+                def do_auth():
+                    user_input = ue.get().strip()
+                    pw = pe.get().strip()
+                    if not user_input or not pw:
+                        err_lbl.config(text="Please fill in both fields")
+                        return
+                    err_lbl.config(text="")
+                    res = ElyByAuth.authenticate(user_input, pw)
+                    if "error" in res:
+                        err_lbl.config(text=res['error'])
+                    else:
+                        prof = cast(dict, res.get("selectedProfile", {}))
+                        name = prof.get("name", user_input)
+                        self.wizard_account_data = {
+                            "name": name, "type": "ely.by",
+                            "uuid": prof.get("id", ""),
+                            "skin_path": ""
+                        }
+                        save_account_and_continue()
+
+                make_btn(btn_frame, "Sign In", "#3498DB", do_auth).pack(fill="x")
+                make_link(btn_frame, "← Back", show_step_account_type).pack(anchor="w", pady=(12, 0))
+
+            # ═══════════════════════════════════════════════════
+            # Save & transition
+            # ═══════════════════════════════════════════════════
+            def save_account_and_continue():
+                is_default = False
+                if len(self.profiles) == 1:
+                    p = self.profiles[0]
+                    if p.get("name") == "Steve" and p.get("type") == "offline" and not p.get("uuid"):
+                        is_default = True
+
+                if not self.profiles or is_default:
+                    self.profiles = [self.wizard_account_data]
+                    self.current_profile_index = 0
+                else:
+                    self.profiles.append(self.wizard_account_data)
+                    self.current_profile_index = len(self.profiles) - 1
+
+                self.save_config(sync_ui=False)
+                self.update_active_profile()
+                show_step_preferences()
+
+            # ═══════════════════════════════════════════════════
+            # STEP 2 — Preferences
+            # ═══════════════════════════════════════════════════
+            def show_step_preferences():
+                clear_page()
+                update_dots(1)
+
+                tk.Frame(content, bg=COLORS['main_bg'], height=30).pack()
+                tk.Label(content, text="Game Preferences",
+                        font=("Segoe UI", 18, "bold"), fg="white",
+                        bg=COLORS['main_bg']).pack()
+                tk.Label(content, text="Configure memory and launcher behavior",
+                        font=("Segoe UI", 10), fg="#808080",
+                        bg=COLORS['main_bg']).pack(pady=(6, 24))
+
+                form = tk.Frame(content, bg=COLORS['main_bg'])
+                form.pack(fill="x", padx=100)
+
+                # RAM section
+                ram_card = tk.Frame(form, bg=COLORS['card_bg'], padx=18, pady=14)
+                ram_card.pack(fill="x", pady=(0, 16))
+
+                ram_header = tk.Frame(ram_card, bg=COLORS['card_bg'])
+                ram_header.pack(fill="x")
+                tk.Label(ram_header, text="Memory Allocation",
+                        font=("Segoe UI", 11, "bold"), fg="white",
+                        bg=COLORS['card_bg']).pack(side="left")
+                ram_val_lbl = tk.Label(ram_header, text=f"{self.ram_allocation} MB",
+                                      font=("Segoe UI", 10), fg=COLORS.get('success_green', '#2D8F36'),
+                                      bg=COLORS['card_bg'])
+                ram_val_lbl.pack(side="right")
+
+                ram_v = tk.IntVar(value=self.ram_allocation)
+
+                def on_ram_change(val):
+                    ram_val_lbl.config(text=f"{int(float(val))} MB")
+
+                ram_scale = tk.Scale(ram_card, from_=1024, to=16384, orient="horizontal",
+                                    resolution=512, variable=ram_v, showvalue=False,
+                                    bg=COLORS['card_bg'], fg="white",
+                                    troughcolor=COLORS['input_bg'], highlightthickness=0,
+                                    activebackground=COLORS.get('success_green', '#2D8F36'),
+                                    command=on_ram_change, length=400)
+                ram_scale.pack(fill="x", pady=(8, 0))
+
+                # Toggles
+                toggle_card = tk.Frame(form, bg=COLORS['card_bg'], padx=18, pady=14)
+                toggle_card.pack(fill="x")
+
+                c_launch = tk.BooleanVar(value=True)
+                c_tray = tk.BooleanVar(value=False)
+
+                for txt, var in [("Close launcher when game starts", c_launch),
+                                 ("Minimize to system tray on close", c_tray)]:
+                    row = tk.Frame(toggle_card, bg=COLORS['card_bg'])
+                    row.pack(fill="x", pady=4)
+                    tk.Checkbutton(row, text=txt, variable=var, font=("Segoe UI", 10),
+                                  bg=COLORS['card_bg'], fg="white",
+                                  selectcolor=COLORS['input_bg'],
+                                  activebackground=COLORS['card_bg'],
+                                  activeforeground="white").pack(anchor="w")
+
+                btn_frame = tk.Frame(form, bg=COLORS['main_bg'])
+                btn_frame.pack(fill="x", pady=(20, 0))
+
+                def do_next():
+                    self.ram_allocation = ram_v.get()
+                    self.close_launcher = c_launch.get()
+                    self.minimize_to_tray = c_tray.get()
+                    self.save_config(sync_ui=False)
+                    show_step_theme()
+
+                make_btn(btn_frame, "Continue", COLORS.get('success_green', '#2D8F36'),
+                        do_next).pack(fill="x")
+
+            # ═══════════════════════════════════════════════════
+            # STEP 3 — Theme / Accent Color
+            # ═══════════════════════════════════════════════════
+            def show_step_theme():
+                clear_page()
+                update_dots(2)
+
+                tk.Frame(content, bg=COLORS['main_bg'], height=40).pack()
+                tk.Label(content, text="Pick Your Color",
+                        font=("Segoe UI", 18, "bold"), fg="white",
+                        bg=COLORS['main_bg']).pack()
+                tk.Label(content, text="Choose an accent color for the launcher",
+                        font=("Segoe UI", 10), fg="#808080",
+                        bg=COLORS['main_bg']).pack(pady=(6, 30))
+
+                colors_list = [
+                    ("Green",  "#2D8F36"),
+                    ("Blue",   "#3498DB"),
+                    ("Orange", "#E67E22"),
+                    ("Purple", "#9B59B6"),
+                    ("Red",    "#E74C3C"),
+                ]
+
+                palette = tk.Frame(content, bg=COLORS['main_bg'])
+                palette.pack()
+
+                selected = [getattr(self, "accent_color_name", "Green")]
+                swatch_widgets = []
+
+                def select_color(name, color):
+                    selected[0] = name
+                    self.apply_accent_color(name)
+                    self.save_config(sync_ui=False)
+                    # Update swatch highlights
+                    for sn, sw, sl in swatch_widgets:
+                        if sn == name:
+                            sw.config(highlightbackground="white", highlightthickness=2)
+                            sl.config(fg="white")
+                        else:
+                            sw.config(highlightbackground="#303030", highlightthickness=1)
+                            sl.config(fg="#707070")
+                    # Update finish button
+                    if finish_btn:
+                        finish_btn.config(bg=color, activebackground=color)
+
+                finish_btn = None
+
+                for name, color in colors_list:
+                    col = tk.Frame(palette, bg=COLORS['main_bg'])
+                    col.pack(side="left", padx=12)
+
+                    is_active = (name == selected[0])
+                    swatch = tk.Frame(col, bg=color, width=50, height=50, cursor="hand2",
+                                     highlightbackground="white" if is_active else "#303030",
+                                     highlightthickness=2 if is_active else 1)
+                    swatch.pack()
+                    swatch.pack_propagate(False)
+
+                    lbl = tk.Label(col, text=name, font=("Segoe UI", 8),
+                                  bg=COLORS['main_bg'],
+                                  fg="white" if is_active else "#707070")
+                    lbl.pack(pady=(4, 0))
+
+                    swatch_widgets.append((name, swatch, lbl))
+
+                    # Click handlers
+                    swatch.bind("<Button-1>", lambda e, n=name, c=color: select_color(n, c))
+                    for child in swatch.winfo_children():
+                        child.bind("<Button-1>", lambda e, n=name, c=color: select_color(n, c))
+
+                current_accent = dict(colors_list).get(selected[0], "#2D8F36")
+                finish_btn = make_btn(content, "Finish Setup", current_accent, show_step_done)
+                finish_btn.pack(pady=(40, 0), ipadx=24)
+
+            # ═══════════════════════════════════════════════════
+            # STEP 4 — Done
+            # ═══════════════════════════════════════════════════
+            def show_step_done():
+                clear_page()
+                update_dots(3)
+
+                tk.Frame(content, bg=COLORS['main_bg'], height=50).pack()
+
+                tk.Label(content, text="✓", font=("Segoe UI", 36),
+                        fg=COLORS.get('success_green', '#2D8F36'),
+                        bg=COLORS['main_bg']).pack()
+                tk.Label(content, text="You're All Set!",
+                        font=("Segoe UI", 20, "bold"), fg="white",
+                        bg=COLORS['main_bg']).pack(pady=(8, 6))
+                tk.Label(content, text="Create an installation to start playing",
+                        font=("Segoe UI", 11), fg="#808080",
+                        bg=COLORS['main_bg']).pack()
+
+                def finish():
+                    self.first_run = False
+                    self.save_config()
+                    if wizard.winfo_exists():
+                        wizard.destroy()
+                    self._focus_main_window()
+                    self.show_tab("Installations")
+                    self.root.after(80, self.update_active_profile)
+                    self.root.after(180, self.refresh_skin)
+                    # Start post-onboarding guidance cards after the wizard closes.
+                    self.root.after(260, self.start_installations_tour)
+                    self.root.after(420, self._focus_main_window)
+
+                make_btn(content, "Get Started", COLORS.get('success_green', '#2D8F36'),
+                        finish).pack(pady=(36, 0), ipadx=24)
+
+            # ── Start ──
+            show_step_account_type()
+
+        except Exception as e:
+            logging.exception("Error showing wizard")
+            print(f"Error showing wizard: {e}")
+            traceback.print_exc()
+            try:
+                if 'wizard' in locals() and wizard.winfo_exists(): # type: ignore
+                    wizard.destroy() # type: ignore
+                self._onboarding_wizard = None
+                self._onboarding_overlay = None
+                self._clear_onboarding_focus_bindings()
+                self._cancel_onboarding_raise_burst()
+            except: pass
+
+    def start_installations_tour(self):
+        """Step 2: Installations"""
+        self.show_tab("Installations")
+        self.root.update()
+        self._focus_main_window()
+
+        target = None
+        try:
+            if hasattr(self, 'new_inst_btn') and self.new_inst_btn.winfo_exists():
+                target = self.new_inst_btn
+        except Exception:
+            target = None
+
+        if not target and "Installations" in self.tabs:
+            target = self.tabs["Installations"]
+
+        if target:
+            self.show_coach_mark(
+                target,
+                "Create and manage game installations here.\nUse New installation to add one quickly.",
+                next_action=self.start_locker_tour
+            )
+        else:
+            self.start_locker_tour()
+
+    def start_locker_tour(self):
+        """Step 3: Locker (Skins/Wallpapers)"""
+        # Switch to Locker Tab
+        self.show_tab("Locker")
+        self.root.update()
+        
+        # Explain Locker
+        target = None
+        if hasattr(self, 'locker_btns') and "Skins" in self.locker_btns:
+             target = self.locker_btns["Skins"]
+        elif "Locker" in self.tabs:
+             target = self.tabs["Locker"]
+
+        if target:
+             self.show_coach_mark(target, "Customize your look here!\nSwitch between Skins and Wallpapers.",
+                                  next_action=self.start_settings_tour)
+        else:
+             self.start_settings_tour()
+
+
+
+    def start_settings_tour(self):
+        """Step 4: Settings"""
+        self.show_tab("Settings")
+        self.root.update()
+        
+        # Show a generic center message or find a widget
+        target = None
+        if "Settings" in self.tabs:
+             # Try children first
+             try:
+                 children = self.tabs["Settings"].winfo_children()
+                 if children: target = children[0]
+             except: pass
+             # Fallback to main tab
+             if not target: target = self.tabs["Settings"]
+        
+        if target:
+            self.show_coach_mark(target, "Finally, configure advanced options\nand account management here.",
+                                 next_action=lambda: custom_showinfo("All Set!", "You are ready to play!\nHave fun with the New Launcher."))
+        else:
+             custom_showinfo("All Set!", "You are ready to play!\nHave fun with the New Launcher.")
+
+    def show_coach_mark(self, widget, text, next_action=None):
+        try:
+            # Get coords
+            x = widget.winfo_rootx()
+            y = widget.winfo_rooty()
+            w = widget.winfo_width()
+            h = widget.winfo_height()
+            
+            # Create tooltip window
+            tip = tk.Toplevel(self.root)
+            tip.overrideredirect(True)
+            tip.attributes("-topmost", True)
+            tip.transient(self.root)
+            
+            # Calc position (below-left aligned) with screen bounds checking
+            tip.update_idletasks()
+            tip_w = 350  # Approximate tooltip width
+            tip_h = 120  # Approximate tooltip height
+            
+            screen_w = self.root.winfo_screenwidth()
+            screen_h = self.root.winfo_screenheight()
+            
+            tip_x = x - 150 + w 
+            tip_y = y + h + 10
+            
+            # Prevent tooltip from going off-screen
+            if tip_x + tip_w > screen_w:
+                tip_x = screen_w - tip_w - 10
+            if tip_x < 0:
+                tip_x = 10
+            if tip_y + tip_h > screen_h:
+                # Position above instead of below
+                tip_y = y - tip_h - 10
+            if tip_y < 0:
+                tip_y = 10
+                
+            tip.geometry(f"+{tip_x}+{tip_y}")
+            tip.deiconify()
+            tip.lift()
+            
+            # Style
+            bg = "#0078D7" # Blue accent
+            fg = "white"
+            border_color = "#1E90FF"
+            
+            # Outer border frame for subtle outline
+            outer_frame = tk.Frame(tip, bg=border_color, padx=1, pady=1)
+            outer_frame.pack()
+            
+            frame = tk.Frame(outer_frame, bg=bg, padx=2, pady=2)
+            frame.pack()
+            
+            # Content
+            lbl = tk.Label(frame, text=text, font=("Segoe UI", 10, "bold"), bg=bg, fg=fg, padx=10, pady=8, justify="left")
+            lbl.pack()
+            
+            # Wrapper for controls to sit at bottom
+            controls = tk.Frame(frame, bg=bg)
+            controls.pack(fill="x", padx=10, pady=(4, 8))
+
+            # Skip Link (Hyperlink style)
+            if next_action:
+                def on_skip(e):
+                    if tip.winfo_exists(): tip.destroy()
+                    
+                skip_lbl = tk.Label(controls, text="Skip tutorial", font=("Segoe UI", 8, "underline"), 
+                                  bg=bg, fg="#D1E8FF", cursor="hand2")
+                skip_lbl.pack(side="left")
+                skip_lbl.bind("<Button-1>", on_skip)
+
+            # Continue Button
+            btn_text = "Continue" if next_action else "Finish"
+            
+            def on_click(e=None):
+                if not tip.winfo_exists(): return
+                tip.destroy()
+                if next_action:
+                    self.root.after(200, next_action)
+            
+            btn = tk.Label(controls, text=btn_text, font=("Segoe UI", 9, "bold"), 
+                          bg="#005A9E", fg="white", padx=10, pady=4, cursor="hand2")
+            btn.pack(side="right")
+            btn.bind("<Button-1>", on_click)
+            
+            # NOTE: We do NOT bind to the widget or set a timeout.
+            # The tooltip persists until 'Continue' or 'Skip' is clicked.
+            
+        except Exception as e:
+            print(f"Coach mark error: {e}")
+            if next_action: next_action()
+
+    def open_global_settings(self):
+        self.show_tab("Settings")
+        
+    def show_modrinth_enable_dialog(self):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Enable Mod Support")
+        dialog.geometry("450x300")
+        dialog.config(bg=COLORS['main_bg'])
+        if os.name != "nt":
+            dialog.transient(self.root)
+        dialog.resizable(False, False)
+        if os.name != "nt":
+            dialog.grab_set()
+        
+        # Center on parent
+        dialog.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width()//2) - 225
+        y = self.root.winfo_y() + (self.root.winfo_height()//2) - 150
+        dialog.geometry(f"+{x}+{y}")
+        
+        # Ensure visibility
+        dialog.deiconify()
+        dialog.lift()
+        dialog_root = self._apply_custom_toplevel_chrome(dialog, "Enable Mod Support")
+        
+        container = tk.Frame(dialog_root, bg=COLORS['main_bg'], padx=20, pady=20)
+        container.pack(fill="both", expand=True)
+        
+        tk.Label(container, text="Enable Mod Support?", font=("Segoe UI", 14, "bold"), 
+                 bg=COLORS['main_bg'], fg="white").pack(pady=(0, 15))
+                 
+        tk.Label(container, text="Would you like to enable mod support in the launcher?", 
+                 font=("Segoe UI", 10), bg=COLORS['main_bg'], fg="#dddddd", wraplength=350).pack(pady=(0, 10))
+        
+        # Resource Warning + Tooltip
+        warn_frame = tk.Frame(container, bg=COLORS['main_bg'])
+        warn_frame.pack(pady=(0, 10))
+        
+        tk.Label(warn_frame, text="(Uses additional resources)", font=("Segoe UI", 9, "italic"),
+                bg=COLORS['main_bg'], fg="#F1C40F").pack(side="left")
+                
+        # Info Icon
+        info_lbl = tk.Label(warn_frame, text="ⓘ", font=("Segoe UI", 10), 
+                           bg=COLORS['main_bg'], fg="#3498DB", cursor="hand2")
+        info_lbl.pack(side="left", padx=5)
+        
+        # Simple Tooltip
+        tooltip_win = None
+        def show_tip(e):
+             nonlocal tooltip_win
+             tooltip_win = tk.Toplevel(dialog)
+             tooltip_win.wm_overrideredirect(True)
+             tooltip_win.geometry(f"+{e.x_root+10}+{e.y_root+10}")
+             lbl = tk.Label(tooltip_win, text="While the impact is minimal it can still be\nnoticeable on low end PCs.",
+                           bg="#222", fg="white", font=("Segoe UI", 8), relief="solid", borderwidth=1, padx=5, pady=2)
+             lbl.pack()
+             
+        def hide_tip(e):
+             nonlocal tooltip_win
+             if tooltip_win: tooltip_win.destroy()
+             tooltip_win = None
+             
+        info_lbl.bind("<Enter>", show_tip)
+        info_lbl.bind("<Leave>", hide_tip)
+        
+        tk.Label(container, text="Note: You can disable it later in Settings > Downloads", 
+                 font=("Segoe UI", 8), bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(pady=(10, 20))
+                 
+        btn_frame = tk.Frame(container, bg=COLORS['main_bg'])
+        btn_frame.pack(fill="x")
+        
+        def enable():
+            self.enable_modrinth = True
+            self.save_config()
+            dialog.destroy()
+            
+            if messagebox.askyesno("Restart Required", "The launcher needs to restart to apply changes.\nRestart now?"):
+                 # Restart App
+                cmd = [sys.executable]
+                cwd = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.getcwd()
+                if not getattr(sys, 'frozen', False):
+                    script = sys.argv[0]
+                    if not os.path.isabs(script):
+                        script = os.path.abspath(script)
+                        cwd = os.path.dirname(script)
+                    cmd = [sys.executable, script] + sys.argv[1:]
+                
+                if os.name == 'nt':
+                     subprocess.Popen(cmd, cwd=cwd, close_fds=True, creationflags=0x00000008)
+                else:
+                     subprocess.Popen(cmd, cwd=cwd, close_fds=True)
+                self.root.quit()
+        
+        tk.Button(btn_frame, text="Yes, Enable", bg=COLORS['success_green'], fg="white", 
+                 font=("Segoe UI", 10, "bold"), relief="flat", padx=15, pady=6, bd=0,
+                 cursor="hand2", activebackground=COLORS.get('play_btn_green', '#2D8F36'), activeforeground="white",
+                 command=enable).pack(side="right", padx=5)
+                 
+        tk.Button(btn_frame, text="No", bg="#404040", fg="#E0E0E0", 
+                 font=("Segoe UI", 10), relief="flat", padx=15, pady=6, bd=0,
+                 cursor="hand2", activebackground="#525252", activeforeground="white",
+                 command=dialog.destroy).pack(side="right", padx=5)
+
+    def set_active_sidebar(self, active_frame):
+        for frame in getattr(self, 'sidebar_items', []):
+            if frame == active_frame:
+                frame.config(bg=COLORS.get('hover_bg', '#3A3B3C'))
+                frame.is_active = True
+                for child in frame.winfo_children():
+                    if isinstance(child, tk.Label):
+                        if not getattr(child, "_keep_sidebar_bg", False):
+                            child.config(bg=COLORS.get('hover_bg', '#3A3B3C'), fg=COLORS['text_primary'])
+            else:
+                frame.config(bg=COLORS['sidebar_bg'])
+                frame.is_active = False
+                for child in frame.winfo_children():
+                    if isinstance(child, tk.Label):
+                        if not getattr(child, "_keep_sidebar_bg", False):
+                            child.config(bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'])
+
+    def _attach_sidebar_hover(self, frame):
+        def on_enter(e):
+            frame.config(bg=COLORS.get('hover_bg', '#3A3B3C'))
+            for child in frame.winfo_children():
+                if isinstance(child, tk.Label):
+                    if not getattr(child, "_keep_sidebar_bg", False):
+                        child.config(bg=COLORS.get('hover_bg', '#3A3B3C'), fg=COLORS['text_primary'])
+        
+        def on_leave(e):
+            if getattr(frame, "is_active", False):
+                 return
+            
+            frame.config(bg=COLORS['sidebar_bg'])
+            for child in frame.winfo_children():
+                if isinstance(child, tk.Label):
+                    if not getattr(child, "_keep_sidebar_bg", False):
+                        child.config(bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'])
+            
+        frame.bind("<Enter>", on_enter)
+        frame.bind("<Leave>", on_leave)
+
+    def _create_sidebar_link(self, text, url_or_command, indicator_text=None, indicator_color=None, is_action=False, pack_side="top", icon=None):
+        frame = tk.Frame(self.sidebar, bg=COLORS['sidebar_bg'], cursor="hand2", padx=15, pady=8)
+        frame.pack(fill="x", side=cast(Any, pack_side))
+        
+        # Register for active state tracking
+        if not hasattr(self, 'sidebar_items'): self.sidebar_items = []
+        self.sidebar_items.append(frame)
+        
+        # Indicator (like "Java" or "Mods")
+        if indicator_text:
+             if indicator_color:
+                 bg_color = indicator_color
+             else:
+                 bg_color = "#E74C3C" if indicator_text == "Mods" else "#2D8F36"
+             
+             indicator_label = tk.Label(frame, text=indicator_text, bg=bg_color, fg="white", 
+                     font=("Segoe UI", 8, "bold"), width=4, cursor="hand2")
+             indicator_label._keep_sidebar_bg = True  # type: ignore[attr-defined]
+             indicator_label.pack(side="left", padx=(0,10))
+        
+        # Icon
+        if icon:
+             # Use a larger font for the symbol
+             tk.Label(frame, text=icon, font=("Segoe UI", 12), bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'], 
+                      cursor="hand2").pack(side="left", padx=(0, 10))
+
+        lbl = tk.Label(frame, text=text, font=("Segoe UI", 9), bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'], cursor="hand2")
+        lbl.pack(side="left")
+        
+        def handle_click(e):
+            if is_action:
+                self.set_active_sidebar(frame)
+                url_or_command()
+            else:
+                webbrowser.open(url_or_command)
+            
+        frame.bind("<Button-1>", handle_click)
+        lbl.bind("<Button-1>", handle_click)
+        # bind children
+        for child in frame.winfo_children():
+            child.bind("<Button-1>", handle_click)
+        
+        # Hover effect
+        self._attach_sidebar_hover(frame)
+
+    # --- Smooth Scroll Utilities ---
+    def _get_scroll_impulse(self, event):
+        """Normalise wheel and precision-touchpad input to pixel impulses."""
+        try:
+            delta = getattr(event, "delta", 0)
+            if delta:
+                # Windows wheel mice normally report ±120; precision touchpads
+                # often report much smaller values.  The old conversion ignored
+                # those small deltas because the animation stopped below 0.5.
+                direction = -1 if delta > 0 else 1
+                return direction * max(18, min(72, abs(float(delta)) / 3))
+        except Exception:
+            pass
+
+        try:
+            button_num = getattr(event, "num", None)
+            if button_num == 4:
+                return -40
+            if button_num == 5:
+                return 40
+        except Exception:
+            pass
+
+        return 0
+
+    def _bind_wheel_events(self, widget, handler, bind_tag):
+        if not widget or not widget.winfo_exists():
+            return
+        attr_name = f"_nlc_wheel_bind_{bind_tag}"
+        if getattr(widget, attr_name, False):
+            return
+        # Add, rather than replace, widget-native bindings (notably Combobox
+        # and Text).  This fixes wheel support without breaking controls.
+        widget.bind("<MouseWheel>", handler, add="+")
+        widget.bind("<Button-4>", handler, add="+")
+        widget.bind("<Button-5>", handler, add="+")
+        setattr(widget, attr_name, True)
+        if isinstance(widget, tk.Canvas):
+            widget._nlc_canvas_wheel_bound = True  # type: ignore[attr-defined]
+
+    def _smooth_scroll(self, canvas, event):
+        """Smooth mousewheel scrolling with inertia for any canvas widget."""
+        try:
+            if not getattr(canvas, "_nlc_scroll_enabled", True):
+                return
+        except Exception:
+            pass
+        cid = id(canvas)
+        # Cancel any existing animation for this canvas
+        if cid in self._scroll_anim_ids:
+            try: self.root.after_cancel(self._scroll_anim_ids[cid])
+            except: pass
+            self._scroll_anim_ids.pop(cid, None)
+        
+        # Add velocity from scroll event (accumulate for fast flicks)
+        impulse = self._get_scroll_impulse(event)
+        if not impulse:
+            return
+        current = self._scroll_velocities.get(cid, 0.0)
+        # A hard cap prevents a burst of wheel events from coasting across an
+        # entire page and makes scrolling predictable at all window sizes.
+        self._scroll_velocities[cid] = max(-360.0, min(360.0, current + impulse))
+        
+        self._animate_scroll(canvas, cid)
+    
+    def _animate_scroll(self, canvas, cid):
+        """Animate scroll with deceleration (inertia)."""
+        try:
+            if not canvas.winfo_exists():
+                self._scroll_velocities.pop(cid, None)
+                self._scroll_anim_ids.pop(cid, None)
+                return
+        except:
+            self._scroll_velocities.pop(cid, None)
+            self._scroll_anim_ids.pop(cid, None)
+            return
+        
+        velocity = self._scroll_velocities.get(cid, 0)
+        
+        # Stop if velocity is negligible
+        if abs(velocity) < 0.5:
+            self._scroll_velocities.pop(cid, None)
+            self._scroll_anim_ids.pop(cid, None)
+            return
+        
+        # Clamp at boundaries
+        top, bottom = canvas.yview()
+        if (velocity < 0 and top <= 0) or (velocity > 0 and bottom >= 1.0):
+            self._scroll_velocities.pop(cid, None)
+            self._scroll_anim_ids.pop(cid, None)
+            return
+        
+        # Scroll by velocity (convert pixels to fraction of total height)
+        bbox = canvas.bbox("all")
+        if not bbox:
+            self._scroll_velocities.pop(cid, None)
+            self._scroll_anim_ids.pop(cid, None)
+            return
+        total_height = bbox[3] - bbox[1]
+        canvas_height = canvas.winfo_height()
+        
+        if total_height <= canvas_height:
+            self._scroll_velocities.pop(cid, None)
+            self._scroll_anim_ids.pop(cid, None)
+            return
+        
+        fraction = velocity / total_height
+        max_top = max(0.0, 1.0 - (canvas_height / total_height))
+        canvas.yview_moveto(max(0.0, min(max_top, top + fraction)))
+        callback = getattr(canvas, "_nlc_after_scroll", None)
+        if callable(callback):
+            callback()
+        
+        # Apply friction
+        self._scroll_velocities[cid] = velocity * 0.78
+        
+        # Schedule next frame (~16ms for 60fps)
+        self._scroll_anim_ids[cid] = self.root.after(16, self._animate_scroll, canvas, cid)
+
+    def _bind_smooth_scroll(self, canvas, widget):
+        """Bind smooth scrolling to a widget and all its children for a specific canvas."""
+        if not widget or not widget.winfo_exists():
+            return
+        # Many panels previously bound the wheel only after entering a child
+        # frame, so the blank area around content appeared unscrollable.  Give
+        # every canvas a handler unless that panel already installed a custom
+        # one (such as Modrinth pagination).
+        if not getattr(canvas, "_nlc_canvas_wheel_bound", False):
+            self._bind_wheel_events(
+                canvas,
+                lambda event, target=canvas: self._smooth_scroll(target, event),
+                f"canvas_{id(canvas)}",
+            )
+        canvas_id = id(canvas)
+        already_bound = getattr(widget, "_nlc_scroll_canvas_id", None)
+        if already_bound != canvas_id:
+            handler = lambda e, c=canvas: self._smooth_scroll(c, e)
+            self._bind_wheel_events(widget, handler, f"smooth_{canvas_id}")
+            setattr(widget, "_nlc_scroll_canvas_id", canvas_id)
+        for child in widget.winfo_children():
+            self._bind_smooth_scroll(canvas, child)
+
+    def _make_btn(self, parent, text, style="secondary", command=None, font_size=9,
+                  bold=False, icon=False, width=None, pack_opts=None):
+        """Create a consistently styled button.
+        
+        Styles:
+            primary   — Accent/green background, white text
+            secondary — Dark gray background, white text
+            danger    — Red background, white text
+            text      — Transparent background, muted text, no padding
+            icon      — Compact square for icon-only buttons (📁, ..., ⋮)
+        """
+        weight = "bold" if bold else ""
+        cfg = {
+            "primary":   {"bg": COLORS.get('play_btn_green', '#2D8F36'), "fg": "white",
+                          "hover": COLORS.get('play_btn_green', '#2D8F36'), "active_fg": "white"},
+            "secondary": {"bg": "#404040", "fg": "#E0E0E0",
+                          "hover": "#525252", "active_fg": "white"},
+            "danger":    {"bg": "#C0392B", "fg": "white",
+                          "hover": "#E74C3C", "active_fg": "white"},
+            "text":      {"bg": COLORS.get('main_bg', '#1E1E1E'), "fg": "#909090",
+                          "hover": COLORS.get('main_bg', '#1E1E1E'), "active_fg": "white"},
+            "icon":      {"bg": "#404040", "fg": "#C0C0C0",
+                          "hover": "#525252", "active_fg": "white"},
+        }.get(style, {"bg": "#404040", "fg": "white", "hover": "#525252", "active_fg": "white"})
+
+        btn = tk.Button(parent, text=text, font=("Segoe UI", font_size, weight),
+                       bg=cfg["bg"], fg=cfg["fg"],
+                       activebackground=cfg["hover"], activeforeground=cfg["active_fg"],
+                       relief="flat", bd=0, cursor="hand2", command=command) # type: ignore
+
+        if os.name != "nt":
+            btn.config(
+                highlightthickness=0,
+                takefocus=0,
+                highlightbackground=cfg["bg"],
+                highlightcolor=cfg["bg"],
+                disabledforeground=cfg["fg"],
+            )
+
+        if style == "icon":
+            btn.config(padx=6, pady=4)
+        elif style == "text":
+            btn.config(padx=2, pady=2)
+        else:
+            btn.config(padx=14, pady=6)
+
+        if width is not None:
+            btn.config(width=width)
+
+        # Hover effects
+        def on_enter(e):
+            btn.config(bg=cfg["hover"])
+        def on_leave(e):
+            btn.config(bg=cfg["bg"])
+        btn.bind("<Enter>", on_enter)
+        btn.bind("<Leave>", on_leave)
+
+        if os.name != "nt":
+            def prime_linux_button():
+                try:
+                    if not btn.winfo_exists():
+                        return
+                    btn.config(
+                        bg=cfg["bg"],
+                        fg=cfg["fg"],
+                        activebackground=cfg["hover"],
+                        activeforeground=cfg["active_fg"],
+                    )
+                    btn.update_idletasks()
+                except Exception:
+                    pass
+
+            btn.after_idle(prime_linux_button)
+            btn.after(40, prime_linux_button)
+
+        return btn
+
+    def _animate_menu_open(self, menu, target_h, direction="down", pos_x=None, pos_y=None, pos_w=None):
+        """Slide-open animation for dropdown menus.
+        
+        Args:
+            pos_x, pos_y, pos_w: Explicit position/size to avoid re-parsing geometry.
+                                 pos_y is the FINAL top-left y of the menu.
+        """
+        try:
+            if pos_x is not None and pos_y is not None and pos_w is not None:
+                w, x, base_y = pos_w, pos_x, pos_y
+            else:
+                geo = menu.geometry()
+                parts = geo.split('+')
+                size = parts[0].split('x')
+                w = int(size[0])
+                x = int(parts[1])
+                base_y = int(parts[2])
+        except:
+            return
+        
+        steps = 6
+        current_step = [0]
+        
+        if direction == "up":
+            bottom_edge = base_y + target_h
+        
+        def step():
+            if current_step[0] >= steps:
+                menu.geometry(f"{w}x{target_h}+{x}+{base_y}")
+                return
+            try:
+                if not menu.winfo_exists(): return
+            except: return
+            
+            t = (current_step[0] + 1) / steps
+            t_ease = 1 - (1 - t) ** 3
+            h = max(1, int(t_ease * target_h))
+            
+            if direction == "up":
+                y = bottom_edge - h # type: ignore
+                menu.geometry(f"{w}x{h}+{x}+{y}")
+            else:
+                menu.geometry(f"{w}x{h}+{x}+{base_y}")
+            
+            current_step[0] += 1
+            self.root.after(12, step)
+        
+        if direction == "up":
+            menu.geometry(f"{w}x1+{x}+{bottom_edge - 1}") # type: ignore
+        else:
+            menu.geometry(f"{w}x1+{x}+{base_y}")
+        step()
+
+    def _close_all_menus(self):
+        """Close all open dropdown menus when switching tabs or performing other actions"""
+        # Close installation selector menu
+        if hasattr(self, '_selector_menu') and self._selector_menu:
+            try:
+                if self._selector_menu.winfo_exists():
+                    self._selector_menu.destroy()
+            except:
+                pass
+            self._selector_menu = None
+        
+        # Close profile menu
+        if hasattr(self, 'profile_menu') and self.profile_menu:
+            try:
+                if self.profile_menu.winfo_exists():
+                    self.profile_menu.destroy()
+            except:
+                pass
+            self.profile_menu = None
+        
+        # Close launch options menu
+        if hasattr(self, '_launch_opts_menu') and self._launch_opts_menu:
+            try:
+                if self._launch_opts_menu.winfo_exists():
+                    self._launch_opts_menu.destroy()
+            except:
+                pass
+            self._launch_opts_menu = None
+        
+        # Close installation context menu
+        if hasattr(self, 'installation_menu') and self.installation_menu:
+            try:
+                if self.installation_menu.winfo_exists():
+                    self.installation_menu.destroy()
+            except:
+                pass
+            self.installation_menu = None
+
+    def create_nav_btn(self, text, command):
+        def wrapped_command():
+            # Automatically set Minecraft as active sidebar when top nav is clicked
+            if hasattr(self, 'minecraft_btn_frame'):
+                self.set_active_sidebar(self.minecraft_btn_frame) # type: ignore
+            command()
+
+        btn = tk.Button(self.nav_bar, text=text.upper(), font=("Segoe UI", 11, "bold"),
+                       bg=COLORS['tab_bar_bg'], fg=COLORS['text_secondary'],
+                       activebackground=COLORS['tab_bar_bg'], activeforeground=COLORS['text_primary'],
+                       relief="flat", bd=0, cursor="hand2", command=wrapped_command)
+        btn.pack(side="left", padx=30, pady=15)
+        # Hover
+        btn.bind("<Enter>", lambda e, b=btn: b.config(fg=COLORS['text_primary']))
+        btn.bind("<Leave>", lambda e, b=btn: b.config(fg=COLORS['text_secondary']) if b.cget('bg') == COLORS['tab_bar_bg'] else None)
+        self.nav_buttons[text] = btn
+
+    def show_tab(self, tab_name):
+        # Close any open dropdown menus
+        self._close_all_menus()
+        
+        # Lazy Init Mods Tab
+        if tab_name == "Mods" and "Mods" not in self.tabs:
+             self.create_mods_tab()
+
+        # Hide all tabs
+        for t in self.tabs.values():
+            t.pack_forget()
+        
+        # Update Nav Buttons
+        for name, btn in self.nav_buttons.items():
+            if name.upper() == tab_name.upper():
+                btn.config(fg=COLORS['text_primary'])
+            else:
+                btn.config(fg=COLORS['text_secondary'])
+        
+        # Show selected tab
+        if tab_name in self.tabs:
+            self.tabs[tab_name].pack(fill="both", expand=True)
+            self.current_tab = tab_name
+            
+            # Lazy Load triggers
+            if tab_name == "Mods":
+                if hasattr(self, 'mods_tab_initialized') and not self.mods_tab_initialized:
+                    self.mods_tab_initialized = True
+                    self.search_mods_thread(reset=True)
+
+    # --- PLAY TAB ---
+    def change_minecraft_dir(self):
+        path = filedialog.askdirectory(initialdir=self.minecraft_dir)
+        if path:
+            self.minecraft_dir = path
+            self.dir_entry.delete(0, tk.END)
+            self.dir_entry.insert(0, path)
+            self.load_versions()
+            self.render_screenshot_browser()
+
+    def check_for_updates(self):
+        self.update_status_lbl.config(text="Checking for updates...", fg=COLORS['text_secondary'])
+        threading.Thread(target=self._update_check_thread, daemon=True).start()
+
+    def _update_check_thread(self):
+        try:
+            url = "https://api.github.com/repos/Amne-Dev/New-launcher/releases/latest"
+            response = requests.get(url, timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                latest_tag = data.get("tag_name", "").lstrip("v")
+                
+                # Check for updates (Simple Semantic Versioning)
+                update_available = False
+                try:
+                    current_parts = [int(x) for x in CURRENT_VERSION.split(".")]
+                    latest_parts = [int(x) for x in latest_tag.split(".")]
+                    
+                    for i in range(max(len(current_parts), len(latest_parts))):
+                        cur = current_parts[i] if i < len(current_parts) else 0
+                        lat = latest_parts[i] if i < len(latest_parts) else 0
+                        if lat > cur:
+                            update_available = True
+                            break
+                        elif lat < cur:
+                            break 
+                except ValueError:
+                    if latest_tag and latest_tag != CURRENT_VERSION:
+                        update_available = True
+                            
+                if update_available:
+                    assets = data.get("assets", [])
+                    preferred_asset = None
+
+                    # Auto-update must use the full installer so dependencies are included.
+                    for asset in assets:
+                        name = str(asset.get("name", ""))
+                        if name.lower() == "nlcsetup.exe":
+                            preferred_asset = asset
+                            break
+                    if preferred_asset is None:
+                        for asset in assets:
+                            name = str(asset.get("name", "")).lower()
+                            if name.endswith(".exe") and ("setup" in name or "installer" in name):
+                                preferred_asset = asset
+                                break
+
+                    asset_url = preferred_asset.get("browser_download_url") if preferred_asset else None
+                    asset_name = preferred_asset.get("name") if preferred_asset else ""
+                    self.root.after(
+                        0,
+                        lambda: self._on_update_found(
+                            latest_tag,
+                            data.get("html_url"),
+                            asset_url,
+                            asset_name,
+                        ),
+                    )
+                else:
+                     self.root.after(0, lambda: self.update_status_lbl.config(text="You are on the latest version.", fg=COLORS['success_green']))
+            else:
+                 self.root.after(0, lambda: self.update_status_lbl.config(text=f"Failed to check: {response.status_code}", fg=COLORS['error_red']))
+        except Exception as e:
+            self.root.after(0, lambda: self.update_status_lbl.config(text=f"Error checking updates", fg=COLORS['error_red']))
+            print(f"Update check error: {e}")
+
+    def _on_update_found(self, version, html_url, asset_url, asset_name=""):
+        self.update_status_lbl.config(text=f"New version available: {version}", fg=COLORS['accent_blue'])
+        
+        # Choice: Yes -> Auto Update, Manual -> Visit Page, No -> Dismiss
+        btns = [
+            ("Yes, Update", True, "primary"), 
+            ("I'll do it myself", "manual", "secondary"), 
+            ("No", False, "secondary")
+        ]
+        
+        mbox = CustomMessagebox(
+            "Update Available", 
+            f"A new version ({version}) is available.\n\n"
+            "Would you like to auto-update now?", 
+            type="yesno", 
+            buttons=btns, 
+            parent=self.root
+        )
+        choice = mbox.result
+        
+        if choice is True:
+            is_setup_asset = str(asset_name).lower().endswith("setup.exe") or str(asset_name).lower() == "nlcsetup.exe"
+            if asset_url and is_setup_asset:
+                try:
+                    self.root.grab_release()
+                except Exception:
+                    pass
+                self.root.after(0, lambda u=asset_url, v=version: self.perform_auto_update(u, v))
+            else:
+                custom_showerror(
+                    "Error",
+                    "Auto-update installer (NLCSetup.exe) was not found in this release.\n"
+                    "Opening release page instead."
+                )
+                if html_url:
+                    webbrowser.open(html_url)
+        elif choice == "manual":
+             if html_url:
+                webbrowser.open(html_url)
+
+    def open_minecraft_dir(self):
+        try:
+            os.startfile(self.minecraft_dir)
+        except Exception as e:
+            self.log(f"Error opening folder: {e}")
+
+    def setup_tray(self):
+        if not TRAY_AVAILABLE or TrayItem is None: return
+        
+        def quit_app(icon, item):
+            icon.stop()
+            self.root.destroy()
+            sys.exit()
+
+        def show_app(icon, item):
+            self.restore_window()
+        try:
+            image = Image.open(resource_path("logo.ico"))
+        except:
+            # Fallback
+            image = Image.new('RGB', (64, 64), color = (73, 109, 137))
+            
+        menu = (TrayItem('Open', show_app, default=True), TrayItem('Quit', quit_app))
+        if TRAY_AVAILABLE and TrayIcon:
+            try:
+                self.tray_icon = TrayIcon("New Launcher", image, "New Launcher", menu)
+                def _run_tray():
+                    try:
+                        self.tray_icon.run()
+                    except (Exception, AssertionError) as exc:
+                        logger.debug("Systray unavailable: %s", exc)
+                        self.tray_icon = None
+                threading.Thread(target=_run_tray, daemon=True, name="nlc-systray").start()
+            except Exception as exc:
+                logger.debug("Failed to init systray: %s", exc)
+                self.tray_icon = None
+        
+        # Override minimize
+        self.root.bind("<Unmap>", self._on_window_minimize)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _on_window_minimize(self, event):
+        # Filter out random Unmap events (e.g. from widgets)
+        if event and event.widget != self.root:
+            return
+
+        if self.root.state() == 'iconic':
+            # Only withdraw if "Minimize to tray" is enabled
+            should_tray = False
+            if hasattr(self, 'minimize_to_tray_var'):
+                should_tray = self.minimize_to_tray_var.get()
+            else:
+                should_tray = getattr(self, 'minimize_to_tray', False)
+
+            if should_tray:
+                self.root.withdraw()
+
+    def restore_window(self):
+        self._cancel_window_animation()
+        wx, wy, ww, wh = self._get_work_area()
+
+        if self._pre_minimize_was_maximized:
+            target = (wx, wy, max(1, ww), max(1, wh))
+        elif self._pre_minimize_geometry:
+            target = self._pre_minimize_geometry
+        else:
+            fallback = self._windowed_geometry if self._windowed_geometry else (wx + 80, wy + 80, 1080, 720)
+            target = (
+                int(fallback[0]),
+                int(fallback[1]),
+                max(1, int(fallback[2])),
+                max(1, int(fallback[3]))
+            )
+
+        if self._pre_minimize_anchor_geometry:
+            start = self._pre_minimize_anchor_geometry
+        else:
+            tw = max(280, int(target[2] * 0.45))
+            th = max(180, int(target[3] * 0.45))
+            tx = wx + (ww - tw) // 2
+            ty = wy + wh - th - 10
+            start = (tx, ty, tw, th)
+
+        def on_restore_done():
+            self._window_is_maximized = bool(self._pre_minimize_was_maximized)
+            if hasattr(self, 'window_max_btn'):
+                self.window_max_btn.config(text="❐" if self._window_is_maximized else "□")
+            self._update_titlebar_controls_offset()
+            self.root.lift()
+            try:
+                self.root.focus_force()
+            except Exception:
+                pass
+            self._pre_minimize_geometry = None
+            self._pre_minimize_anchor_geometry = None
+            self._pre_minimize_was_maximized = False
+
+        def finalize_restore():
+            self.root.deiconify()
+            self.root.state('normal')
+            self._set_geometry_tuple(target)
+            self._set_custom_window_chrome(True)
+            self._ensure_taskbar_visibility()
+
+        self._run_transition_with_overlay(
+            start,
+            target,
+            duration=140,
+            steps=12,
+            subtitle="Restoring window",
+            finalize=finalize_restore,
+            on_done=on_restore_done
+        )
+        
+    def _on_close(self):
+        try:
+            self.save_config(sync_ui=True, immediate=True)
+        except Exception:
+            pass
+
+        should_tray = False
+        if hasattr(self, 'minimize_to_tray_var'):
+            should_tray = self.minimize_to_tray_var.get()
+        else:
+            should_tray = getattr(self, 'minimize_to_tray', False)
+
+        if should_tray and hasattr(self, 'tray_icon') and self.tray_icon:
+            self.root.withdraw()
+        else:
+            if hasattr(self, 'tray_icon') and self.tray_icon:
+                self.tray_icon.stop()
+            self.root.destroy()
+            os._exit(0)
+
+    # --- LOGIC ---
+    def setup_logging(self):
+        try:
+            # Determine log directory based on config location
+            # If config_dir is set (which points to either local dir or .nlc), use that.
+            if hasattr(self, 'config_dir'):
+                log_dir = os.path.join(self.config_dir, "logs")
+            else:
+                # Fallback if config_dir is not yet set
+                if getattr(sys, 'frozen', False):
+                    base_dir = os.path.dirname(sys.executable)
+                else:
+                    base_dir = os.path.dirname(os.path.abspath(__file__))
+                log_dir = os.path.join(base_dir, "logs")
+            
+            if not os.path.exists(log_dir):
+                os.makedirs(log_dir)
+
+            self.cleanup_old_logs(log_dir)
+            
+            fname = f"launcher_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log"
+            self.log_file_path = os.path.join(log_dir, fname)
+            
+            # Remove existing handlers
+            for handler in logging.root.handlers[:]:
+                logging.root.removeHandler(handler)
+                
+            logging.basicConfig(
+                level=logging.NOTSET, # Capture everything, handlers will filter
+                format="%(asctime)s [%(levelname)s] %(threadName)s: %(message)s",
+                handlers=[
+                    logging.FileHandler(self.log_file_path, encoding='utf-8'),
+                    logging.StreamHandler(sys.stdout)
+                ]
+            )
+            
+            logging.info(f"Launcher initialized. Log file: {self.log_file_path}")
+            logging.info(f"System: {platform.system()} {platform.release()} {platform.version()}")
+            
+        except Exception as e:
+            print(f"Logging setup failed: {e}")
+            self.log_file_path = None
+
+    def cleanup_old_logs(self, log_dir):
+        try:
+            files = glob.glob(os.path.join(log_dir, "launcher_*.log"))
+            files.sort(key=os.path.getmtime)
+            while len(files) >= 5:
+                try: os.remove(files.pop(0))
+                except: pass
+        except: pass
+
+    def _on_ram_slider_change(self, value):
+        try:
+            val = int(float(value))
+            self.ram_entry_var.set(str(val))
+            self.ram_allocation = val
+            self.save_config()
+        except: pass
+
+    def _on_ram_entry_change(self, *args):
+        try:
+            val = int(self.ram_entry_var.get())
+            self.ram_allocation = val
+            self.ram_var.set(val)
+            self.save_config()
+        except ValueError:
+            pass
+
+    def _on_rpc_toggle(self):
+        self.rpc_enabled = self.rpc_var.get()
+        if self.rpc_enabled:
+            self.connect_rpc()
+        else:
+            self.close_rpc()
+        self.save_config()
+
+    def connect_rpc(self):
+        if not RPC_AVAILABLE or not self.rpc_enabled or self.rpc_connected: return
+        try:
+            self.rpc = Presence("1458526248845443167") # pyright: ignore[reportPossiblyUnboundVariable] 
+            self.rpc.connect()
+            self.rpc_connected = True
+            self.update_rpc("Idle", "In Launcher")
+        except Exception as e:
+            self.log(f"RPC Error: {e}")
+            self.rpc_connected = False
+
+    def close_rpc(self):
+        if self.rpc:
+            try: self.rpc.close()
+            except: pass
+        self.rpc_connected = False
+        self.rpc = None
+
+    def update_rpc(self, state, details=None, start=None):
+        if not self.rpc_connected or not self.rpc: return
+        try:
+            self._last_rpc_state = state
+            self._last_rpc_details = details
+            self._last_rpc_start = start
+            # User Info for formatted Rich Presence
+            user_text = "Steve"
+            small_key = "steve" # Fallback asset key
+            
+            if self.profiles and hasattr(self, 'current_profile_index') and 0 <= self.current_profile_index < len(self.profiles):
+                p = self.profiles[self.current_profile_index]
+                user_text = p.get("name", "Steve")
+                # Use MC-Heads for dynamic avatar if UUID exists (Microsoft/Ely.by)
+                if p.get("uuid"):
+                    small_key = f"https://mc-heads.net/avatar/{p.get('uuid')}"
+            user_text = self._get_streamer_safe_name(user_text)
+            
+            kwargs = {
+                "state": state,
+                "details": details,
+                "large_image": "logo", 
+                "large_text": "New Launcher",
+                "small_image": small_key,
+                "small_text": user_text
+            }
+            if start: kwargs["start"] = start
+            self.rpc.update(**kwargs)
+        except Exception as e: 
+            self.log(f"RPC Update Failed: {e}")
+            self.rpc_connected = False
+
+    def _set_auto_download(self, enabled):
+        self.auto_download_mod = bool(enabled)
+        self.save_config()
+
+    def log(self, message):
+        # Update UI
+        try:
+            if hasattr(self, 'log_area') and self.log_area.winfo_exists():
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                # Strip [GAME] prefix for UI if needed, but keeping it is good for context
+                line = f"[{timestamp}] {self._mask_streamer_text(message)}"
+                self.log_area.insert(tk.END, line + "\n")
+                self.log_area.see(tk.END)
+        except:
+            pass
+        
+        # Write to log file via logging module
+        logging.info(message)
+
+    def set_status(self, text, color=None):
+        self.status_label.config(text=text, fg=color if color else COLORS['text_secondary'])
+
+    def get_head_from_skin(self, skin_path, size=40):
+        try:
+            if skin_path and os.path.exists(skin_path):
+                img = Image.open(skin_path)
+                # Head is 8x8 at 8,8
+                head = img.crop((8, 8, 16, 16))
+                return ImageTk.PhotoImage(head.resize((size, size), RESAMPLE_NEAREST))
+        except: pass
+
+        return _build_missing_skin_head(size)
+
+    def update_active_profile(self):
+        if not self.profiles:
+            self.skin_path = ""
+            if hasattr(self, 'user_entry'):
+                self.user_entry.delete(0, tk.END)
+            self.update_profile_btn()
+            return
+
+        p = self.profiles[self.current_profile_index]
+        old_skin_path = self.skin_path
+        self.skin_path = p.get("skin_path", "")
+        
+        # Enforce settings based on account type
+        p_type = p.get("type", "offline")
+        if p_type == "microsoft":
+            self.auto_download_mod = False
+            if hasattr(self, 'auto_download_var'):
+                 self.auto_download_var.set(False)
+        
+        if hasattr(self, 'user_entry'):
+            self.user_entry.delete(0, tk.END)
+            self.user_entry.insert(0, p.get("name", "Steve"))
+            self.user_entry.config(show="*" if self._is_streamer_mode_enabled() else "")
+        
+        # Update Model Radio var BEFORE rendering
+        if hasattr(self, 'skin_model_var'):
+            self.skin_model_var.set(p.get("skin_model", "classic"))
+        
+        # Only render if skin path changed or is set
+        if self.skin_path and (self.skin_path != old_skin_path or not old_skin_path):
+            self.render_preview()
+        elif not self.skin_path and hasattr(self, 'preview_canvas'):
+            self.preview_canvas.delete("all")  # Clear preview if no skin
+
+        self.update_skin_indicator()
+        self.update_profile_btn()
+        if hasattr(self, 'update_bottom_gamertag'): self.update_bottom_gamertag()
+        
+        # Refresh skin history if on Locker tab
+        if self.current_tab == "Locker" and hasattr(self, 'locker_view') and self.locker_view.get() == "Skins":
+            if hasattr(self, 'render_skin_history'):
+                self.render_skin_history()
+        
+    def update_profile_btn(self):
+        # Update text labels
+        if not self.profiles: return
+        p = self.profiles[self.current_profile_index]
+        
+        if hasattr(self, 'sidebar_username'):
+            self.sidebar_username.config(text=self._get_streamer_safe_name(p.get("name", "Steve")))
+        
+        if hasattr(self, 'sidebar_acct_type'):
+            t = p.get("type", "offline")
+            if t == "microsoft":
+                label_text = "Microsoft Account"
+            elif t == "ely.by":
+                label_text = "Ely.by Account"
+            else:
+                label_text = "Offline Account"
+            self.sidebar_acct_type.config(text=label_text)
+
+        # Update Head Image
+        if hasattr(self, 'sidebar_head_label'):
+            img = self.get_head_from_skin(self.skin_path, size=35)
+            if img:
+                self.sidebar_head_img = img 
+                self.sidebar_head_label.config(image=img)
+
+    def load_from_config(self):
+        print(f"Loading config from: {self.config_file}")
+        if os.path.exists(self.config_file):
+            try:
+                with open(self.config_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if not isinstance(data, dict):
+                        raise ValueError("Configuration root must be a JSON object.")
+
+                    # Old, partially-written, or hand-edited configuration
+                    # should not crash the launcher.  Keep valid records and
+                    # let the regular atomic save migrate the rest.
+                    raw_profiles = data.get("profiles", [])
+                    data["profiles"] = [item for item in raw_profiles if isinstance(item, dict)] if isinstance(raw_profiles, list) else []
+                    raw_installations = data.get("installations", [])
+                    data["installations"] = [item for item in raw_installations if isinstance(item, dict)] if isinstance(raw_installations, list) else []
+                    if not isinstance(data.get("addons", {}), dict):
+                        data["addons"] = {}
+
+                    # First Run Check (Must be done before any save_config triggers)
+                    self.first_run = not data.get("first_run_completed", False)
+                    self.addons_config = data.get("addons", {})
+                    
+                    # Profiles (Accounts)
+                    self.profiles = data.get("profiles", [])
+                    if not self.profiles:
+                        old_user = data.get("username", DEFAULT_USERNAME)
+                        old_skin = data.get("skin_path", "")
+                        self.profiles = [{"name": old_user, "type": "offline", "skin_path": old_skin, "uuid": ""}]
+                    
+                    # Installations (Game Configs)
+                    self.installations = data.get("installations", [])
+                    if not self.installations:
+                        # Create default
+                        self.installations = [{
+                            "id": str(uuid.uuid4()),
+                            "name": "Latest Release",
+                            "version": "latest-release", # Metadata placeholder
+                            "loader": "Vanilla",
+                            "icon": "icons/grass_block_side.png",
+                            "java_executable": "",
+                            "resolution_width": None,
+                            "resolution_height": None,
+                            "last_played": "Never",
+                            "created": "2024-01-01"
+                        }]
+                        print("Initialized default installations")
+                    else:
+                        # Ensure IDs
+                        for inst in self.installations:
+                            if "id" not in inst:
+                                inst["id"] = str(uuid.uuid4())
+                            inst.setdefault("java_executable", "")
+                            inst.setdefault("resolution_width", None)
+                            inst.setdefault("resolution_height", None)
+                        print(f"Loaded {len(self.installations)} installations")
+                    
+                    idx = data.get("current_profile_index", 0)
+                    self.current_profile_index = idx if 0 <= idx < len(self.profiles) else 0
+                    
+                    inst_idx = data.get("current_installation_index", 0)
+                    self.current_installation_index = inst_idx if 0 <= inst_idx < len(self.installations) else 0
+
+                    self.update_active_profile()
+
+                    loader_choice = data.get("loader", LOADERS[0])
+                    self.loader_var.set(loader_choice if loader_choice in LOADERS else LOADERS[0])
+                    self.last_version = data.get("last_version", "")
+                    self.auto_download_mod = data.get("auto_download_mod", False)
+                    self.auto_download_var.set(self.auto_download_mod)
+                    try:
+                        self.ram_allocation = max(512, int(data.get("ram_allocation", DEFAULT_RAM)))
+                    except (TypeError, ValueError):
+                        self.ram_allocation = DEFAULT_RAM
+                    self.ram_var.set(self.ram_allocation)
+                    self.ram_entry_var.set(str(self.ram_allocation))
+
+                    # Downloads & Features
+                    try:
+                        self.max_concurrent_packs = max(1, min(3, int(data.get("max_concurrent_packs", 1))))
+                    except (TypeError, ValueError):
+                        self.max_concurrent_packs = 1
+                    try:
+                        self.max_concurrent_mods = max(1, min(8, int(data.get("max_concurrent_mods", 3))))
+                    except (TypeError, ValueError):
+                        self.max_concurrent_mods = 3
+                    self.limit_download_speed_enabled = data.get("limit_download_speed_enabled", False)
+                    self.max_download_speed = data.get("max_download_speed", 2048) # KB/s
+                    self.enable_modrinth = True
+                    loaded_mods_view = str(data.get("installed_mods_view_mode", "grid")).lower()
+                    self.installed_mods_view_mode = loaded_mods_view if loaded_mods_view in ("grid", "list") else "grid"
+                    
+                    # Addons
+                    if "addons" in data:
+                        self.addons_config.update(data["addons"])
+                    self._ensure_addons_config_defaults()
+
+                    # Load RPC
+                    self.rpc_enabled = data.get("rpc_enabled", True)
+                    self.rpc_var.set(self.rpc_enabled)
+                    
+                    # New Detail Mode with Backward Compat
+                    saved_mode = data.get("rpc_detail_mode", None)
+                    if saved_mode:
+                        self.rpc_detail_mode_var.set(saved_mode)
+                    else:
+                        # Infer from old bools
+                        show_ver = data.get("rpc_show_version", True)
+                        show_serv = data.get("rpc_show_server", True)
+                        if show_ver: val = "Show Version"
+                        elif show_serv: val = "Show Server IP"
+                        else: val = "Hidden"
+                        self.rpc_detail_mode_var.set(val)
+                    
+                    self.rpc_show_version = (self.rpc_detail_mode_var.get() == "Show Version")
+                    self.rpc_show_server = (self.rpc_detail_mode_var.get() == "Show Server IP")
+                    self.auto_update_check = data.get("auto_update_check", True)
+                    self.custom_titlebar_enabled = data.get("custom_titlebar_enabled", True)
+                    self.neo_style_enabled = data.get("neo_style_enabled", True)
+                    self.close_launcher = data.get("close_launcher", True)
+                    self.minimize_to_tray = data.get("minimize_to_tray", False)
+                    self.show_console = data.get("show_console", False)
+                    
+                    if self.rpc_enabled:
+                        self.root.after(1000, self.connect_rpc)
+
+                    # Load Java Args
+                    self.java_args = data.get("java_args", "")
+                    if hasattr(self, 'java_args_entry'):
+                        self.java_args_entry.delete(0, tk.END)
+                        self.java_args_entry.insert(0, self.java_args)
+
+                    self.refresh_addons_tab_state()
+
+                    # Load Custom Directory
+                    custom_dir = data.get("minecraft_dir", "")
+                    if custom_dir and os.path.isdir(custom_dir):
+                        self.minecraft_dir = custom_dir
+                    
+                    if hasattr(self, 'dir_entry'):
+                        self.dir_entry.delete(0, tk.END)
+                        self.dir_entry.insert(0, self.minecraft_dir)
+                    
+                    # Load Wallpaper
+                    wp = data.get("current_wallpaper")
+                    if wp and os.path.exists(wp):
+                         self.current_wallpaper = wp
+                         try:
+                             self.hero_img_raw = Image.open(wp)
+                             if hasattr(self, 'hero_canvas'):
+                                  w = self.hero_canvas.winfo_width()
+                                  h = self.hero_canvas.winfo_height()
+                                  # If window is already visible/sized
+                                  if w > 1 and h > 1:
+                                      self._update_hero_layout(type('obj', (object,), {'width':w, 'height':h}))
+                         except Exception as e:
+                             print(f"Failed to load saved wallpaper: {e}")
+                    else:
+                         self.current_wallpaper = None
+                         
+            except Exception as e: 
+                print(f"Error loading config: {e}")
+                self.create_default_profile()
+                self.first_run = True # Error implies we should probable re-onboard or fallback
+        else: 
+            print("Config file not found, creating default")
+            self.create_default_profile()
+            self.first_run = True # Explicitly true for no config
+
+        # --- Default Wallpaper Fallback ---
+        if not self.hero_img_raw:
+             try:
+                 # Check for 'Island.png' or 'background.png' in wallpapers dir
+                 possible_defaults = ["Island.png", "background.png"]
+                 for name in possible_defaults:
+                     path = resource_path(os.path.join("wallpapers", name))
+                     if os.path.exists(path):
+                         self.current_wallpaper = path
+                         self.hero_img_raw = Image.open(path)
+                         print(f"Loaded default wallpaper: {name}")
+                         break
+             except Exception as e:
+                 print(f"Failed to load default wallpaper: {e}")
+            
+        # Trigger background check for MS skin model to ensure radio button matches server
+        if self.profiles and 0 <= self.current_profile_index < len(self.profiles):
+            try:
+                p = self.profiles[self.current_profile_index]
+                if p.get("type") == "microsoft":
+                     threading.Thread(target=self._startup_ms_skin_check, daemon=True).start()
+            except: pass
+
+    def _build_config_payload(self, sync_ui=True):
+        if sync_ui and self.profiles and 0 <= self.current_profile_index < len(self.profiles):
+            self.profiles[self.current_profile_index]["skin_path"] = self.skin_path
+            if hasattr(self, 'user_entry'):
+                name = self.user_entry.get().strip()
+                if name:
+                    self.profiles[self.current_profile_index]["name"] = name
+
+        if sync_ui and hasattr(self, 'java_args_entry'):
+            self.java_args = self.java_args_entry.get().strip()
+
+        rpc_mode = "Show Version"
+        if hasattr(self, 'rpc_detail_mode_var'):
+            rpc_mode = self.rpc_detail_mode_var.get()
+        if hasattr(self, 'auto_update_var'):
+            self.auto_update_check = self.auto_update_var.get()
+
+        self.rpc_show_version = (rpc_mode == "Show Version")
+        self.rpc_show_server = (rpc_mode == "Show Server IP")
+
+        close_launcher_val = getattr(self, 'close_launcher', True)
+        if hasattr(self, 'close_launcher_var'):
+            close_launcher_val = self.close_launcher_var.get()
+
+        minimize_to_tray_val = getattr(self, 'minimize_to_tray', False)
+        if hasattr(self, 'minimize_to_tray_var'):
+            minimize_to_tray_val = self.minimize_to_tray_var.get()
+
+        show_console_val = getattr(self, 'show_console', False)
+        if hasattr(self, 'show_console_var'):
+            show_console_val = self.show_console_var.get()
+
+        return {
+            "last_version": getattr(self, "last_version", ""),
+            "first_run_completed": not self.first_run,
+            "accent_color": getattr(self, "accent_color_name", "Green"),
+            "profiles": self.profiles,
+            "installations": self.installations,
+            "current_profile_index": self.current_profile_index,
+            "current_installation_index": getattr(self, 'current_installation_index', 0),
+            "loader": self.loader_var.get() if hasattr(self, 'loader_var') else "Vanilla",
+            "auto_download_mod": self.auto_download_mod,
+            "ram_allocation": self.ram_allocation,
+            "java_args": self.java_args,
+            "minecraft_dir": self.minecraft_dir,
+            "rpc_enabled": self.rpc_enabled,
+            "rpc_detail_mode": rpc_mode,
+            "rpc_show_version": self.rpc_show_version,
+            "rpc_show_server": self.rpc_show_server,
+            "auto_update_check": self.auto_update_check,
+            "custom_titlebar_enabled": getattr(self, 'custom_titlebar_enabled', True),
+            "neo_style_enabled": getattr(self, 'neo_style_enabled', True),
+            "max_concurrent_packs": getattr(self, 'max_concurrent_packs', 1),
+            "max_concurrent_mods": getattr(self, 'max_concurrent_mods', 3),
+            "limit_download_speed_enabled": getattr(self, 'limit_download_speed_enabled', False),
+            "max_download_speed": getattr(self, 'max_download_speed', 2048),
+            "enable_modrinth": True,
+            "installed_mods_view_mode": getattr(self, 'installed_mods_view_mode', 'grid'),
+            "close_launcher": close_launcher_val,
+            "minimize_to_tray": minimize_to_tray_val,
+            "show_console": show_console_val,
+            "current_wallpaper": getattr(self, 'current_wallpaper', None),
+            "addons": getattr(self, "addons_config", {})
+        }
+
+    def _write_config_payload(self, config):
+        tmp_path = f"{self.config_file}.tmp"
+        try:
+            os.makedirs(os.path.dirname(self.config_file), exist_ok=True)
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(config, f, indent=4)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, self.config_file)
+        except Exception as e:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+            print(f"Failed to save config: {e}")
+
+    def _flush_pending_config_save(self):
+        self._config_save_after_id = None
+        sync_ui = bool(getattr(self, "_config_sync_ui_pending", False))
+        self._config_sync_ui_pending = False
+        self._write_config_payload(self._build_config_payload(sync_ui=sync_ui))
+
+    def save_config(self, *args, sync_ui=True, immediate=False):
+        self._config_sync_ui_pending = bool(getattr(self, "_config_sync_ui_pending", False) or bool(sync_ui))
+
+        if immediate:
+            if getattr(self, "_config_save_after_id", None) is not None:
+                try:
+                    self.root.after_cancel(self._config_save_after_id)
+                except Exception:
+                    pass
+                self._config_save_after_id = None
+            self._flush_pending_config_save()
+            return
+
+        delay = max(50, int(getattr(self, "_config_save_delay_ms", 250)))
+        if self._config_save_after_id is not None:
+            try:
+                self.root.after_cancel(self._config_save_after_id)
+            except Exception:
+                pass
+        try:
+            self._config_save_after_id = self.root.after(delay, self._flush_pending_config_save)
+        except Exception:
+            self._config_save_after_id = None
+            self._flush_pending_config_save()
+
+    def create_default_profile(self):
+        self.profiles = [{"name": DEFAULT_USERNAME, "type": "offline", "skin_path": "", "uuid": ""}]
+        self.installations = [{
+            "id": str(uuid.uuid4()),
+            "name": "Latest Release",
+            "version": "latest-release",
+            "loader": "Vanilla",
+            "icon": "icons/grass_block_side.png",
+            "java_executable": "",
+            "resolution_width": None,
+            "resolution_height": None,
+            "last_played": "Never",
+            "created": "2024-01-01"
+        }]
+        self.current_profile_index = 0
+        self.current_installation_index = 0
+        self.update_active_profile()
+
+    def load_versions(self):
+        """Warm the metadata cache without blocking launcher startup.
+
+        The installation editor owns the actual selector; this cache keeps it
+        responsive when users open it for the first time.
+        """
+        if getattr(self, "_version_load_started", False):
+            return
+        self._version_load_started = True
+
+        def fetch():
+            try:
+                versions = minecraft_launcher_lib.utils.get_version_list()
+                cleaned = [
+                    {"id": str(item.get("id")), "type": str(item.get("type", "release"))}
+                    for item in versions if isinstance(item, dict) and item.get("id")
+                ]
+                self.cached_vanilla_versions = cleaned
+                self.log(f"Loaded {len(cleaned)} Minecraft versions.")
+            except Exception as exc:
+                self.cached_vanilla_versions = []
+                self.log(f"Could not load Minecraft version metadata: {exc}")
+            finally:
+                self._version_load_started = False
+
+        threading.Thread(target=fetch, daemon=True, name="version-metadata").start()
+
+    def _apply_version_list(self, loader, display_list):
+        """Compatibility hook for older UI surfaces that expose a combobox."""
+        for widget_name in ("version_combo", "version_dropdown"):
+            widget = getattr(self, widget_name, None)
+            if widget is None:
+                continue
+            try:
+                widget["values"] = display_list
+                if display_list and not self.version_var.get():
+                    self.version_var.set(display_list[0])
+            except (tk.TclError, TypeError):
+                pass
+
+    def on_loader_change(self, event):
+        self.load_versions()
+        self.save_config()
+
+    def on_version_change(self, event):
+        self.save_config()
+
+    def launch_installation(self, idx, server_address=None, server_port=None):
+        if 0 <= idx < len(self.installations):
+            self.current_installation_index = idx
+            self.show_tab("Play")
+            self.update_installation_dropdown()
+            self.start_launch(server_address=server_address, server_port=server_port)
+
+    def update_skin_indicator(self):
+        if not hasattr(self, 'skin_indicator') or not self.skin_indicator.winfo_exists(): return
+        
+        # Determine current account type
+        current_profile = self.profiles[self.current_profile_index] if (self.profiles and 0 <= self.current_profile_index < len(self.profiles)) else {}
+        acct_type = current_profile.get("type", "offline")
+
+        if acct_type == "ely.by":
+            self.skin_indicator.config(text="Skin via Ely.by", fg=COLORS['success_green'])
+            return
+
+        # Offline
+        if self.auto_download_mod:
+             if self.skin_path:
+                 self.skin_indicator.config(text="Ready: Local Skin Injection", fg=COLORS['success_green'])
+             else:
+                 self.skin_indicator.config(text="Injection enabled (No Skin)", fg=COLORS['accent_blue'])
+        else:
+            self.skin_indicator.config(text="Skin Injection Disabled", fg=COLORS['text_secondary'])
+
+    def custom_skin_model_popup(self, parent=None):
+        # Returns "classic" or "slim" or None if cancelled
+        result = {"model": None}
+        
+        # Check current profile for default preference
+        current_model = "classic"
+        if self.profiles and 0 <= self.current_profile_index < len(self.profiles):
+            current_model = self.profiles[self.current_profile_index].get("skin_model", "classic")
+            
+        dialog = tk.Toplevel(parent if parent else self.root)
+        dialog.title("Skin Model")
+        dialog.geometry("350x250")
+        dialog.config(bg=COLORS['main_bg'])
+        try: # Center it
+            x = self.root.winfo_x() + (self.root.winfo_width() // 2) - 175
+            y = self.root.winfo_y() + (self.root.winfo_height() // 2) - 125
+            dialog.geometry(f"+{x}+{y}")
+        except: pass
+        if os.name != "nt":
+            dialog.transient(self.root)
+        dialog.resizable(False, False)
+        if os.name != "nt":
+            dialog.grab_set()
+        dialog_root = self._apply_custom_toplevel_chrome(dialog, "Skin Model")
+        
+        tk.Label(dialog_root, text="Select Skin Model", font=("Segoe UI", 12, "bold"), 
+                bg=COLORS['main_bg'], fg=COLORS['text_primary']).pack(pady=15)
+        
+        tk.Label(dialog_root, text="Does your skin have 3px (Slim) or 4px (Classic) arms?", 
+                 font=("Segoe UI", 9), bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(pady=(0, 20))
+        
+        btn_frame = tk.Frame(dialog_root, bg=COLORS['main_bg'])
+        btn_frame.pack(fill="x", padx=30)
+        
+        def set_classic():
+            result['model'] = "classic" # type: ignore
+            dialog.destroy()
+            
+        def set_slim():
+            result['model'] = "slim" # type: ignore
+            dialog.destroy()
+            
+        # Helper for active style
+        active_bd = 2
+        active_relief = "solid"
+        
+        # Classic (Steve)
+        b1_bg = COLORS['success_green'] if current_model == "classic" else COLORS['card_bg']
+        b1 = self._make_btn(btn_frame, "Classic (Steve)\n4px Arms", 
+                           style="primary" if current_model == "classic" else "secondary",
+                           font_size=10, width=15, command=set_classic)
+        b1.config(bg=b1_bg, pady=10)
+        if current_model == "classic": 
+            b1.config(fg="white")
+            b1.bind("<Enter>", lambda e: b1.config(bg=COLORS.get('play_btn_green', '#2D8F36')))
+            b1.bind("<Leave>", lambda e: b1.config(bg=COLORS['success_green']))
+        b1.pack(side="left", padx=5)
+        
+        # Slim (Alex)
+        b2_bg = COLORS['success_green'] if current_model == "slim" else COLORS['card_bg']
+        b2 = self._make_btn(btn_frame, "Slim (Alex)\n3px Arms",
+                           style="primary" if current_model == "slim" else "secondary",
+                           font_size=10, width=15, command=set_slim)
+        b2.config(bg=b2_bg, pady=10)
+        if current_model == "slim":
+            b2.config(fg="white")
+            b2.bind("<Enter>", lambda e: b2.config(bg=COLORS.get('play_btn_green', '#2D8F36')))
+            b2.bind("<Leave>", lambda e: b2.config(bg=COLORS['success_green']))
+        b2.pack(side="right", padx=5)
+        
+        self.root.wait_window(dialog)
+        return result['model']
+
+    def upload_ms_skin(self, path, variant, token):
+        self.log(f"DEBUG: Uploading skin to Minecraft... Path: {path}, Variant: {variant}")
+        try:
+             url = "https://api.minecraftservices.com/minecraft/profile/skins"
+             # Mask token in logs for security, only show first few chars
+             masked_token = token[:8] + "..." if len(token) > 8 else "***"
+             self.log(f"DEBUG: Request URL: {url}")
+             self.log(f"DEBUG: Auth Token: {masked_token}")
+             
+             headers = {"Authorization": f"Bearer {token}"}
+             files = {
+                 "variant": (None, variant),
+                 "file": ("skin.png", open(path, "rb"), "image/png")
+             }
+             
+             r = requests.post(url, headers=headers, files=files)
+             
+             self.log(f"DEBUG: Response Status: {r.status_code}")
+             self.log(f"DEBUG: Response Headers: {r.headers}")
+             self.log(f"DEBUG: Response Body: {r.text}")
+             
+             if r.status_code == 200:
+                 self.log(f"Skin uploaded successfully ({variant})")
+                 return True
+             else:
+                 self.log(f"Skin upload failed: {r.status_code} {r.text}")
+                 return False
+        except Exception as e:
+            self.log(f"Upload exception: {e}")
+            import traceback
+            self.log(traceback.format_exc())
+            return False
+
+    def check_mod_online(self, mc_version, loader):
+        pass # Deprecated
+
+    def render_preview(self):
+        try:
+            # Check if preview canvas exists and is visible
+            if not hasattr(self, 'preview_canvas') or not self.preview_canvas.winfo_exists():
+                return
+                
+            if not self.skin_path or not os.path.exists(self.skin_path): 
+                self.preview_canvas.delete("all")
+                return
+            
+            # Determine model
+            model = "classic"
+            if self.profiles:
+                 model = self.profiles[self.current_profile_index].get("skin_model", "classic")
+
+            # Use 3D Renderer
+            w = self.preview_canvas.winfo_width()
+            h = self.preview_canvas.winfo_height()
+            # Defaults if not mapped yet
+            if w < 50: w = 300
+            if h < 50: h = 360
+            
+            # Cache key for rendered skin
+            cache_key = (self.skin_path, model, h)
+            
+            # Check if we already have this rendered (optimization)
+            if hasattr(self, '_preview_cache') and cache_key in self._preview_cache:
+                self.preview_photo = self._preview_cache[cache_key]
+                self.preview_canvas.delete("all")
+                self.preview_canvas.create_image(w//2, h//2, image=self.preview_photo, anchor="center")
+                return
+            
+            rendered = SkinRenderer3D.render(self.skin_path, model, height=int(h * 0.9))
+            if rendered:
+                self.preview_photo = ImageTk.PhotoImage(rendered)
+                
+                # Cache the rendered image
+                if not hasattr(self, '_preview_cache'):
+                    self._preview_cache = {}
+                self._preview_cache[cache_key] = self.preview_photo
+                
+                # Limit cache size
+                if len(self._preview_cache) > 10:
+                    # Remove oldest (first) entry
+                    self._preview_cache.pop(next(iter(self._preview_cache)))
+                
+                self.preview_canvas.delete("all")
+                self.preview_canvas.create_image(w//2, h//2, image=self.preview_photo, anchor="center")
+        except Exception as e:
+            print(f"Preview Error: {e}")
+
+    def refresh_skin(self):
+        p = self.profiles[self.current_profile_index] if self.profiles else {}
+        p_type = p.get("type", "offline")
+        name = p.get("name", "")
+        uuid_ = p.get("uuid", "")
+        
+        if p_type == "ely.by":
+            self.skin_indicator.config(text="Refreshing...", fg=COLORS['text_primary'])
+            self.root.update()
+            
+            def _refresh():
+                path = self.fetch_elyby_skin(name, uuid_)
+                
+                def _update_ui():
+                    if path:
+                        self.profiles[self.current_profile_index]["skin_path"] = path
+                        self.update_active_profile()
+                        self.add_skin_to_history(path, "classic")
+                        custom_showinfo("Skin Refreshed", "Skin updated from Ely.by successfully.")
+                    else:
+                        self.skin_indicator.config(text="Refresh Failed", fg="red")
+                        custom_showwarning("Refresh Failed", "Could not fetch skin from Ely.by.")
+                
+                self.root.after(0, _update_ui)
+            
+            threading.Thread(target=_refresh, daemon=True).start()
+        
+        elif p_type == "microsoft":
+            self.skin_indicator.config(text="Refreshing...", fg=COLORS['text_primary'])
+            self.root.update()
+            
+            def _refresh_ms():
+                token = p.get("access_token")
+                path = self.fetch_microsoft_skin(name, uuid_, token)
+                
+                def _update_ui():
+                    if path:
+                        self.profiles[self.current_profile_index]["skin_path"] = path
+                        # Model is updated in profile by fetch_microsoft_skin side-effect
+                        model = self.profiles[self.current_profile_index].get("skin_model", "classic")
+                        self.update_active_profile()
+                        self.add_skin_to_history(path, model)
+                        # Don't show success box if auto-called (check if called by user?) or just show small toast?
+                        # For now, let's keep it but maybe it's annoying if auto-called.
+                        # Actually, better to just log it if successful, only warn on fail.
+                        pass # self.log("Skin updated")
+                    else:
+                        self.skin_indicator.config(text="Refresh Failed", fg="red")
+                        # messagebox.showwarning("Refresh Failed", "Could not fetch skin. Session might be expired.")
+                
+                self.root.after(0, _update_ui)
+                
+            threading.Thread(target=_refresh_ms, daemon=True).start()
+            
+        else:
+             self.update_active_profile()
+
+    def _startup_ms_skin_check(self):
+        try:
+            if not self.profiles: return
+            p = self.profiles[self.current_profile_index]
+            token = p.get("access_token")
+            if not token: return
+
+            headers = {"Authorization": f"Bearer {token}"}
+            # Silent check
+            r = requests.get("https://api.minecraftservices.com/minecraft/profile", headers=headers, timeout=5)
+            if r.status_code == 200:
+                data = r.json()
+                skins = data.get("skins", [])
+                active_skin = next((s for s in skins if s["state"] == "ACTIVE"), None)
+                if active_skin:
+                    variant = active_skin.get("variant", "CLASSIC").lower()
+                    # Check against local
+                    local_model = p.get("skin_model", "classic")
+                    
+                    if variant != local_model:
+                         self.log(f"Syncing skin model to match server ({variant})")
+                         p["skin_model"] = variant
+                         if hasattr(self, 'skin_model_var'):
+                             self.root.after(0, lambda: self.skin_model_var.set(variant))
+                         self.save_config(sync_ui=False)
+        except: pass
+
+    def fetch_microsoft_skin(self, username, uuid_, token):
+        try:
+            headers = {"Authorization": f"Bearer {token}"}
+            # Fetch Profile
+            r = requests.get("https://api.minecraftservices.com/minecraft/profile", headers=headers, timeout=10)
+            if r.status_code == 200:
+                data = r.json()
+                skins = data.get("skins", [])
+                active_skin = next((s for s in skins if s["state"] == "ACTIVE"), None)
+                
+                if active_skin:
+                    skin_url = active_skin["url"]
+                    variant = active_skin.get("variant", "CLASSIC").lower()
+                    
+                    # Store model
+                    if self.profiles and 0 <= self.current_profile_index < len(self.profiles):
+                         self.profiles[self.current_profile_index]["skin_model"] = "classic" if variant == "classic" else "slim"
+                    
+                    # Download
+                    target_path = os.path.join(self.config_dir, "skins", f"{username}_ms.png")
+                    if not os.path.exists(os.path.dirname(target_path)):
+                        os.makedirs(os.path.dirname(target_path))
+                        
+                    print(f"Downloading MS skin from {skin_url}")
+                    r_img = requests.get(skin_url, timeout=10)
+                    if r_img.status_code == 200:
+                        with open(target_path, "wb") as f:
+                            f.write(r_img.content)
+                        return target_path
+            else:
+                 print(f"MS Profile fetch failed: {r.status_code}")
+                 
+        except Exception as e:
+            print(f"Error fetching MS skin: {e}")
+            
+        return ""
+
+    def fetch_elyby_skin(self, username, uuid_, properties=None):
+        skin_url = f"http://skinsystem.ely.by/skins/{username}.png"
+        props = properties if properties else []
+
+        try:
+            # If properties are missing, fetch them from the Session Server
+            if not props and uuid_:
+                print(f"[DEBUG] Properties missing, fetching from Session Server for {uuid_}")
+                try:
+                    # Ely.by Session Server endpoint
+                    session_url = f"https://authserver.ely.by/api/authlib-injector/sessionserver/session/minecraft/profile/{uuid_}?unsigned=false"
+                    r_sess = requests.get(session_url, timeout=5)
+                    if r_sess.status_code == 200:
+                        session_profile = r_sess.json()
+                        props = session_profile.get("properties", [])
+                        print(f"[DEBUG] Session Server returned {len(props)} properties")
+                except Exception as ex:
+                    print(f"[ERROR] Session Server fetch failed: {ex}")
+
+            # If still no properties/textures, try the /textures/ endpoint on skinsystem
+            if not props:
+                 print(f"[DEBUG] Session server produced no props, trying skinsystem/textures/{username}")
+                 try:
+                     r_tex = requests.get(f"http://skinsystem.ely.by/textures/{username}", timeout=5)
+                     if r_tex.status_code == 200:
+                         tex_data_direct = r_tex.json()
+                         if "SKIN" in tex_data_direct and "url" in tex_data_direct["SKIN"]:
+                             skin_url = tex_data_direct["SKIN"]["url"]
+                             print(f"[DEBUG] Resolved skin URL from skinsystem/textures: {skin_url}")
+                             props = [] 
+                 except Exception as e_tex:
+                     print(f"[DEBUG] Skinsystem texture fetch failed: {e_tex}")
+
+            for prop in props:
+                if prop.get("name") == "textures":
+                    val = prop.get("value")
+                    # value is base64 encoded json
+                    decoded = base64.b64decode(val).decode('utf-8')
+                    tex_data = json.loads(decoded)
+                    if "textures" in tex_data and "SKIN" in tex_data["textures"]:
+                        extracted_url = tex_data["textures"]["SKIN"].get("url")
+                        if extracted_url:
+                            skin_url = extracted_url
+                            print(f"[DEBUG] Resolved skin URL: {skin_url}")
+        except Exception as e:
+            print(f"[ERROR] Failed to extract skin data: {e}")
+
+        # Download
+        target_path = os.path.join(self.config_dir, "skins", f"{username}.png")
+        if not os.path.exists(os.path.dirname(target_path)):
+             os.makedirs(os.path.dirname(target_path))
+             
+        try:
+            print(f"[DEBUG] Fetching skin from {skin_url}")
+            r_skin = requests.get(skin_url, timeout=5)
+            if r_skin.status_code == 200:
+                with open(target_path, "wb") as f:
+                    f.write(r_skin.content)
+                print(f"[DEBUG] Saved skin to {target_path}")
+                return target_path
+            else:
+                 print(f"Ely.by skin not found (Status {r_skin.status_code})")
+        except Exception as e:
+            print(f"Skin fetch exception: {e}")
+            if os.path.exists(target_path):
+                return target_path 
+        
+        return ""
+
+    def select_skin(self):
+        # Check profile type
+        p = self.profiles[self.current_profile_index] if self.profiles else {}
+        p_type = p.get("type", "offline")
+        
+        if p_type == "ely.by":
+            if custom_askyesno("Ely.by Skin", "Ely.by requires skins to be managed via their website.\n\nOpen Ely.by skin catalog for your user?"):
+                name = p.get("name", "")
+                webbrowser.open(f"https://ely.by/skins?uploader={name}")
+            return
+            
+        elif p_type == "microsoft":
+             # Upload Logic directly
+             path = filedialog.askopenfilename(filetypes=[("Image files", "*.png")])
+             if not path: return
+             
+             # Verify size
+             try:
+                 im = Image.open(path)
+                 w, h = im.size
+                 if w != 64 or (h != 64 and h != 32):
+                     if not custom_askyesno("Warning", f"Skin dimensions {w}x{h} might not work perfectly. Standard is 64x64. Continue?"):
+                         return
+                 
+                 token = p.get("access_token")
+                 
+                 # Ask model
+                 variant = self.custom_skin_model_popup()
+                 if not variant: return # Cancelled
+                     
+                 # Upload
+                 if self.upload_ms_skin(path, variant, token):
+                     custom_showinfo("Success", "Skin uploaded successfully!")
+                     self.profiles[self.current_profile_index]["skin_path"] = path
+                     self.profiles[self.current_profile_index]["skin_model"] = variant
+                     
+                     # Update UI
+                     self.skin_path = path
+                     if hasattr(self, 'skin_model_var'):
+                         self.skin_model_var.set(variant)
+                     self.render_preview()
+                     self.update_skin_indicator()
+                     
+                     # Add to history and save once
+                     self.add_skin_to_history(path, variant)
+                 else:
+                     custom_showerror("Error", f"Failed to upload skin.")
+                     
+             except Exception as e:
+                 custom_showerror("Error", f"Upload failed: {e}")
+             return
+
+        # Offline / Standard
+        if not self.auto_download_mod:
+            if custom_askyesno("Skin Injection", "Enable Skin Injection to use this skin in-game?"):
+                self.auto_download_mod = True
+                self.auto_download_var.set(True)
+        path = filedialog.askopenfilename(filetypes=[("Image files", "*.png")])
+        if path:
+            # Ask model for offline usage too (for correct injections/rendering)
+            variant = self.custom_skin_model_popup() or "classic"
+            
+            self.skin_path = path
+            if self.profiles and 0 <= self.current_profile_index < len(self.profiles):
+                self.profiles[self.current_profile_index]["skin_path"] = path
+                self.profiles[self.current_profile_index]["skin_model"] = variant
+            
+            # Update UI
+            if hasattr(self, 'skin_model_var'):
+                self.skin_model_var.set(variant)
+            self.render_preview()
+            self.update_skin_indicator()
+            
+            # Add to history (will save config)
+            self.add_skin_to_history(path, variant)
+
+    def ensure_authlib_injector(self):
+        """ Ensures authlib-injector is present. Code adapted to fetch latest release from GitHub. """
+        jar_path = os.path.join(self.minecraft_dir, "authlib-injector.jar")
+        if os.path.exists(jar_path) and os.path.getsize(jar_path) > 0:
+             return jar_path
+             
+        repo = "yushijinhun/authlib-injector"
+        api_url = f"https://api.github.com/repos/{repo}/releases/latest"
+        try:
+            self.log("Checking for authlib-injector...")
+            r = requests.get(api_url, timeout=10)
+            if r.status_code == 200:
+                release = r.json()
+                for asset in release.get("assets", []):
+                    if asset["name"].endswith(".jar"):
+                        self.log(f"Downloading authlib-injector: {asset['name']}...")
+                        r_file = requests.get(asset["browser_download_url"], stream=True)
+                        with open(jar_path, "wb") as f:
+                            for chunk in r_file.iter_content(8192): f.write(chunk)
+                        return jar_path
+        except Exception as e:
+            self.log(f"Error downloading authlib-injector: {e}")
+            
+        return None
+
+    def get_installations(self):
+        # Return dict {id: inst}
+        d = {}
+        for inst in self.installations:
+            if "id" in inst:
+                d[inst["id"]] = inst
+        return d
+
+    def _normalize_java_executable_input(self, value):
+        raw_value = os.path.expandvars(os.path.expanduser(str(value or "").strip()))
+        if not raw_value or raw_value == "<Use Bundled Java Runtime>":
+            return ""
+
+        if os.path.isdir(raw_value):
+            candidates = [
+                os.path.join(raw_value, "bin", "java.exe"),
+                os.path.join(raw_value, "bin", "javaw.exe"),
+                os.path.join(raw_value, "bin", "java"),
+            ]
+            for candidate in candidates:
+                if os.path.isfile(candidate):
+                    return candidate
+            raise ValueError(f"No Java executable was found inside '{raw_value}'.")
+
+        if os.path.isfile(raw_value):
+            return raw_value
+
+        if shutil.which(raw_value):
+            return raw_value
+
+        raise ValueError(f"Java executable not found: {raw_value}")
+
+    def _normalize_installation_resolution_value(self, value, label):
+        raw_value = str(value or "").strip()
+        if not raw_value or raw_value.lower() == "auto":
+            return ""
+        if not raw_value.isdigit():
+            raise ValueError(f"Resolution {label} must be a number or 'Auto'.")
+
+        numeric_value = int(raw_value)
+        if numeric_value <= 0:
+            raise ValueError(f"Resolution {label} must be greater than 0.")
+        return str(numeric_value)
+
+    def start_launch(self, force_update=False, server_address=None, server_port=None):
+        # Close any open menus
+        self._close_all_menus()
+        if self._launch_in_progress:
+            self.toast_manager.show("Minecraft is already being prepared.", kind="info")
+            return
+        
+        if not self.installations: return
+        
+        idx = getattr(self, 'current_installation_index', 0)
+        if not (0 <= idx < len(self.installations)): return
+        
+        inst = self.installations[idx]
+        version_id = inst.get("version")
+        loader = inst.get("loader", "Vanilla")
+        java_executable = inst.get("java_executable", "")
+        resolution_width = inst.get("resolution_width")
+        resolution_height = inst.get("resolution_height")
+        
+        if not version_id:
+            version_id = "latest-release"
+
+        # Get username from current profile or entry
+        username = DEFAULT_USERNAME
+        if hasattr(self, 'user_entry'):
+            username = self.user_entry.get().strip() or DEFAULT_USERNAME
+        
+        if self.profiles and 0 <= self.current_profile_index < len(self.profiles):
+             # Sync back to profile
+             self.profiles[self.current_profile_index]["name"] = username
+             username = self.profiles[self.current_profile_index]["name"]
+
+        self.save_config()
+        
+        # Generate Background Resource Pack if wallpaper exists
+        if self.current_wallpaper:
+            self.create_background_resource_pack()
+
+        # Show Progress Overlay
+        self.show_progress_overlay("Launching Minecraft...")
+        
+        self.update_rpc("Launching...", f"Version: {version_id} ({loader})")
+
+        self._launch_in_progress = True
+        self.launch_btn.config(state="disabled", text="PREPARING...")
+        self.launch_opts_btn.config(state="disabled")
+        # self.set_status("Launching Minecraft...") # Redundant with overlay
+        inst_id = inst.get("id")
+        threading.Thread(
+            target=self.launch_logic,
+            args=(version_id, username, loader, force_update, inst_id, java_executable, resolution_width, resolution_height, server_address, server_port),
+            daemon=True,
+        ).start()
+
+    def launch_logic(self, version, username, loader, force_update=False, inst_id=None, custom_java_executable="", resolution_width=None, resolution_height=None, server_address=None, server_port=None):
+        mods_backup_path = None
+        modpack_stage_path = None
+        modpack_sync_active = False
+        # Callback wrapper to update overlay
+        def update_status(t):
+            self.log(f"Status: {t}")
+            status_text = str(t)
+            def apply_status():
+                if hasattr(self, 'update_progress_label'):
+                    self.update_progress_label.config(text=status_text)
+                if hasattr(self, 'launch_btn') and self._launch_in_progress:
+                    compact = status_text.upper().replace("DOWNLOADING", "DOWNLOADING")
+                    self.launch_btn.config(text=(compact[:20] + "…") if len(compact) > 21 else compact)
+            self.root.after(0, apply_status)
+
+        def update_progress(v):
+            if hasattr(self, 'update_progress_bar'):
+                self.update_progress_bar.config(value=v)
+                # Update counter label (Current / Max)
+                try:
+                    m = self.update_progress_bar['maximum']
+                    if hasattr(self, 'update_counter_label') and m > 0:
+                        self.update_counter_label.config(text=f"{int(v)} / {int(m)}")
+                except: pass
+
+        def set_max(m):
+             if hasattr(self, 'update_progress_bar'):
+                self.update_progress_bar.config(maximum=m)
+                # Force update counter immediately if max changes
+                try:
+                    v = self.update_progress_bar['value']
+                    if hasattr(self, 'update_counter_label') and m > 0:
+                         self.update_counter_label.config(text=f"{int(v)} / {int(m)}")
+                except: pass
+
+        callback = cast(Any, {
+            "setStatus": update_status,
+            "setProgress": lambda v: self.root.after(0, lambda: update_progress(v)),
+            "setMax": lambda m: self.root.after(0, lambda: set_max(m))
+        })
+        local_skin_server = None
+        try:
+            if version in ("latest-release", "latest-snapshot"):
+                update_status("Resolving Minecraft version…")
+                latest = minecraft_launcher_lib.utils.get_latest_version()
+                version = latest["snapshot" if version == "latest-snapshot" else "release"]
+            launch_id = version
+            normalized_java_executable = self._normalize_java_executable_input(custom_java_executable)
+            
+            # --- Check for existing installations to avoid re-downloading ---
+            installed_versions = [v['id'] for v in minecraft_launcher_lib.utils.get_installed_versions(self.minecraft_dir)]
+
+            # Resolve Java for Installers (Fabric/Forge need Java to run their installer)
+            java_install_path = normalized_java_executable or "java"
+            if normalized_java_executable:
+                self.log(f"Using custom Java executable: {normalized_java_executable}")
+            else:
+                try:
+                    # 1. Try Library Utility (No args)
+                    rt = minecraft_launcher_lib.utils.get_java_executable()
+                    
+                    if rt and os.path.exists(rt):
+                        java_install_path = rt
+                    elif shutil.which("java"):
+                        java_install_path = shutil.which("java")
+                    else:
+                        # 2. Check Local Runtime Folder Manually
+                        runtime_dir = os.path.join(self.minecraft_dir, "runtime")
+                        local_java = None
+                        if os.path.exists(runtime_dir):
+                            for root, dirs, files in os.walk(runtime_dir):
+                                if "java.exe" in files:
+                                    local_java = os.path.join(root, "java.exe")
+                                    break
+                                elif "java" in files and sys.platform != "win32":
+                                    local_java = os.path.join(root, "java")
+                                    break
+                        
+                        if local_java:
+                            java_install_path = local_java
+                        else:
+                            # 3. No Java found - Install Vanilla first to fetch Runtime
+                            self.log("Java not found. Installing Vanilla version to fetch Runtime...")
+                            try:
+                                minecraft_launcher_lib.install.install_minecraft_version(version, self.minecraft_dir, callback=callback)
+                                # Scan again
+                                if os.path.exists(runtime_dir):
+                                    for root, dirs, files in os.walk(runtime_dir):
+                                        if "java.exe" in files:
+                                            java_install_path = os.path.join(root, "java.exe")
+                                            break
+                                        elif "java" in files and sys.platform != "win32":
+                                            java_install_path = os.path.join(root, "java")
+                                            break
+                            except Exception as e:
+                                self.log(f"Failed to install vanilla runtime: {e}")
+                                if "launchermeta.mojang.com" in str(e) or "getaddrinfo failed" in str(e):
+                                    self.log("Network Error: Could not connect to Mojang. Check your internet.")
+
+                            if java_install_path == "java" and not shutil.which("java"):
+                                 self.log("Warning: Could not resolve setup Java. Fabric/Forge installation might fail.")
+                except Exception as e:
+                    self.log(f"Java resolution error: {e}")
+            
+            if force_update:
+                self.log("Force Update enabled: Verifying and re-installing versions...")
+            
+            if loader == "Fabric":
+                found_fabric = None
+                if not force_update:
+                    for vid in installed_versions:
+                        if "fabric" in vid and version in vid.split('-'):
+                             found_fabric = vid
+                             break
+                
+                if found_fabric:
+                    self.log(f"Using existing Fabric installation: {found_fabric}")
+                    launch_id = found_fabric
+                else:
+                    self.log(f"Installing Fabric for {version}...")
+                    result = minecraft_launcher_lib.fabric.install_fabric(version, self.minecraft_dir, callback=callback, java=java_install_path)
+                    if result: launch_id = result
+                    else:
+                        loader_v = minecraft_launcher_lib.fabric.get_latest_loader_version()
+                        launch_id = f"fabric-loader-{loader_v}-{version}"
+
+            elif loader == "Forge":
+                found_forge = None
+                if not force_update:
+                    for vid in installed_versions:
+                        if "forge" in vid and version in vid.split('-'):
+                            found_forge = vid
+                            break
+                        
+                if found_forge:
+                    self.log(f"Using existing Forge installation: {found_forge}")
+                    launch_id = found_forge
+                else:
+                    self.log(f"Installing Forge for {version}...")
+                    forge_v = minecraft_launcher_lib.forge.find_forge_version(version)
+                    if forge_v:
+                        minecraft_launcher_lib.forge.install_forge_version(forge_v, self.minecraft_dir, callback=callback, java=java_install_path)
+                        launch_id = forge_v
+            
+            else:
+                if force_update or (version not in installed_versions and launch_id not in installed_versions):
+                     self.log(f"Installing/Updating Vanilla version {version}...")
+                     minecraft_launcher_lib.install.install_minecraft_version(version, self.minecraft_dir, callback=callback)
+
+            # Determine Account & Injection Settings
+            current_profile = self.profiles[self.current_profile_index] if (self.profiles and 0 <= self.current_profile_index < len(self.profiles)) else {"type": "offline", "skin_path": "", "uuid": ""}
+            acct_type = current_profile.get("type", "offline")
+            
+            launch_uuid = ""
+            launch_token = ""
+            
+            injector_path = None
+            # Only use authlib-injector if requested (Ely.by or Offline+Injection)
+            use_injection = False
+            skin_server_url = ""
+
+            if acct_type == "ely.by":
+                # Ely.by Logic
+                use_injection = True
+                injector_path = self.ensure_authlib_injector()
+                # Use the explicit API URL to avoid redirects/ambiguity
+                skin_server_url = "https://authserver.ely.by/api/authlib-injector"
+                launch_uuid = current_profile.get("uuid", "")
+                launch_token = current_profile.get("token", "")
+                self.log("Launching with Ely.by account...")
+
+            elif acct_type == "microsoft":
+                self.log("Validating Microsoft Session...")
+                refresh_token = current_profile.get("refresh_token")
+                if refresh_token:
+                    try:
+                         # Refresh
+                         new_data = minecraft_launcher_lib.microsoft_account.complete_refresh(MSA_CLIENT_ID, None, MSA_REDIRECT_URI, refresh_token)
+                         if "error" not in new_data:
+                             # Update profile
+                             current_profile["access_token"] = new_data["access_token"]
+                             current_profile["refresh_token"] = new_data["refresh_token"]
+                             current_profile["name"] = new_data["name"]
+                             current_profile["uuid"] = new_data["id"]
+                             self.save_config()
+                             
+                             username = new_data["name"]
+                             launch_uuid = new_data["id"]
+                             launch_token = new_data["access_token"]
+                             self.log(f"Session refreshed for {username}")
+                         else:
+                             raise Exception(f"Session Expired: {new_data.get('error')}")
+                    except Exception as e:
+                         self.log(f"Token refresh error: {e}")
+                         raise Exception("Failed to refresh Microsoft session. Please re-login.")
+                else:
+                    raise Exception("No refresh token found. Please re-login.")
+
+            elif acct_type == "offline":
+                # Offline Logic
+                launch_uuid = str(uuid.uuid3(uuid.NAMESPACE_DNS, f"OfflinePlayer:{username}"))
+                self.log(f"Offline UUID: {launch_uuid}")
+                
+                if self.auto_download_mod: # This toggle now means "Enable Skin Injection"
+                     skin_path = current_profile.get("skin_path") or self.skin_path
+                     if skin_path and os.path.exists(skin_path):
+                         use_injection = True
+                         injector_path = self.ensure_authlib_injector()
+                         
+                         # Start Local Skin Server only when a real local skin exists.
+                         try:
+                             local_skin_server = LocalSkinServer(port=0)
+                             skin_model = current_profile.get("skin_model", "classic")
+                             skin_server_url = local_skin_server.start(skin_path, username, launch_uuid, skin_model)
+                             self.log(f"Local Skin Server active at {skin_server_url}")
+                         except Exception as e:
+                             self.log(f"Failed to start local skin server: {e}")
+                             use_injection = False
+                     else:
+                         self.log("Skin injection is enabled, but no local skin is selected. Launching without authlib-injector.")
+
+            # Build Options
+            jvm_args = [f"-Xmx{self.ram_allocation}M"]
+            if self.java_args:
+                jvm_args.extend(self.java_args.split())
+            
+            if use_injection and injector_path and skin_server_url:
+                self.log(f"Applying authlib-injector: {injector_path}={skin_server_url}")
+                jvm_args.append(f"-javaagent:{injector_path}={skin_server_url}")
+                # Ensure we pass the prefab UUID/Token so authlib trusts it if we can
+                # For offline local server, token can be anything usually, but validation might fail if not careful.
+                # Authlib Injector usually disables signature checks.
+
+            # --- MODPACK SYNC ---
+            # The game still launches from the shared Minecraft directory, so
+            # make a fresh, transactional copy of the linked pack's mods just
+            # before building its command.  This deliberately also applies an
+            # empty/missing pack mods folder: removing mods from a modpack must
+            # not accidentally launch the global mods from a previous profile.
+            if inst_id:
+                pack = next((p for p in self.modpacks if p.get('linked_installation_id') == inst_id), None)
+                if pack:
+                    pack_name = str(pack.get('name') or 'modpack')
+                    update_status(f"Updating {pack_name}…")
+                    self.log(f"Updating linked modpack before launch: {pack_name}")
+
+                    mods_dir = os.path.abspath(os.path.join(self.minecraft_dir, "mods"))
+                    pack_root = os.path.abspath(self.get_modpack_dir(pack['id']))
+                    pack_mods_dir = os.path.abspath(os.path.join(pack_root, "mods"))
+                    if os.path.commonpath((pack_root, pack_mods_dir)) != pack_root:
+                        raise ValueError("The linked modpack has an unsafe mods path.")
+                    if os.path.exists(pack_mods_dir) and not os.path.isdir(pack_mods_dir):
+                        raise ValueError("The linked modpack's mods path is not a folder.")
+
+                    os.makedirs(self.minecraft_dir, exist_ok=True)
+                    sync_token = uuid.uuid4().hex
+                    modpack_stage_path = os.path.join(self.minecraft_dir, f".nlc_modpack_stage_{sync_token}")
+                    if os.path.isdir(pack_mods_dir):
+                        shutil.copytree(pack_mods_dir, modpack_stage_path)
+                    else:
+                        os.makedirs(modpack_stage_path)
+
+                    if os.path.lexists(mods_dir):
+                        mods_backup_path = os.path.join(self.minecraft_dir, f"mods_backup_{sync_token}")
+                        os.rename(mods_dir, mods_backup_path)
+                    try:
+                        os.rename(modpack_stage_path, mods_dir)
+                        modpack_stage_path = None
+                        modpack_sync_active = True
+                    except Exception:
+                        # Do not leave the launcher using a partial pack if the
+                        # final rename fails (for example, due to an antivirus
+                        # lock).  Restore the original state before reporting
+                        # the launch failure.
+                        if mods_backup_path and os.path.lexists(mods_backup_path):
+                            os.rename(mods_backup_path, mods_dir)
+                            mods_backup_path = None
+                        raise
+                    self.log("Linked modpack is up to date for this launch.")
+
+            options = {
+                "username": username, 
+                "uuid": launch_uuid, 
+                "token": launch_token,
+                "jvmArguments": jvm_args,
+                "launcherName": "MinecraftLauncher",
+                "gameDirectory": self.minecraft_dir
+            }
+
+            if normalized_java_executable:
+                options["executablePath"] = normalized_java_executable
+
+            if resolution_width and resolution_height:
+                options["customResolution"] = True
+                options["resolutionWidth"] = str(resolution_width)
+                options["resolutionHeight"] = str(resolution_height)
+
+            if server_address:
+                options["server"] = str(server_address)
+                if server_port:
+                    options["port"] = str(server_port)
+            
+            self.log(f"Generating command for: {launch_id}")
+            command = minecraft_launcher_lib.command.get_minecraft_command(launch_id, self.minecraft_dir, options) # type: ignore
+            
+            self.root.after(0, self.root.withdraw)
+            
+            # RPC Logic
+            rpc_details = "Playing Minecraft"
+            if getattr(self, 'rpc_show_version', True):
+                 rpc_details = f"Playing {version} ({loader})"
+            if server_address:
+                 rpc_details = f"Connecting to {server_address}"
+            
+            self.root.after(0, lambda: self.update_rpc("In Game", rpc_details, start=time.time()))
+            
+            creationflags = 0
+            if sys.platform == "win32":
+                creationflags = subprocess.CREATE_NO_WINDOW
+
+            process = subprocess.Popen(
+                command, 
+                cwd=self.minecraft_dir,
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.STDOUT, 
+                text=True, 
+                encoding='utf-8',
+                errors='replace',
+                creationflags=creationflags
+            )
+            self.root.after(0, lambda: self.launch_btn.config(text="RUNNING") if hasattr(self, 'launch_btn') else None)
+            session_started_at = time.time()
+            
+            if process.stdout:
+                for line in process.stdout:
+                    line_stripped = line.strip()
+                    self.root.after(0, lambda l=line_stripped: self.log(f"[GAME] {l}"))
+                    
+                    if "Connecting to" in line_stripped and "," in line_stripped:
+                         if getattr(self, 'rpc_show_server', True):
+                            try:
+                                parts = line_stripped.split("Connecting to")[-1].strip()
+                                server_addr = parts.split(",")[0].strip()
+                                if server_addr:
+                                    self.root.after(0, lambda s=server_addr: self.update_rpc("In Game", f"Playing on {s}", start=time.time()))
+                            except: pass
+
+            process.wait()
+            if inst_id:
+                session_seconds = max(0, int(time.time() - session_started_at))
+                self.root.after(0, lambda iid=inst_id, secs=session_seconds, srv=server_address, prt=server_port: self._record_play_session(iid, secs, srv, prt))
+            self.root.after(0, self.root.deiconify)
+            self.root.after(0, lambda: self.update_rpc("Idle", "In Launcher"))
+        except Exception as e:
+            self.log(f"Error: {e}")
+            logging.exception("Launch failed")
+            
+            err_msg = str(e)
+            if isinstance(e, KeyError) and e.args == ("value",):
+                err_msg = "The selected version has malformed launch metadata.\nThe launcher skipped a broken launch entry, but this install may still need Force Update & Play."
+            if "launchermeta.mojang.com" in err_msg or "getaddrinfo failed" in err_msg:
+                 err_msg = "Network Error: Could not connect to Mojang servers.\nPlease check your internet connection."
+            elif "SSL" in err_msg or "DECRYPTION_FAILED" in err_msg:
+                 err_msg = "Network connection interrupted (SSL error).\nThis is usually a temporary hiccup or antivirus block.\n\nPlease try clicking PLAY again."
+            
+            self.root.after(0, lambda: custom_showerror("Launch Error", err_msg))
+            self.root.after(0, lambda: self.update_rpc("Idle", "In Launcher"))
+        finally:
+            # If the final swap failed after the original folder was moved,
+            # this fallback also repairs it before the launcher returns to an
+            # idle state.
+            if modpack_sync_active or (mods_backup_path and os.path.lexists(mods_backup_path)):
+                try:
+                    current_mods = os.path.join(self.minecraft_dir, "mods")
+                    if os.path.isdir(current_mods):
+                        shutil.rmtree(current_mods)
+                    elif os.path.lexists(current_mods):
+                        os.remove(current_mods)
+                    if mods_backup_path and os.path.lexists(mods_backup_path):
+                        os.rename(mods_backup_path, current_mods)
+                        self.log("Restored original mods folder.")
+                    else:
+                        self.log("Removed temporary modpack mods folder.")
+                except Exception as e:
+                    self.log(f"Error restoring mods: {e}")
+
+            if modpack_stage_path and os.path.isdir(modpack_stage_path):
+                try:
+                    shutil.rmtree(modpack_stage_path)
+                except OSError as e:
+                    self.log(f"Error cleaning modpack staging folder: {e}")
+
+            if local_skin_server:
+                self.log("Stopping local skin server...")
+                try: local_skin_server.stop()
+                except: pass
+                
+            def reset_ui():
+                self._launch_in_progress = False
+                self.launch_btn.config(state="normal", text="PLAY")
+                self.launch_opts_btn.config(state="normal")
+                self.update_skin_indicator()
+                self.hide_progress_overlay()
+                
+            self.root.after(0, reset_ui)
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    root.withdraw()
+
+    splash = tk.Toplevel(root)
+

@@ -68,7 +68,7 @@ def download_file(
                     hasher.update(chunk)
             if hasher.hexdigest().lower() != expected_sha1.lower():
                 raise ValueError(
-                    f"Checksum verification failed: expected {expected_sha1}, got {hasher.hexdigest()}"
+                    f"Download checksum verification failed: expected {expected_sha1}, got {hasher.hexdigest()}"
                 )
 
         # Atomic replacement

@@ -122,3 +122,5 @@ def apply_launcher_lib_patches():
         logger.debug("Patched minecraft_launcher_lib command helpers successfully.")
     except Exception as e:
         logger.exception("Failed to apply launcher lib patches: %s", e)
+
+patch_minecraft_launcher_launch_helpers = apply_launcher_lib_patches
