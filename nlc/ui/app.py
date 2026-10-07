@@ -862,44 +862,30 @@ class MinecraftLauncher(
             self.config_file = os.path.join(self.config_dir, "launcher_config.json")
             print(f"Using global config: {self.config_file}")
         
-        # --- Pre-load Accent Color & Custom Titlebar ---
+        # --- Pre-load Theme, Accent Color & Custom Titlebar ---
+        self.theme_id = "dark_slate"
+        self.custom_accent = None
         self.accent_color_name = "Green"
         try:
             if os.path.exists(self.config_file):
                 with open(self.config_file, "r", encoding="utf-8") as f:
                     _d = json.load(f)
-                    self.accent_color_name = _d.get("accent_color", "Green")
+                    
+                    self.theme_id = _d.get("theme_id", "dark_slate")
+                    if self.theme_id not in THEMES:
+                        self.theme_id = "dark_slate"
+                    self.custom_accent = _d.get("custom_accent", None)
+                    self.accent_color_name = _d.get("accent_color", self.custom_accent or THEMES[self.theme_id].get('default_accent', '#2ECC71'))
                     
                     # Pre-load custom titlebar setting BEFORE window creation
                     if "custom_titlebar_enabled" in _d:
                         self.custom_titlebar_enabled = _d["custom_titlebar_enabled"] and os.name == 'nt'
                     
                     self.neo_style_enabled = _d.get("neo_style_enabled", True)
-                    if self.neo_style_enabled:
-                        # Apply OLED Black Neo Style
-                        COLORS['sidebar_bg'] = '#000000'
-                        COLORS['main_bg'] = '#050505'
-                        COLORS['tab_bar_bg'] = '#050505'
-                        COLORS['bottom_bar_bg'] = '#000000'
-                        COLORS['card_bg'] = '#111111'
-                        COLORS['input_bg'] = '#1A1A1A'
-                        COLORS['input_border'] = '#333333'
-                        COLORS['separator'] = '#1F1F1F'
-                    
-                    _colors = {
-                        "Green": "#2D8F36",
-                        "Blue": "#3498DB",
-                        "Orange": "#E67E22",
-                        "Purple": "#9B59B6",
-                        "Red": "#E74C3C"
-                    }
-                    if self.accent_color_name in _colors:
-                        c = _colors[self.accent_color_name]
-                        COLORS['play_btn_green'] = c
-                        COLORS['active_tab_border'] = c
-                        COLORS['success_green'] = c
-                        # We keep accent_blue as blue unless requested otherwise, 
-                        # but play_btn_green is the main brand color used everywhere.
+                    self.animations_enabled = _d.get("animations_enabled", True)
+
+                    # Initialize global COLORS design tokens with the user's saved theme before creating widgets
+                    THEME_MANAGER.apply(self.theme_id, self.custom_accent, notify=False)
         except Exception as e:
             print(f"Error pre-loading config: {e}")
 
@@ -2338,9 +2324,7 @@ class MinecraftLauncher(
                     lbl_sym.pack(side="left", padx=(6, 8))
                     frame._lbl_icon = lbl_sym  # type: ignore[attr-defined]
             else:
-                lbl_spacer = tk.Label(frame, text="", width=2, bg=COLORS['sidebar_bg'])
-                lbl_spacer.pack(side="left")
-                frame._lbl_icon = lbl_spacer  # type: ignore[attr-defined]
+                frame._lbl_icon = None
 
             lbl = tk.Label(
                 frame,
@@ -2350,7 +2334,10 @@ class MinecraftLauncher(
                 fg=COLORS['text_secondary'],
                 cursor="hand2"
             )
-            lbl.pack(side="left")
+            if icon_name:
+                lbl.pack(side="left")
+            else:
+                lbl.pack(side="left", padx=(10, 4))
             frame._lbl_text = lbl  # type: ignore[attr-defined]
 
             def on_click(e):
@@ -2372,7 +2359,8 @@ class MinecraftLauncher(
                 self.minecraft_btn_frame = frame  # type: ignore
                 frame.is_active = True  # type: ignore
                 lbl.config(fg=COLORS['text_primary'])
-                bar.pack(side="left", fill="y", padx=(0, 6), before=getattr(frame, "_lbl_icon", None))
+                anchor_widget = getattr(frame, "_lbl_icon", None) or getattr(frame, "_lbl_text", None)
+                bar.pack(side="left", fill="y", padx=(0, 6), before=anchor_widget)
 
             return frame
 
@@ -2441,7 +2429,7 @@ class MinecraftLauncher(
                     self.sidebar_nav_frame,
                     cat_name,
                     cat_name,
-                    icon_name,
+                    icon_name=None,
                     action=make_cat_action(cat_name)
                 )
                 self.settings_nav_items[cat_name] = btn_frame
@@ -2456,7 +2444,7 @@ class MinecraftLauncher(
         build_main_sidebar()
 
         # Settings Link - Packed to bottom first to be at the very bottom
-        self._create_sidebar_link("Settings", lambda: self.open_global_settings(), is_action=True, pack_side="bottom", icon="command_block_front.png")
+        self._create_sidebar_link("Settings", lambda: self.open_global_settings(), is_action=True, pack_side="bottom", icon="⚙")
 
         # GitHub Link - Packed to bottom next to be above Settings
         self._create_sidebar_link("GitHub", "https://github.com/Amne-Dev/New-launcher", pack_side="bottom", icon="chiseled_bookshelf_occupied.png")
@@ -2547,7 +2535,7 @@ class MinecraftLauncher(
         except Exception:
             pass
 
-        self.save_config()
+        self.save_config(sync_ui=True, immediate=True)
 
     def apply_accent_color(self, name_or_hex: str):
         _named_accents = {
@@ -3753,7 +3741,8 @@ class MinecraftLauncher(
             if bar and bar.winfo_exists():
                 bar.config(bg=accent_col)
                 if is_target:
-                    bar.pack(side="left", fill="y", padx=(0, 6), before=getattr(frame, "_lbl_icon", None))
+                    anchor_widget = getattr(frame, "_lbl_icon", None) or getattr(frame, "_lbl_text", None)
+                    bar.pack(side="left", fill="y", padx=(0, 6), before=anchor_widget)
                 else:
                     bar.pack_forget()
 
@@ -3772,10 +3761,8 @@ class MinecraftLauncher(
                         child.config(bg=target_bg, fg=fg_col)
 
     def _attach_sidebar_hover(self, frame):
-        hover_col = COLORS.get('hover_bg', '#3A3F4D')
-        sidebar_col = COLORS['sidebar_bg']
-
         def on_enter(e):
+            hover_col = COLORS.get('hover_bg', '#3A3F4D')
             if getattr(self, 'animator', None) and self.animator.is_enabled:
                 self.animator.animate_color(frame, "bg", frame.cget("bg"), hover_col, duration_ms=80)
             else:
@@ -3786,21 +3773,28 @@ class MinecraftLauncher(
                 if isinstance(child, tk.Label):
                     if not getattr(child, "_keep_sidebar_bg", False):
                         child.config(bg=hover_col, fg=COLORS['text_primary'])
-        
+
         def on_leave(e):
-            if getattr(frame, "is_active", False):
-                 return
+            is_active = getattr(frame, "is_active", False)
+            hover_col = COLORS.get('hover_bg', '#3A3F4D')
+            sidebar_col = COLORS.get('sidebar_bg', '#181A1E')
+            target_bg = hover_col if is_active else sidebar_col
+            fg_col = COLORS['text_primary'] if is_active else COLORS['text_secondary']
+
             if getattr(self, 'animator', None) and self.animator.is_enabled:
-                self.animator.animate_color(frame, "bg", frame.cget("bg"), sidebar_col, duration_ms=80)
+                self.animator.animate_color(frame, "bg", frame.cget("bg"), target_bg, duration_ms=80)
             else:
-                frame.config(bg=sidebar_col)
+                frame.config(bg=target_bg)
+
             for child in frame.winfo_children():
                 if getattr(child, '_is_category_header', False):
                     continue
                 if isinstance(child, tk.Label):
                     if not getattr(child, "_keep_sidebar_bg", False):
-                        child.config(bg=sidebar_col, fg=COLORS['text_secondary'])
-            
+                        child.config(bg=target_bg, fg=fg_col)
+
+        frame._on_enter = on_enter  # type: ignore[attr-defined]
+        frame._on_leave = on_leave  # type: ignore[attr-defined]
         frame.bind("<Enter>", on_enter)
         frame.bind("<Leave>", on_leave)
 
@@ -3810,9 +3804,13 @@ class MinecraftLauncher(
         hover_bg = COLORS.get('hover_bg', '#3A3F4D')
         accent_col = COLORS.get('accent_color', '#2ECC71')
         muted_col = COLORS.get('text_muted', '#6B7280')
+        sep_col = COLORS.get('separator', '#282C36')
 
         if hasattr(self, 'sidebar') and self.sidebar.winfo_exists():
             self.sidebar.config(bg=sidebar_bg)
+            for child in self.sidebar.winfo_children():
+                if isinstance(child, tk.Frame) and child.cget("height") == 1:
+                    child.config(bg=sep_col)
         if hasattr(self, 'sidebar_nav_frame') and self.sidebar_nav_frame.winfo_exists():
             self.sidebar_nav_frame.config(bg=sidebar_bg)
         if hasattr(self, 'profile_frame') and self.profile_frame.winfo_exists():
@@ -3820,6 +3818,12 @@ class MinecraftLauncher(
             for child in self.profile_frame.winfo_children():
                 if isinstance(child, tk.Label):
                     child.config(bg=sidebar_bg)
+            if hasattr(self, 'sidebar_username') and self.sidebar_username.winfo_exists():
+                self.sidebar_username.config(fg=COLORS['text_primary'])
+            if hasattr(self, 'sidebar_acct_type') and self.sidebar_acct_type.winfo_exists():
+                self.sidebar_acct_type.config(fg=muted_col)
+            if hasattr(self, 'sidebar_chevron') and self.sidebar_chevron.winfo_exists():
+                self.sidebar_chevron.config(fg=muted_col)
 
         for frame in getattr(self, 'sidebar_items', []):
             if not getattr(frame, 'winfo_exists', lambda: False)():
@@ -3870,10 +3874,14 @@ class MinecraftLauncher(
                     lbl_img.pack(side="left", padx=(0, 10))
                     frame._lbl_icon = lbl_img  # type: ignore[attr-defined]
                 else:
-                    tk.Label(frame, text="•", font=(FONT_FAMILY, 10), bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'], cursor="hand2").pack(side="left", padx=(0, 10))
+                    lbl_sym = tk.Label(frame, text="•", font=(FONT_FAMILY, 10), bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'], cursor="hand2")
+                    lbl_sym.pack(side="left", padx=(0, 10))
+                    frame._lbl_icon = lbl_sym  # type: ignore[attr-defined]
             else:
-                tk.Label(frame, text=icon, font=(FONT_FAMILY, 12), bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'], 
-                         cursor="hand2").pack(side="left", padx=(0, 10))
+                lbl_ico = tk.Label(frame, text=icon, font=(FONT_FAMILY, 11), bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'], 
+                         cursor="hand2")
+                lbl_ico.pack(side="left", padx=(0, 10))
+                frame._lbl_icon = lbl_ico  # type: ignore[attr-defined]
 
         lbl = tk.Label(frame, text=text, font=(FONT_FAMILY, 9), bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'], cursor="hand2")
         lbl.pack(side="left")
@@ -4817,11 +4825,12 @@ class MinecraftLauncher(
                     self.close_launcher = data.get("close_launcher", True)
                     self.minimize_to_tray = data.get("minimize_to_tray", False)
                     self.show_console = data.get("show_console", False)
-                    self.theme_id = data.get("theme_id", "dark_slate")
-                    self.custom_accent = data.get("custom_accent", None)
+                    self.theme_id = data.get("theme_id", getattr(self, "theme_id", "dark_slate"))
+                    if self.theme_id not in THEMES:
+                        self.theme_id = "dark_slate"
+                    self.custom_accent = data.get("custom_accent", getattr(self, "custom_accent", None))
                     self.animations_enabled = data.get("animations_enabled", True)
-                    if self.theme_id in THEMES or self.custom_accent:
-                        THEME_MANAGER.apply(self.theme_id, self.custom_accent, notify=False)
+                    self.apply_theme(self.theme_id, self.custom_accent)
                     
                     if self.rpc_enabled:
                         self.root.after(1000, self.connect_rpc)

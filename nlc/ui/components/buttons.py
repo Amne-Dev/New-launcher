@@ -150,7 +150,7 @@ def make_button(
         cur_cfg = get_button_style_cfg(btn_style)
         cur_animator = getattr(btn, "_btn_animator", animator)
         if cur_animator and cur_animator.is_enabled:
-            cur_animator.animate_color(btn, "bg", cur_cfg["bg"], cur_cfg["hover"], duration_ms=80)
+            cur_animator.animate_color(btn, "bg", btn.cget("bg"), cur_cfg["hover"], duration_ms=80)
         else:
             btn.config(bg=cur_cfg["hover"])
 
@@ -159,7 +159,7 @@ def make_button(
         cur_cfg = get_button_style_cfg(btn_style)
         cur_animator = getattr(btn, "_btn_animator", animator)
         if cur_animator and cur_animator.is_enabled:
-            cur_animator.animate_color(btn, "bg", cur_cfg["hover"], cur_cfg["bg"], duration_ms=80)
+            cur_animator.animate_color(btn, "bg", btn.cget("bg"), cur_cfg["bg"], duration_ms=80)
         else:
             btn.config(bg=cur_cfg["bg"])
 

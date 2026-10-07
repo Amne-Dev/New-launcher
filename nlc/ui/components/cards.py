@@ -37,36 +37,45 @@ def create_card(
     )
 
     def on_enter(e):
+        cur_card_color = bg or COLORS['card_bg']
+        cur_hover_color = hover_bg or COLORS['card_hover']
+        cur_normal_border = border_color or COLORS.get('border_subtle', '#2B303A')
+        cur_hover_border = COLORS.get('accent_color', cur_normal_border)
+
         if animator and animator.is_enabled:
-            animator.animate_color(card, "bg", card_color, hover_color, duration_ms=80)
+            animator.animate_color(card, "bg", card.cget("bg"), cur_hover_color, duration_ms=80)
             if border:
-                animator.animate_color(card, "highlightbackground", normal_border, hover_border, duration_ms=80)
+                animator.animate_color(card, "highlightbackground", card.cget("highlightbackground"), cur_hover_border, duration_ms=80)
         else:
-            card.config(bg=hover_color)
+            card.config(bg=cur_hover_color)
             if border:
-                card.config(highlightbackground=hover_border)
+                card.config(highlightbackground=cur_hover_border)
 
         for child in card.winfo_children():
             try:
-                if child.cget("bg") == card_color:
-                    child.config(bg=hover_color)
+                if child.cget("bg") in (cur_card_color, card_color):
+                    child.config(bg=cur_hover_color)
             except Exception:
                 pass
 
     def on_leave(e):
+        cur_card_color = bg or COLORS['card_bg']
+        cur_hover_color = hover_bg or COLORS['card_hover']
+        cur_normal_border = border_color or COLORS.get('border_subtle', '#2B303A')
+
         if animator and animator.is_enabled:
-            animator.animate_color(card, "bg", hover_color, card_color, duration_ms=80)
+            animator.animate_color(card, "bg", card.cget("bg"), cur_card_color, duration_ms=80)
             if border:
-                animator.animate_color(card, "highlightbackground", hover_border, normal_border, duration_ms=80)
+                animator.animate_color(card, "highlightbackground", card.cget("highlightbackground"), cur_normal_border, duration_ms=80)
         else:
-            card.config(bg=card_color)
+            card.config(bg=cur_card_color)
             if border:
-                card.config(highlightbackground=normal_border)
+                card.config(highlightbackground=cur_normal_border)
 
         for child in card.winfo_children():
             try:
-                if child.cget("bg") == hover_color:
-                    child.config(bg=card_color)
+                if child.cget("bg") in (cur_hover_color, hover_color):
+                    child.config(bg=cur_card_color)
             except Exception:
                 pass
 
