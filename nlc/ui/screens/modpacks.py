@@ -32,9 +32,13 @@ class ModpacksScreenMixin:
     def create_modpacks_tab(self):
         container = tk.Frame(self.tab_container, bg=COLORS['main_bg'])
         self.tabs["Modpacks"] = container
+
+        browse_view = tk.Frame(container, bg=COLORS['main_bg'])
+        browse_view.pack(fill="both", expand=True)
+        self.modpacks_browse_view = browse_view
         
         # Top Bar
-        top_bar = tk.Frame(container, bg=COLORS['main_bg'], pady=15, padx=20)
+        top_bar = tk.Frame(browse_view, bg=COLORS['main_bg'], pady=15, padx=20)
         top_bar.pack(fill="x")
         self.mp_top_bar = top_bar
         
@@ -43,7 +47,7 @@ class ModpacksScreenMixin:
         self.mp_title_lbl.pack(side="left")
                  
         create_mp_btn = self._make_btn(top_bar, "+ Create New Modpack", style="primary",
-                                         font_size=10, bold=True, command=self.show_create_modpack_dialog)
+                                         font_size=10, bold=True, command=self.show_create_modpack_page)
         create_mp_btn.pack(side="right")
         self._make_btn(
             top_bar,
@@ -56,13 +60,13 @@ class ModpacksScreenMixin:
         # Config Warning
         self.mp_empty_lbl = None
         if not self.modpacks:
-            self.mp_empty_lbl = tk.Label(container, text="Create a modpack to get started!", 
+            self.mp_empty_lbl = tk.Label(browse_view, text="Create a modpack to get started!", 
                     font=("Segoe UI", 12), fg=COLORS['text_secondary'], bg=COLORS['main_bg'])
             self.mp_empty_lbl.pack(pady=40)
         
         # Scrollable Area
-        self.mp_canvas = tk.Canvas(container, bg=COLORS['main_bg'], highlightthickness=0)
-        self.mp_scrollbar = ttk.Scrollbar(container, orient="vertical", command=self.mp_canvas.yview, style="Launcher.Vertical.TScrollbar")
+        self.mp_canvas = tk.Canvas(browse_view, bg=COLORS['main_bg'], highlightthickness=0)
+        self.mp_scrollbar = ttk.Scrollbar(browse_view, orient="vertical", command=self.mp_canvas.yview, style="Launcher.Vertical.TScrollbar")
         self.mp_scrollable_frame = tk.Frame(self.mp_canvas, bg=COLORS['main_bg'])
         
         self.mp_scrollable_frame.bind(
@@ -94,11 +98,15 @@ class ModpacksScreenMixin:
         main_bg = COLORS['main_bg']
         text_primary = COLORS['text_primary']
         text_secondary = COLORS.get('text_secondary', '#A0AAB0')
+        card_bg = COLORS.get('card_bg', '#2A2D32')
 
         if hasattr(self, 'tabs') and "Modpacks" in self.tabs:
             tab = self.tabs["Modpacks"]
             if tab and tab.winfo_exists():
                 tab.config(bg=main_bg)
+
+        if hasattr(self, 'modpacks_browse_view') and self.modpacks_browse_view.winfo_exists():
+            self.modpacks_browse_view.config(bg=main_bg)
 
         if hasattr(self, 'mp_top_bar') and self.mp_top_bar.winfo_exists():
             self.mp_top_bar.config(bg=main_bg)
@@ -114,6 +122,17 @@ class ModpacksScreenMixin:
 
         if hasattr(self, 'mp_scrollable_frame') and self.mp_scrollable_frame.winfo_exists():
             self.mp_scrollable_frame.config(bg=main_bg)
+
+        # Update in-place create view if open
+        if getattr(self, '_in_modpack_create_view', False):
+            if hasattr(self, 'modpack_create_view') and self.modpack_create_view.winfo_exists():
+                self.modpack_create_view.config(bg=main_bg)
+            if hasattr(self, 'mp_create_header') and self.mp_create_header.winfo_exists():
+                self.mp_create_header.config(bg=main_bg)
+            if hasattr(self, 'mp_create_title_lbl') and self.mp_create_title_lbl.winfo_exists():
+                self.mp_create_title_lbl.config(bg=main_bg, fg=text_primary)
+            if hasattr(self, 'mp_create_card') and self.mp_create_card.winfo_exists():
+                self.mp_create_card.config(bg=card_bg)
 
         if hasattr(self, 'refresh_modpacks_list'):
             self.refresh_modpacks_list()
@@ -895,101 +914,160 @@ class ModpacksScreenMixin:
                 custom_showerror("CurseForge Import Failed", message, parent=self.root),
             ])
 
-    def show_create_modpack_dialog(self):
-        dialog = tk.Toplevel(self.root)
-        dialog.title("New Modpack")
-        dialog.geometry("450x350")
-        dialog.config(bg=COLORS['main_bg'])
-        if os.name != "nt":
-            dialog.transient(self.root)
-        dialog.resizable(False, False)
-        if os.name != "nt":
-            dialog.grab_set()
-        
-        # Center on parent
-        dialog.update_idletasks()
-        x = self.root.winfo_x() + (self.root.winfo_width()//2) - 225
-        y = self.root.winfo_y() + (self.root.winfo_height()//2) - 175
-        dialog.geometry(f"+{x}+{y}")
-        
-        # Ensure visibility
-        dialog.deiconify()
-        dialog.lift()
-        x = self.root.winfo_x() + (self.root.winfo_width()//2) - 225
-        y = self.root.winfo_y() + (self.root.winfo_height()//2) - 175
-        dialog.geometry(f"+{x}+{y}")
-        
-        # Ensure visibility
-        dialog.deiconify()
-        dialog.lift()
-        dialog_root = self._apply_custom_toplevel_chrome(dialog, "New Modpack")
-        
+    def show_create_modpack_page(self):
+        self._in_modpack_create_view = True
+        if hasattr(self, 'modpacks_browse_view') and self.modpacks_browse_view.winfo_exists():
+            self.modpacks_browse_view.pack_forget()
+
+        if hasattr(self, 'modpack_create_view') and self.modpack_create_view.winfo_exists():
+            try:
+                self.modpack_create_view.destroy()
+            except Exception:
+                pass
+
+        main_bg = COLORS['main_bg']
+        card_bg = COLORS.get('card_bg', '#2A2D32')
+        input_bg = COLORS['input_bg']
+        text_primary = COLORS['text_primary']
+        text_secondary = COLORS.get('text_secondary', '#A0AAB0')
+        border_col = COLORS.get('border_subtle', '#33373E')
+
+        page = tk.Frame(self.tabs["Modpacks"], bg=main_bg)
+        self.modpack_create_view = page
+
+        # Header with back button
+        header = tk.Frame(page, bg=main_bg, pady=16, padx=40)
+        header.pack(fill="x")
+        self.mp_create_header = header
+
+        back_btn = self._make_btn(
+            header,
+            "← Back to Modpacks",
+            style="secondary",
+            font_size=9,
+            command=self.close_create_modpack_page,
+        )
+        back_btn.pack(side="left")
+
+        title_lbl = tk.Label(
+            header,
+            text="New Modpack",
+            font=("Segoe UI", 16, "bold"),
+            bg=main_bg,
+            fg=text_primary,
+        )
+        title_lbl.pack(side="left", padx=20)
+        self.mp_create_title_lbl = title_lbl
+
+        # Centered form card
+        card = tk.Frame(page, bg=card_bg, padx=30, pady=24, highlightthickness=1, highlightbackground=border_col)
+        card.pack(fill="x", padx=40, pady=20)
+        self.mp_create_card = card
+
+        def create_label(text):
+            return tk.Label(card, text=text, font=("Segoe UI", 9, "bold"),
+                            bg=card_bg, fg=text_secondary, anchor="w")
+
         # Name
-        tk.Label(dialog_root, text="Modpack Name", bg=COLORS['main_bg'], fg="white").pack(pady=(20,5))
+        create_label("MODPACK NAME").pack(fill="x", pady=(0, 5))
         name_var = tk.StringVar()
-        tk.Entry(dialog_root, textvariable=name_var).pack()
-        
+        name_entry = tk.Entry(card, textvariable=name_var, bg=input_bg, fg=text_primary,
+                              insertbackground="white", relief="flat", font=("Segoe UI", 10))
+        name_entry.pack(fill="x", ipady=8, pady=(0, 16))
+        name_entry.focus_set()
+
         # Loader
-        tk.Label(dialog_root, text="Mod Loader", bg=COLORS['main_bg'], fg="white").pack(pady=(15,5))
+        create_label("MOD LOADER").pack(fill="x", pady=(0, 5))
         loader_var = tk.StringVar(value="fabric")
-        ttk.Combobox(dialog_root, textvariable=loader_var, values=["fabric", "forge"], state="readonly").pack()
-        
+        loader_cb = ttk.Combobox(card, textvariable=loader_var, values=["fabric", "forge"],
+                                 state="readonly", font=("Segoe UI", 10))
+        loader_cb.pack(fill="x", ipady=5, pady=(0, 16))
+
         # Version
-        tk.Label(dialog_root, text="Minecraft Version", bg=COLORS['main_bg'], fg="white").pack(pady=(15,5))
+        create_label("MINECRAFT VERSION").pack(fill="x", pady=(0, 5))
         ver_var = tk.StringVar(value="Fetching...")
-        ver_cb = ttk.Combobox(dialog_root, textvariable=ver_var, values=[], state="disabled")
-        ver_cb.pack()
-        
+        ver_cb = ttk.Combobox(card, textvariable=ver_var, values=[], state="disabled", font=("Segoe UI", 10))
+        ver_cb.pack(fill="x", ipady=5, pady=(0, 20))
+
         def fetch_vers():
             try:
-                # Fetch only releases for stable modpack creation
                 vlist = minecraft_launcher_lib.utils.get_version_list()
-                releases = [v['id'] for v in vlist if v['type'] == 'release']
-                
+                releases = [v['id'] for v in vlist if v.get('type') == 'release']
+
                 def update():
-                    if not dialog.winfo_exists(): return
+                    if not page.winfo_exists():
+                        return
                     ver_cb['values'] = releases
                     if releases:
                         ver_cb.current(0)
                         ver_cb.config(state="readonly")
                     else:
                         ver_var.set("Error fetching")
-                        
+
                 self.root.after(0, update)
             except Exception as e:
-                print(f"Version fetch error: {e}")
-                if dialog.winfo_exists():
+                logger.error("Version fetch error: %s", e)
+                if page.winfo_exists():
                     self.root.after(0, lambda: ver_var.set("Network Error"))
 
         threading.Thread(target=fetch_vers, daemon=True).start()
-        
+
         def create():
-             name = name_var.get().strip()
-             if not name: return
-             
-             new_pack = {
-                 "id": str(uuid.uuid4()),
-                 "name": name,
-                 "loader": loader_var.get(),
-                 "mc_version": ver_var.get(),
-                 "mods": [], # List of file paths or meta
-                 "linked_installation_id": None
-             }
-             self.modpacks.append(new_pack)
-             self.save_modpacks()
-             self.get_modpack_dir(new_pack['id']) # Create dir
-             
-             # Close dialog first for better UX
-             dialog.destroy()
-             
-             # Then refresh UI (use after to ensure dialog is fully closed)
-             self.root.after(50, lambda: [
-                 self.refresh_modpacks_list(),
-                 self.update_active_modpack_dropdown()
-             ])
-             
-        self._make_btn(dialog_root, "Create", style="primary", font_size=10, bold=True,
-                      command=create).pack(pady=20)
+            name = name_var.get().strip()
+            if not name:
+                custom_showerror("Invalid Name", "Please enter a modpack name.", parent=self.root)
+                return
+
+            new_pack = {
+                "id": str(uuid.uuid4()),
+                "name": name,
+                "loader": loader_var.get(),
+                "mc_version": ver_var.get(),
+                "mods": [],
+                "linked_installation_id": None
+            }
+            self.modpacks.append(new_pack)
+            self.save_modpacks()
+            self.get_modpack_dir(new_pack['id'])
+
+            self.close_create_modpack_page()
+            self.refresh_modpacks_list()
+            self.update_active_modpack_dropdown()
+
+        btn_row = tk.Frame(card, bg=card_bg, pady=10)
+        btn_row.pack(fill="x")
+
+        save_btn = self._make_btn(
+            btn_row,
+            "Create Modpack",
+            style="primary",
+            font_size=10,
+            bold=True,
+            command=create,
+        )
+        save_btn.pack(side="right", padx=(10, 0))
+
+        self._make_btn(
+            btn_row,
+            "Cancel",
+            style="secondary",
+            font_size=10,
+            command=self.close_create_modpack_page,
+        ).pack(side="right")
+
+        page.pack(fill="both", expand=True)
+
+    def close_create_modpack_page(self):
+        self._in_modpack_create_view = False
+        if hasattr(self, 'modpack_create_view') and self.modpack_create_view.winfo_exists():
+            self.modpack_create_view.pack_forget()
+        if hasattr(self, 'modpacks_browse_view') and self.modpacks_browse_view.winfo_exists():
+            self.modpacks_browse_view.pack(fill="both", expand=True)
+            self.refresh_modpacks_list()
+
+    def show_create_modpack_dialog(self):
+        """Backward-compatible alias delegating to in-page create modpack view."""
+        return self.show_create_modpack_page()
 
     def show_link_modpack_dialog(self, pack):
         dialog = tk.Toplevel(self.root)

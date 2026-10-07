@@ -34,8 +34,12 @@ class InstallationsScreenMixin:
         frame = tk.Frame(self.tab_container, bg=COLORS['main_bg'])
         self.tabs["Installations"] = frame
         
+        browse_view = tk.Frame(frame, bg=COLORS['main_bg'])
+        browse_view.pack(fill="both", expand=True)
+        self.inst_browse_view = browse_view
+        
         # 1. Top Bar (Search, Sort, Filters, New)
-        top_bar = tk.Frame(frame, bg=COLORS['main_bg'], pady=20, padx=40)
+        top_bar = tk.Frame(browse_view, bg=COLORS['main_bg'], pady=20, padx=40)
         top_bar.pack(fill="x")
         self.inst_top_bar = top_bar
         
@@ -80,11 +84,11 @@ class InstallationsScreenMixin:
         
         # New Installation Button
         self.new_inst_btn = self._make_btn(top_bar, "New installation", style="primary",
-                                           font_size=10, bold=True, command=self.open_new_installation_modal)
+                                           font_size=10, bold=True, command=self.show_installation_editor)
         self.new_inst_btn.pack(side="right") 
 
         # 2. Profile List (Scrollable)
-        list_container = tk.Frame(frame, bg=COLORS['main_bg'])
+        list_container = tk.Frame(browse_view, bg=COLORS['main_bg'])
         list_container.pack(fill="both", expand=True, padx=40)
         self.inst_list_container = list_container
         
@@ -171,6 +175,9 @@ class InstallationsScreenMixin:
                         activeforeground=text_primary
                     )
 
+        if hasattr(self, 'inst_browse_view') and self.inst_browse_view.winfo_exists():
+            self.inst_browse_view.config(bg=main_bg)
+
         if hasattr(self, 'inst_list_container') and self.inst_list_container.winfo_exists():
             self.inst_list_container.config(bg=main_bg)
 
@@ -179,7 +186,26 @@ class InstallationsScreenMixin:
 
         if hasattr(self, 'inst_list_frame') and self.inst_list_frame.winfo_exists():
             self.inst_list_frame.config(bg=main_bg)
-            self.refresh_installations_list()
+            if not getattr(self, '_in_inst_editor', False):
+                self.refresh_installations_list()
+
+        # Update in-place editor components if open
+        if getattr(self, '_in_inst_editor', False):
+            card_bg = COLORS.get('card_bg', '#2A2D32')
+            if hasattr(self, 'inst_editor_view') and self.inst_editor_view.winfo_exists():
+                self.inst_editor_view.config(bg=main_bg)
+            if hasattr(self, 'inst_editor_header') and self.inst_editor_header.winfo_exists():
+                self.inst_editor_header.config(bg=main_bg)
+            if hasattr(self, 'inst_editor_title_lbl') and self.inst_editor_title_lbl.winfo_exists():
+                self.inst_editor_title_lbl.config(bg=main_bg, fg=text_primary)
+            if hasattr(self, 'inst_editor_canvas') and self.inst_editor_canvas.winfo_exists():
+                self.inst_editor_canvas.config(bg=main_bg)
+            if hasattr(self, 'inst_editor_form_frame') and self.inst_editor_form_frame.winfo_exists():
+                self.inst_editor_form_frame.config(bg=main_bg)
+            if hasattr(self, 'inst_editor_card') and self.inst_editor_card.winfo_exists():
+                self.inst_editor_card.config(bg=card_bg)
+            if hasattr(self, 'inst_editor_btn_row') and self.inst_editor_btn_row.winfo_exists():
+                self.inst_editor_btn_row.config(bg=main_bg)
 
     def refresh_installations_list(self, callback=None):
         if not hasattr(self, 'inst_list_frame'): return # Safety check
@@ -642,45 +668,88 @@ class InstallationsScreenMixin:
             self.log(f"Failed to generate resource pack: {e}")
             return None
 
-    def open_new_installation_modal(self, edit_mode=False, index=None):
-        # Modal for Name, Version, etc.
-        win = tk.Toplevel(self.root)
+    def show_installation_editor(self, edit_mode=False, index=None):
+        self._in_inst_editor = True
+        if hasattr(self, 'inst_browse_view') and self.inst_browse_view.winfo_exists():
+            self.inst_browse_view.pack_forget()
+
+        if hasattr(self, 'inst_editor_view') and self.inst_editor_view.winfo_exists():
+            try:
+                self.inst_editor_view.destroy()
+            except Exception:
+                pass
+
+        main_bg = COLORS['main_bg']
+        card_bg = COLORS['card_bg']
+        border_col = COLORS.get('border_subtle', '#33373E')
+        text_primary = COLORS['text_primary']
+
+        editor = tk.Frame(self.tabs["Installations"], bg=main_bg)
+        self.inst_editor_view = editor
+
         title = "Edit Installation" if edit_mode else "New Installation"
-        win.title(title)
-        win.geometry("700x650")
-        win.configure(bg="#1e1e1e")
-        if os.name != "nt":
-            win.transient(self.root)
-        win.resizable(True, True) # Allow resizing to help fit content
-        if os.name != "nt":
-            win.grab_set()
-        
-        # Center on parent
-        win.update_idletasks()
-        x = self.root.winfo_x() + (self.root.winfo_width()//2) - 350
-        y = self.root.winfo_y() + (self.root.winfo_height()//2) - 325
-        win.geometry(f"+{x}+{y}")
-        
-        # Ensure visibility
-        win.deiconify()
-        win.lift()
-        win.geometry(f"+{x}+{y}")
-        win_root = self._apply_custom_toplevel_chrome(win, title)
-        
+
         # Pre-load data if editing
         existing_data = {}
         if edit_mode and index is not None and 0 <= index < len(self.installations):
             existing_data = self.installations[index]
 
-        # --- Header ---
-        header = tk.Frame(win_root, bg="#1e1e1e")
-        header.pack(fill="x", padx=25, pady=(25, 20))
-        tk.Label(header, text=title, font=("Segoe UI", 16, "bold"), 
-                bg="#1e1e1e", fg="white", anchor="w").pack(fill="x")
+        # --- Header with Back Button ---
+        header = tk.Frame(editor, bg=main_bg, pady=16, padx=40)
+        header.pack(fill="x")
+        self.inst_editor_header = header
+
+        back_btn = self._make_btn(
+            header,
+            "← Back to Installations",
+            style="secondary",
+            font_size=9,
+            command=self.close_installation_editor,
+        )
+        back_btn.pack(side="left")
+
+        title_lbl = tk.Label(
+            header,
+            text=title,
+            font=("Segoe UI", 16, "bold"),
+            bg=main_bg,
+            fg=text_primary,
+        )
+        title_lbl.pack(side="left", padx=20)
+        self.inst_editor_title_lbl = title_lbl
+
+        # Scrollable form container
+        canvas = tk.Canvas(editor, bg=main_bg, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(editor, orient="vertical", command=canvas.yview, style="Launcher.Vertical.TScrollbar")
+        self.inst_editor_canvas = canvas
+
+        form_frame = tk.Frame(canvas, bg=main_bg)
+        self.inst_editor_form_frame = form_frame
+
+        form_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        canvas_window = canvas.create_window((0, 0), window=form_frame, anchor="nw")
+
+        def configure_width(event):
+            canvas.itemconfig(canvas_window, width=event.width)
+
+        canvas.bind("<Configure>", configure_width)
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True, padx=40)
+        scrollbar.pack(side="right", fill="y")
+        self._bind_smooth_scroll(canvas, form_frame)
+
+        # Card container for fields
+        card_container = tk.Frame(form_frame, bg=card_bg, padx=25, pady=25, highlightthickness=1, highlightbackground=border_col)
+        card_container.pack(fill="x", pady=(10, 30))
+        self.inst_editor_card = card_container
 
         # --- Content Area (Icon + Fields) ---
-        content = tk.Frame(win_root, bg="#1e1e1e")
-        content.pack(fill="both", expand=True, padx=25)
+        content = tk.Frame(card_container, bg=card_bg)
+        content.pack(fill="both", expand=True)
 
         # Icon Selector
         icon_frame = tk.Frame(content, bg="#1e1e1e")
@@ -716,18 +785,18 @@ class InstallationsScreenMixin:
                 
         # Icon Selector Modal
         def open_icon_selector(e):
-             sel_win = tk.Toplevel(win)
+             sel_win = tk.Toplevel(self.root)
              sel_win.title("Select Icon")
              sel_win.geometry("480x550")
              sel_win.configure(bg="#2d2d2d")
-             sel_win.transient(win)
+             sel_win.transient(self.root)
              # Don't use grab_set to allow parent window interaction
              sel_win.resizable(False, False)
              
              # Center on parent
              sel_win.update_idletasks()
-             x = win.winfo_x() + (win.winfo_width()//2) - 240
-             y = win.winfo_y() + (win.winfo_height()//2) - 275
+             x = self.root.winfo_x() + (self.root.winfo_width()//2) - 240
+             y = self.root.winfo_y() + (self.root.winfo_height()//2) - 275
              sel_win.geometry(f"+{x}+{y}")
              
              # Ensure visibility
@@ -952,7 +1021,7 @@ class InstallationsScreenMixin:
                 initial_dir = self.minecraft_dir
 
             selected = filedialog.askopenfilename(
-                parent=win,
+                parent=self.root,
                 title="Select Java Executable",
                 initialdir=initial_dir or None,
                 filetypes=[("All Files", "*")],
@@ -1151,14 +1220,14 @@ class InstallationsScreenMixin:
                  resolution_width = self._normalize_installation_resolution_value(res_w.get(), "width")
                  resolution_height = self._normalize_installation_resolution_value(res_h.get(), "height")
              except ValueError as e:
-                 custom_showerror("Invalid Installation Settings", str(e), parent=win)
+                 custom_showerror("Invalid Installation Settings", str(e), parent=self.root)
                  return
 
              if bool(resolution_width) != bool(resolution_height):
                  custom_showerror(
                      "Invalid Resolution",
                      "Set both width and height, or leave both as Auto.",
-                     parent=win,
+                     parent=self.root,
                  )
                  return
              
@@ -1182,30 +1251,50 @@ class InstallationsScreenMixin:
                      self.installations.append(new_profile)
                  
                  self.save_config()
+                 self.close_installation_editor()
                  self.refresh_installations_list()
                  self.update_installation_dropdown()
              except Exception as e:
-                 print(f"Error saving profile: {e}")
-                 custom_showerror("Error", f"Failed to save profile: {e}")
-             finally:
-                 if win.winfo_exists(): win.destroy()
+                 logger.error("Error saving profile: %s", e)
+                 custom_showerror("Error", f"Failed to save profile: {e}", parent=self.root)
 
         # --- Footer Actions ---
-        btn_row = tk.Frame(win_root, bg="#1e1e1e")
-        btn_row.pack(side="bottom", fill="x", padx=25, pady=25)
-        
-        btn_text = "Save" if edit_mode else "Create"
-        # Create/Save (Green)
-        save_btn = self._make_btn(btn_row, btn_text, style="primary", font_size=10, bold=True,
-                                  command=create_action)
+        btn_row = tk.Frame(card_container, bg=card_bg, pady=20)
+        btn_row.pack(fill="x")
+        self.inst_editor_btn_row = btn_row
+
+        btn_text = "Save Installation" if edit_mode else "Create Installation"
+        save_btn = self._make_btn(
+            btn_row,
+            btn_text,
+            style="primary",
+            font_size=10,
+            bold=True,
+            command=create_action,
+        )
         save_btn.pack(side="right", padx=(10, 0))
-                 
-        # Cancel (Text only typically, but we keep button style for consistency)
-        self._make_btn(btn_row, "Cancel", style="text", font_size=10,
-                      command=win.destroy).pack(side="right")
-        
-        # --- Onboarding Tour Logic ---
-        # On first installation, no coach marks needed — the wizard already guided the user.
+
+        self._make_btn(
+            btn_row,
+            "Cancel",
+            style="secondary",
+            font_size=10,
+            command=self.close_installation_editor,
+        ).pack(side="right")
+
+        editor.pack(fill="both", expand=True)
+
+    def close_installation_editor(self):
+        self._in_inst_editor = False
+        if hasattr(self, 'inst_editor_view') and self.inst_editor_view.winfo_exists():
+            self.inst_editor_view.pack_forget()
+        if hasattr(self, 'inst_browse_view') and self.inst_browse_view.winfo_exists():
+            self.inst_browse_view.pack(fill="both", expand=True)
+            self.refresh_installations_list()
+
+    def open_new_installation_modal(self, edit_mode=False, index=None):
+        """Backward-compatible alias delegating to in-page installation editor."""
+        return self.show_installation_editor(edit_mode=edit_mode, index=index)
 
     def open_installation_menu(self, idx, btn_widget):
         # Toggle: close if already open
