@@ -149,7 +149,7 @@ class ModpacksScreenMixin:
         # Icon / Initial
         initial = pack['name'][0].upper() if pack['name'] else "?"
         icon = tk.Label(card, text=initial, font=("Segoe UI", 18, "bold"), 
-                       bg="#333333", fg="white", width=4, height=2)
+                       bg=COLORS.get('input_bg', '#333333'), fg="white", width=4, height=2)
         icon.pack(side="left", padx=(0, 15))
         
         # Details
@@ -195,11 +195,8 @@ class ModpacksScreenMixin:
                       command=lambda: self.show_link_modpack_dialog(pack)).pack(side="left", padx=2)
 
         # Show Mods
-        sm_btn = self._make_btn(btns, "Show Mods", style="secondary", font_size=10,
+        sm_btn = self._make_btn(btns, "Show Mods", style="primary", font_size=10,
                                 command=lambda: self.show_modpack_contents_dialog(pack))
-        sm_btn.config(bg=COLORS['accent_blue'], activebackground="#2E86C1")
-        sm_btn.bind("<Enter>", lambda e: sm_btn.config(bg="#2E86C1"))
-        sm_btn.bind("<Leave>", lambda e: sm_btn.config(bg=COLORS['accent_blue']))
         sm_btn.pack(side="left", padx=2)
 
         # Browse (+)

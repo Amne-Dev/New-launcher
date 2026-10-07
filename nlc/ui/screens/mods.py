@@ -11,6 +11,8 @@ import time
 import shutil
 import logging
 import threading
+import hashlib
+from concurrent.futures import ThreadPoolExecutor
 import webbrowser
 import tempfile
 import urllib.parse
@@ -28,6 +30,9 @@ from nlc.net.downloader import _atomic_download
 from nlc.core.launch import safe_extract_zip as _safe_extract_zip
 
 logger = logging.getLogger(__name__)
+
+# Bounded worker pool to prevent CPU pinning & RAM spikes during mod browsing
+_MOD_ICON_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ModIconPool")
 
 class ModsScreenMixin:
     """Mixin providing Modrinth mod/modpack browser, search, and installation."""
@@ -248,11 +253,13 @@ class ModsScreenMixin:
                 if isinstance(card, tk.Frame) and card.winfo_exists():
                     card.config(bg=card_bg)
                     for child in card.winfo_children():
-                        if isinstance(child, tk.Frame):
+                        if isinstance(child, tk.Frame) and child.winfo_exists():
                             child.config(bg=card_bg)
                             for sub in child.winfo_children():
-                                if isinstance(sub, tk.Label):
+                                if isinstance(sub, tk.Label) and sub.winfo_exists():
                                     sub.config(bg=card_bg)
+                        elif isinstance(child, tk.Label) and child.winfo_exists():
+                            child.config(bg=input_bg if child.cget("text") == "?" else card_bg)
                 elif isinstance(card, tk.Label) and card.winfo_exists():
                     card.config(bg=main_bg, fg=text_secondary)
 
@@ -431,29 +438,49 @@ class ModsScreenMixin:
         if generation is not None and generation != self._mod_search_generation:
             return
         if reset:
-            for w in self.mods_scrollable_frame.winfo_children(): w.destroy()
+            for w in self.mods_scrollable_frame.winfo_children():
+                w.destroy()
             if not hits:
                 tk.Label(self.mods_scrollable_frame, text="No results found", 
                          fg=COLORS['text_secondary'], bg=COLORS['main_bg']).pack(pady=20)
                 self.mod_loading = False
                 return
 
-        for hit in hits:
-            self._create_mod_card(hit)
-            
-        # Update Scrollbar Region Explicitly
-        self.mods_scrollable_frame.update_idletasks()
-        self.mods_canvas.configure(scrollregion=self.mods_canvas.bbox("all"))
-        self._bind_smooth_scroll(self.mods_canvas, self.mods_scrollable_frame)
+        # Render cards progressively in lightweight batches of 5 to eliminate GUI freeze
+        chunk_size = 5
+        total_hits = len(hits)
 
-        self.mod_loading = False
+        def render_batch(start_idx):
+            if generation is not None and generation != self._mod_search_generation:
+                self.mod_loading = False
+                return
+            if not hasattr(self, 'mods_scrollable_frame') or not self.mods_scrollable_frame.winfo_exists():
+                self.mod_loading = False
+                return
+
+            end_idx = min(start_idx + chunk_size, total_hits)
+            for i in range(start_idx, end_idx):
+                self._create_mod_card(hits[i])
+
+            try:
+                self.mods_canvas.configure(scrollregion=self.mods_canvas.bbox("all"))
+                self._bind_smooth_scroll(self.mods_canvas, self.mods_scrollable_frame)
+            except (tk.TclError, AttributeError):
+                pass
+
+            if end_idx < total_hits:
+                self.root.after(15, lambda: render_batch(end_idx))
+            else:
+                self.mod_loading = False
+
+        render_batch(0)
 
     def _create_mod_card(self, mod):
         card = tk.Frame(self.mods_scrollable_frame, bg=COLORS['card_bg'], pady=10, padx=10)
         card.pack(fill="x", padx=20, pady=5)
         
         # Icon
-        icon_lbl = tk.Label(card, text="?", bg="#212121", fg="white", width=8, height=4)
+        icon_lbl = tk.Label(card, text="?", bg=COLORS.get('input_bg', '#212121'), fg="white", width=8, height=4)
         icon_lbl.pack(side="left", padx=(0, 15))
         
         icon_url = mod.get("icon_url")
@@ -940,6 +967,69 @@ class ModsScreenMixin:
                 btn_widget.config(state="normal", text="Download")
             ])
 
+    def _get_mod_icon_cache_dir(self):
+        base_dir = getattr(self, 'config_dir', None) or os.path.join(os.path.expanduser("~"), ".nlc")
+        cache_dir = os.path.join(base_dir, "cache", "mod_icons")
+        os.makedirs(cache_dir, exist_ok=True)
+        return cache_dir
+
+    def _fetch_and_cache_mod_icon(self, url):
+        image = None
+        try:
+            url_hash = hashlib.sha256(url.encode("utf-8")).hexdigest()[:24]
+            cache_dir = self._get_mod_icon_cache_dir()
+            cache_file = os.path.join(cache_dir, f"{url_hash}.png")
+
+            # 1. Fast disk cache check (64x64 PNG reads in <1ms with near-zero RAM)
+            if os.path.isfile(cache_file):
+                try:
+                    with Image.open(cache_file) as cached_img:
+                        image = cached_img.copy()
+                except Exception:
+                    image = None
+
+            # 2. Download and downscale with BILINEAR (much lighter on RAM/CPU than LANCZOS)
+            if image is None:
+                session = get_http_session()
+                resp = session.get(url, timeout=5, headers={"User-Agent": "AmneDev/NewLauncher"})
+                if resp.status_code == 200:
+                    with Image.open(io.BytesIO(resp.content)) as source:
+                        image = source.convert("RGBA").resize((64, 64), Image.Resampling.BILINEAR)
+                    try:
+                        temp_fd, temp_path = tempfile.mkstemp(dir=cache_dir, suffix=".tmp")
+                        os.close(temp_fd)
+                        image.save(temp_path, format="PNG")
+                        os.replace(temp_path, cache_file)
+                    except Exception as exc:
+                        logger.debug("Failed saving mod icon to disk cache: %s", exc)
+
+            if image is not None:
+                def update_ui():
+                    self.mod_image_loading.discard(url)
+                    try:
+                        photo = ImageTk.PhotoImage(image)
+                        # Cap in-memory image cache to 120 items to prevent unbounded memory growth
+                        if len(self.cached_mod_images) >= 120:
+                            oldest_key = next(iter(self.cached_mod_images))
+                            del self.cached_mod_images[oldest_key]
+                        self.cached_mod_images[url] = photo
+                        for waiting_label in self.mod_image_waiters.pop(url, []):
+                            if waiting_label.winfo_exists():
+                                waiting_label.config(image=photo, text="", width=64, height=64)
+                    except (tk.TclError, AttributeError):
+                        pass
+
+                self.root.after(0, update_ui)
+                return
+        except (requests.RequestException, OSError, ValueError) as exc:
+            logger.debug("Could not load Modrinth icon %s: %s", url, exc)
+        finally:
+            if url in self.mod_image_loading:
+                try:
+                    self.root.after(0, lambda: (self.mod_image_loading.discard(url), self.mod_image_waiters.pop(url, None)))
+                except (tk.TclError, AttributeError):
+                    pass
+
     def _load_mod_icon_async(self, url, label):
         if url in self.cached_mod_images:
             label.config(image=self.cached_mod_images[url], text="", width=64, height=64)
@@ -950,40 +1040,6 @@ class ModsScreenMixin:
         self.mod_image_loading.add(url)
         self.mod_image_waiters[url] = [label]
 
-        def fetch():
-            try:
-                r = requests.get(url, timeout=5)
-                if r.status_code == 200:
-                    with Image.open(io.BytesIO(r.content)) as source:
-                        image = source.convert("RGBA").resize((64, 64), Image.Resampling.LANCZOS)
-
-                    # PIL decoding is safe off-thread; Tk PhotoImage creation
-                    # is not.  Keeping all Tk operations on the UI thread
-                    # avoids intermittent freezes when a result page appears.
-                    def update_ui():
-                        self.mod_image_loading.discard(url)
-                        try:
-                            photo = ImageTk.PhotoImage(image)
-                            self.cached_mod_images[url] = photo
-                            for waiting_label in self.mod_image_waiters.pop(url, []):
-                                if waiting_label.winfo_exists():
-                                    waiting_label.config(image=photo, text="", width=64, height=64)
-                        except tk.TclError:
-                            pass
-
-                    self.root.after(0, update_ui)
-                    return
-            except (requests.RequestException, OSError, ValueError) as exc:
-                logging.debug("Could not load Modrinth icon %s: %s", url, exc)
-            finally:
-                # Success is released by update_ui; failures must also be
-                # released so the image can be retried after a transient error.
-                if url in self.mod_image_loading:
-                    try:
-                        self.root.after(0, lambda: (self.mod_image_loading.discard(url), self.mod_image_waiters.pop(url, None)))
-                    except tk.TclError:
-                        pass
-        
-        threading.Thread(target=fetch, daemon=True).start()
+        _MOD_ICON_POOL.submit(self._fetch_and_cache_mod_icon, url)
 
 

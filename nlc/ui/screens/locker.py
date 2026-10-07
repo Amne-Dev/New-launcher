@@ -54,6 +54,10 @@ class LockerScreenMixin:
         
         self.refresh_locker_view()
         
+    def refresh_locker_screen_theme(self):
+        """Update Locker tab chrome, sub-nav buttons, and content with active theme."""
+        self.refresh_locker_view()
+
     def refresh_locker_view(self):
         v = self.locker_view.get()
         main_bg = COLORS['main_bg']
@@ -180,11 +184,9 @@ class LockerScreenMixin:
         btn_grid = tk.Frame(act_frame, bg=COLORS['card_bg'])
         btn_grid.pack(fill="x")
         
-        upload_btn = self._make_btn(btn_grid, "Upload Skin File", style="secondary", font_size=10,
+        upload_btn = self._make_btn(btn_grid, "Upload Skin File", style="primary", font_size=10,
                                      command=self.select_skin)
-        upload_btn.config(bg=COLORS['accent_blue'], activebackground="#2E86C1", pady=8, width=20)
-        upload_btn.bind("<Enter>", lambda e: upload_btn.config(bg="#2E86C1"))
-        upload_btn.bind("<Leave>", lambda e: upload_btn.config(bg=COLORS['accent_blue']))
+        upload_btn.config(pady=8, width=20)
         upload_btn.pack(side="left", fill="x", expand=True, padx=(0, 10))
 
         self._make_btn(btn_grid, "Refresh", style="secondary", font_size=10,

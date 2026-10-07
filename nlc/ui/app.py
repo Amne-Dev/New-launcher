@@ -2413,14 +2413,24 @@ class MinecraftLauncher(
             _neo_nav(self.sidebar_nav_frame, "Addons", "Addons", "beacon.png")
             _neo_nav(self.sidebar_nav_frame, "Locker", "Locker", "enchanting_table_side.png")
 
+        def exit_modrinth():
+            prev = getattr(self, '_prev_tab_modrinth', 'Play')
+            if prev in ("Mods", "Settings"):
+                prev = "Play"
+            if hasattr(self, 'build_main_sidebar'):
+                self.build_main_sidebar()
+            self.show_tab(prev)
+
         def build_modrinth_sidebar():
+            if getattr(self, 'current_tab', None) and self.current_tab != "Mods":
+                self._prev_tab_modrinth = self.current_tab
             self._in_modrinth_sidebar = True
             self._in_settings_sidebar = False
             for widget in self.sidebar_nav_frame.winfo_children():
                 widget.destroy()
             self.sidebar_items = [item for item in getattr(self, 'sidebar_items', []) if item.winfo_exists() and item.master != self.sidebar_nav_frame]
             
-            _neo_nav(self.sidebar_nav_frame, "← Back", "Back", "observer_back.png", action=build_main_sidebar)
+            _neo_nav(self.sidebar_nav_frame, "← Back", "Back", "observer_back.png", action=exit_modrinth)
             
             _make_category_header(self.sidebar_nav_frame, "MODRINTH NETWORK")
             
@@ -2431,10 +2441,13 @@ class MinecraftLauncher(
                         self.switch_modrinth_mode(mode)
                 return _action
 
-            _neo_nav(self.sidebar_nav_frame, "Mods", "Mods", "comparator_on.png", action=nav_modrinth("mod"))
+            mods_btn = _neo_nav(self.sidebar_nav_frame, "Mods", "Mods", "comparator_on.png", action=nav_modrinth("mod"))
             _neo_nav(self.sidebar_nav_frame, "Resource Packs", "Resource Packs", "painting.png", action=nav_modrinth("resourcepack"))
             _neo_nav(self.sidebar_nav_frame, "Modpacks", "Modpacks", "shulker_box.png", action=nav_modrinth("modpack"))
             _neo_nav(self.sidebar_nav_frame, "Shaders", "Shaders", "glowstone.png", action=nav_modrinth("shader"))
+
+            self.show_tab("Mods")
+            self.set_active_sidebar(mods_btn)
 
         def build_settings_sidebar():
             self._in_settings_sidebar = True
@@ -2628,8 +2641,11 @@ class MinecraftLauncher(
                 self.refresh_modpacks_screen_theme()
             elif screen_name in ("Mods", "Modrinth") and hasattr(self, 'refresh_mods_screen_theme'):
                 self.refresh_mods_screen_theme()
-            elif screen_name == "Locker" and hasattr(self, 'refresh_locker_view'):
-                self.refresh_locker_view()
+            elif screen_name == "Locker":
+                if hasattr(self, 'refresh_locker_screen_theme'):
+                    self.refresh_locker_screen_theme()
+                elif hasattr(self, 'refresh_locker_view'):
+                    self.refresh_locker_view()
             elif screen_name == "Settings" and hasattr(self, 'refresh_settings_screen_theme'):
                 self.refresh_settings_screen_theme()
             elif screen_name == "Addons" and hasattr(self, 'refresh_addons_screen_theme'):
