@@ -38,12 +38,15 @@ class ModsScreenMixin:
         # Top Bar (Search & Filters)
         top_bar = tk.Frame(frame, bg=COLORS['main_bg'], pady=10, padx=20)
         top_bar.pack(fill="x")
+        self.mods_top_bar = top_bar
 
         # Modpack Selection
         mp_frame = tk.Frame(top_bar, bg=COLORS['main_bg'])
         mp_frame.pack(side="top", fill="x", pady=(0, 10))
+        self.mods_mp_frame = mp_frame
         
-        tk.Label(mp_frame, text="Active Modpack:", bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(side="left")
+        self.mods_mp_label = tk.Label(mp_frame, text="Active Modpack:", bg=COLORS['main_bg'], fg=COLORS['text_secondary'])
+        self.mods_mp_label.pack(side="left")
         
         pack_names = ["None"] + [p['name'] for p in self.modpacks]
         self.active_modpack_var = tk.StringVar(value="None")
@@ -85,18 +88,22 @@ class ModsScreenMixin:
         # Search Entry
         search_line = tk.Frame(top_bar, bg=COLORS['main_bg'])
         search_line.pack(fill="x")
+        self.mods_search_line = search_line
         
         self.mod_search_var = tk.StringVar()
         self.mod_search_var.trace_add("write", lambda *args: self.schedule_mod_search())
         
         search_frame = tk.Frame(search_line, bg=COLORS['input_bg'], padx=10, pady=5)
         search_frame.pack(side="left", fill="x", expand=True)
+        self.mods_search_frame = search_frame
         
-        tk.Label(search_frame, text="🔍", bg=COLORS['input_bg'], fg=COLORS['text_secondary']).pack(side="left")
+        self.mods_search_icon = tk.Label(search_frame, text="🔍", bg=COLORS['input_bg'], fg=COLORS['text_secondary'])
+        self.mods_search_icon.pack(side="left")
         
         entry = tk.Entry(search_frame, textvariable=self.mod_search_var, font=("Segoe UI", 11),
                         bg=COLORS['input_bg'], fg=COLORS['text_primary'], relief="flat", insertbackground="white")
         entry.pack(side="left", fill="x", expand=True)
+        self.mods_search_entry = entry
 
         # Filters
         self.mod_loader_filter = tk.StringVar(value="fabric") # Default
@@ -204,6 +211,50 @@ class ModsScreenMixin:
         # It is triggered by show_tab("Mods")
         tk.Label(self.mods_scrollable_frame, text="Loading Mods...", 
                 font=("Segoe UI", 12), fg=COLORS['text_secondary'], bg=COLORS['main_bg']).pack(pady=40)
+
+    def refresh_mods_screen_theme(self):
+        """Update Modrinth Mods tab chrome, search input, canvas, and cards."""
+        main_bg = COLORS['main_bg']
+        input_bg = COLORS.get('input_bg', '#1E222B')
+        card_bg = COLORS['card_bg']
+        text_primary = COLORS['text_primary']
+        text_secondary = COLORS.get('text_secondary', '#A0AAB0')
+
+        if hasattr(self, 'tabs') and "Mods" in self.tabs:
+            tab = self.tabs["Mods"]
+            if tab and tab.winfo_exists():
+                tab.config(bg=main_bg)
+
+        for attr in ['mods_top_bar', 'mods_mp_frame', 'mods_search_line']:
+            w = getattr(self, attr, None)
+            if w and w.winfo_exists():
+                w.config(bg=main_bg)
+
+        if hasattr(self, 'mods_mp_label') and self.mods_mp_label.winfo_exists():
+            self.mods_mp_label.config(bg=main_bg, fg=text_secondary)
+
+        if hasattr(self, 'mods_search_frame') and self.mods_search_frame.winfo_exists():
+            self.mods_search_frame.config(bg=input_bg)
+        if hasattr(self, 'mods_search_icon') and self.mods_search_icon.winfo_exists():
+            self.mods_search_icon.config(bg=input_bg, fg=text_secondary)
+        if hasattr(self, 'mods_search_entry') and self.mods_search_entry.winfo_exists():
+            self.mods_search_entry.config(bg=input_bg, fg=text_primary)
+
+        if hasattr(self, 'mods_canvas') and self.mods_canvas.winfo_exists():
+            self.mods_canvas.config(bg=main_bg)
+        if hasattr(self, 'mods_scrollable_frame') and self.mods_scrollable_frame.winfo_exists():
+            self.mods_scrollable_frame.config(bg=main_bg)
+            for card in self.mods_scrollable_frame.winfo_children():
+                if isinstance(card, tk.Frame) and card.winfo_exists():
+                    card.config(bg=card_bg)
+                    for child in card.winfo_children():
+                        if isinstance(child, tk.Frame):
+                            child.config(bg=card_bg)
+                            for sub in child.winfo_children():
+                                if isinstance(sub, tk.Label):
+                                    sub.config(bg=card_bg)
+                elif isinstance(card, tk.Label) and card.winfo_exists():
+                    card.config(bg=main_bg, fg=text_secondary)
 
     def _on_scrollbar_update(self, first, last):
         self.mods_scrollbar.set(first, last)

@@ -2573,31 +2573,12 @@ class MinecraftLauncher(
         except Exception as e:
             logger.error("Failed refreshing sidebar theme: %s", e)
 
-        # Synchronize Play screen
-        try:
-            if hasattr(self, 'refresh_play_screen_theme'):
-                self.refresh_play_screen_theme()
-        except Exception as e:
-            logger.error("Failed refreshing play screen theme: %s", e)
-
-        # Synchronize Installations screen
-        try:
-            if hasattr(self, 'refresh_installations_screen_theme'):
-                self.refresh_installations_screen_theme()
-            elif hasattr(self, 'refresh_installations_list'):
-                self.refresh_installations_list()
-        except Exception as e:
-            logger.error("Failed refreshing installations screen theme: %s", e)
-
-        # Synchronize Settings screen
-        try:
-            if hasattr(self, 'refresh_settings_screen_theme'):
-                self.refresh_settings_screen_theme()
-            elif "Settings" in getattr(self, 'tabs', {}) and hasattr(self, 'switch_settings_category'):
-                cur_cat = getattr(self, 'current_settings_category', 'Appearance')
-                self.switch_settings_category(cur_cat)
-        except Exception as e:
-            logger.error("Failed refreshing settings screen theme: %s", e)
+        # Synchronize all screens
+        for screen in ["Play", "Installations", "Modpacks", "Mods", "Locker", "Settings", "Addons"]:
+            try:
+                self.refresh_screen_theme(screen)
+            except Exception as e:
+                logger.error("Failed refreshing %s screen theme: %s", screen, e)
 
         # 1. Play Button chrome fallback
         try:
@@ -2635,6 +2616,26 @@ class MinecraftLauncher(
                 self.save_config(sync_ui=True, immediate=True)
             except Exception as e:
                 logger.error("Failed saving config in apply_theme: %s", e)
+
+    def refresh_screen_theme(self, screen_name: str):
+        """Ensure the specified screen matches active theme colors."""
+        try:
+            if screen_name == "Play" and hasattr(self, 'refresh_play_screen_theme'):
+                self.refresh_play_screen_theme()
+            elif screen_name == "Installations" and hasattr(self, 'refresh_installations_screen_theme'):
+                self.refresh_installations_screen_theme()
+            elif screen_name == "Modpacks" and hasattr(self, 'refresh_modpacks_screen_theme'):
+                self.refresh_modpacks_screen_theme()
+            elif screen_name in ("Mods", "Modrinth") and hasattr(self, 'refresh_mods_screen_theme'):
+                self.refresh_mods_screen_theme()
+            elif screen_name == "Locker" and hasattr(self, 'refresh_locker_view'):
+                self.refresh_locker_view()
+            elif screen_name == "Settings" and hasattr(self, 'refresh_settings_screen_theme'):
+                self.refresh_settings_screen_theme()
+            elif screen_name == "Addons" and hasattr(self, 'refresh_addons_screen_theme'):
+                self.refresh_addons_screen_theme()
+        except Exception as e:
+            logger.debug("Error refreshing screen theme for %s: %s", screen_name, e)
 
     def apply_accent_color(self, name_or_hex: str):
         _named_accents = {
@@ -4350,6 +4351,9 @@ class MinecraftLauncher(
         if tab_name in self.tabs:
             self.tabs[tab_name].pack(fill="both", expand=True)
             self.current_tab = tab_name
+            
+            # Synchronize screen theme on display to ensure no stale backgrounds
+            self.refresh_screen_theme(tab_name)
             
             # Lazy Load triggers
             if tab_name == "Mods":

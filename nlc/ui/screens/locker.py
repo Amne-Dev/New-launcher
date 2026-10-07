@@ -29,11 +29,13 @@ class LockerScreenMixin:
         # Sub-tabs Header
         header = tk.Frame(frame, bg=COLORS['main_bg'], pady=20)
         header.pack(fill="x")
+        self.locker_header = header
         
         self.locker_view = tk.StringVar(value="Skins")
         
         btn_frame = tk.Frame(header, bg=COLORS['input_bg'])
         btn_frame.pack()
+        self.locker_btn_frame = btn_frame
         
         def switch_view(v):
             self.locker_view.set(v)
@@ -42,7 +44,7 @@ class LockerScreenMixin:
         self.locker_btns = {}
         for v in ["Skins", "Wallpapers"]:
              b = self._make_btn(btn_frame, v, style="secondary", font_size=10, bold=True,
-                               command=lambda x=v: switch_view(x))
+                                command=lambda x=v: switch_view(x))
              b.config(padx=20, pady=5)
              b.pack(side="left")
              self.locker_btns[v] = b
@@ -54,12 +56,24 @@ class LockerScreenMixin:
         
     def refresh_locker_view(self):
         v = self.locker_view.get()
+        main_bg = COLORS['main_bg']
+        input_bg = COLORS.get('input_bg', '#1E222B')
+
+        if hasattr(self, 'tabs') and "Locker" in self.tabs and self.tabs["Locker"].winfo_exists():
+            self.tabs["Locker"].config(bg=main_bg)
+        if hasattr(self, 'locker_header') and self.locker_header.winfo_exists():
+            self.locker_header.config(bg=main_bg)
+        if hasattr(self, 'locker_btn_frame') and self.locker_btn_frame.winfo_exists():
+            self.locker_btn_frame.config(bg=input_bg)
+        if hasattr(self, 'locker_content') and self.locker_content.winfo_exists():
+            self.locker_content.config(bg=main_bg)
+
         # Update buttons
-        for name, btn in self.locker_btns.items():
+        for name, btn in getattr(self, 'locker_btns', {}).items():
             if name == v:
                 btn.config(bg=COLORS.get('accent_color', COLORS['play_btn_green']), fg=COLORS.get('accent_text', 'white'))
             else:
-                btn.config(bg=COLORS['input_bg'], fg=COLORS['text_primary'])
+                btn.config(bg=input_bg, fg=COLORS['text_primary'])
         
         for w in self.locker_content.winfo_children(): w.destroy()
         

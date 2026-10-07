@@ -1247,4 +1247,15 @@ How to use:
             
             self.log("Agent stopped.")
 
+    def refresh_addons_screen_theme(self):
+        """Re-render the Addons tab with active theme tokens."""
+        if hasattr(self, 'tabs') and "Addons" in self.tabs:
+            old_tab = self.tabs["Addons"]
+            if old_tab and old_tab.winfo_exists():
+                is_packed = bool(old_tab.winfo_ismapped())
+                old_tab.destroy()
+                self.create_addons_tab()
+                if is_packed:
+                    self.tabs["Addons"].pack(fill="both", expand=True)
+
 

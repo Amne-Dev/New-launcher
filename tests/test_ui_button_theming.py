@@ -120,11 +120,24 @@ def test_comprehensive_live_theming_across_screens(tk_root):
     app.save_config = lambda **kw: None
     app.tabs = {}
     app.installations = []
+    app.modpacks = [{'id': 'pack1', 'name': 'Modded smp', 'loader': 'fabric', 'mc_version': '1.21.1'}]
+    app.profiles = []
+    app.current_profile_index = 0
+    app.current_skin_path = None
+    app.current_cape_path = None
+    app.wallpapers = []
+    app.auto_download_mod = True
+    app.update_skin_model = lambda: None
+    app.select_skin = lambda: None
+    app.refresh_skin = lambda: None
+    app._set_auto_download = lambda val: None
+    app.render_skin_history = lambda: None
     app.user_dir = "/fake/mc"
     app.config_dir = "/fake/config"
     app.config_file = "/fake/config/config.json"
     app.rpc_connected = False
     app.rpc_enabled = True
+    app.nav_buttons = {}
 
     # Windows and shell hierarchy
     app.window_shell = tk.Frame(tk_root, bg=COLORS['sidebar_bg'])
@@ -133,9 +146,12 @@ def test_comprehensive_live_theming_across_screens(tk_root):
     app.content_area = tk.Frame(app.window_content, bg=COLORS['main_bg'])
     app.tab_container = tk.Frame(app.content_area, bg=COLORS['main_bg'])
 
-    # Construct installations and settings tabs
+    # Construct tabs
     app.create_installations_tab()
     app.create_settings_tab()
+    app.create_modpacks_tab()
+    app.create_mods_tab()
+    app.create_locker_tab()
 
     # 1. Switch to Dracula
     app.apply_theme("dracula", save=False)
@@ -168,11 +184,31 @@ def test_comprehensive_live_theming_across_screens(tk_root):
     assert app.header_breadcrumb_lbl.cget("text") == "  /  APPEARANCE"
     assert app.header_breadcrumb_lbl.cget("fg") == THEMES['nord']['default_accent']
 
-    # 4. Switch to Emerald
-    app.apply_theme("emerald", save=False)
-    assert app.settings_header_frame.cget("bg") == THEMES['emerald']['sidebar_bg']
-    assert app.header_breadcrumb_lbl.cget("fg") == THEMES['emerald']['default_accent']
-    assert app.settings_canvas.cget("bg") == THEMES['emerald']['main_bg']
+    # 4. Switch from Nordic to OLED Obsidian (the user's exact reported case!)
+    app.apply_theme("obsidian", save=False)
+    obs_main = THEMES['obsidian']['main_bg']
+    obs_card = THEMES['obsidian']['card_bg']
+    assert app.tabs["Modpacks"].cget("bg") == obs_main
+    assert app.mp_top_bar.cget("bg") == obs_main
+    assert app.mp_title_lbl.cget("bg") == obs_main
+    assert app.mp_canvas.cget("bg") == obs_main
+    assert app.mp_scrollable_frame.cget("bg") == obs_main
+    # Ensure modpack card is obsidian card_bg
+    modpack_cards = app.mp_scrollable_frame.winfo_children()
+    assert len(modpack_cards) > 0
+    assert modpack_cards[0].cget("bg") == obs_card
+
+    # Also verify Locker and Mods tabs in Obsidian
+    assert app.tabs["Locker"].cget("bg") == obs_main
+    assert app.locker_header.cget("bg") == obs_main
+    assert app.tabs["Mods"].cget("bg") == obs_main
+    assert app.mods_top_bar.cget("bg") == obs_main
+    assert app.mods_canvas.cget("bg") == obs_main
+
+    # 5. Test show_tab immediately synchronizes
+    app.show_tab("Modpacks")
+    assert app.current_tab == "Modpacks"
+    assert app.tabs["Modpacks"].cget("bg") == obs_main
 
     # Cleanup
     app.window_shell.destroy()

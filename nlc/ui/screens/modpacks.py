@@ -36,9 +36,11 @@ class ModpacksScreenMixin:
         # Top Bar
         top_bar = tk.Frame(container, bg=COLORS['main_bg'], pady=15, padx=20)
         top_bar.pack(fill="x")
+        self.mp_top_bar = top_bar
         
-        tk.Label(top_bar, text="My Modpacks", font=("Segoe UI", 16, "bold"), 
-                 bg=COLORS['main_bg'], fg="white").pack(side="left")
+        self.mp_title_lbl = tk.Label(top_bar, text="My Modpacks", font=("Segoe UI", 16, "bold"), 
+                 bg=COLORS['main_bg'], fg=COLORS['text_primary'])
+        self.mp_title_lbl.pack(side="left")
                  
         create_mp_btn = self._make_btn(top_bar, "+ Create New Modpack", style="primary",
                                          font_size=10, bold=True, command=self.show_create_modpack_dialog)
@@ -52,9 +54,11 @@ class ModpacksScreenMixin:
         ).pack(side="right", padx=(0, 8))
 
         # Config Warning
+        self.mp_empty_lbl = None
         if not self.modpacks:
-            tk.Label(container, text="Create a modpack to get started!", 
-                    font=("Segoe UI", 12), fg=COLORS['text_secondary'], bg=COLORS['main_bg']).pack(pady=40)
+            self.mp_empty_lbl = tk.Label(container, text="Create a modpack to get started!", 
+                    font=("Segoe UI", 12), fg=COLORS['text_secondary'], bg=COLORS['main_bg'])
+            self.mp_empty_lbl.pack(pady=40)
         
         # Scrollable Area
         self.mp_canvas = tk.Canvas(container, bg=COLORS['main_bg'], highlightthickness=0)
@@ -84,6 +88,35 @@ class ModpacksScreenMixin:
         self.mp_scrollable_frame.bind("<Enter>", lambda e: self._bind_smooth_scroll(self.mp_canvas, self.mp_scrollable_frame))
         
         self.refresh_modpacks_list()
+
+    def refresh_modpacks_screen_theme(self):
+        """Update Modpacks tab chrome, scroll frames, and items with current theme."""
+        main_bg = COLORS['main_bg']
+        text_primary = COLORS['text_primary']
+        text_secondary = COLORS.get('text_secondary', '#A0AAB0')
+
+        if hasattr(self, 'tabs') and "Modpacks" in self.tabs:
+            tab = self.tabs["Modpacks"]
+            if tab and tab.winfo_exists():
+                tab.config(bg=main_bg)
+
+        if hasattr(self, 'mp_top_bar') and self.mp_top_bar.winfo_exists():
+            self.mp_top_bar.config(bg=main_bg)
+
+        if hasattr(self, 'mp_title_lbl') and self.mp_title_lbl.winfo_exists():
+            self.mp_title_lbl.config(bg=main_bg, fg=text_primary)
+
+        if hasattr(self, 'mp_empty_lbl') and self.mp_empty_lbl and self.mp_empty_lbl.winfo_exists():
+            self.mp_empty_lbl.config(bg=main_bg, fg=text_secondary)
+
+        if hasattr(self, 'mp_canvas') and self.mp_canvas.winfo_exists():
+            self.mp_canvas.config(bg=main_bg)
+
+        if hasattr(self, 'mp_scrollable_frame') and self.mp_scrollable_frame.winfo_exists():
+            self.mp_scrollable_frame.config(bg=main_bg)
+
+        if hasattr(self, 'refresh_modpacks_list'):
+            self.refresh_modpacks_list()
 
     def refresh_modpacks_list(self):
         for w in self.mp_scrollable_frame.winfo_children(): w.destroy()
