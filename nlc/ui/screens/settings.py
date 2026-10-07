@@ -9,7 +9,7 @@ import subprocess
 import sys
 import tkinter as tk
 from tkinter import ttk, scrolledtext
-from nlc.ui.theme import COLORS, FONT_FAMILY
+from nlc.ui.theme import COLORS, FONT_FAMILY, THEMES, THEME_MANAGER
 from nlc.ui.components.dialogs import custom_showinfo, custom_showerror, custom_askyesno
 from nlc.storage.config import DEFAULT_RAM, CURRENT_VERSION
 
@@ -130,8 +130,8 @@ class SettingsScreenMixin:
         self.show_console_var = tk.BooleanVar(value=getattr(self, 'show_console', False))
         card_check(card_gen, "Keep output console open (Debug)", self.show_console_var)
 
-        # APPEARANCE
-        card_app, lbl_app = create_card(main_wrapper, "APPEARANCE")
+        # APPEARANCE & THEMES
+        card_app, lbl_app = create_card(main_wrapper, "APPEARANCE & THEMES")
         create_top_nav_btn("Appearance", card_app)
         
         self.custom_titlebar_var = tk.BooleanVar(value=getattr(self, 'custom_titlebar_enabled', True))
@@ -140,27 +140,97 @@ class SettingsScreenMixin:
              if hasattr(self, 'root'): custom_showinfo("Restart Required", "Restart to apply titlebar changes.")
         card_check(card_app, "Use Custom Titlebar (Windows only)", self.custom_titlebar_var, on_titlebar_toggle)
 
-        self.neo_style_var = tk.BooleanVar(value=getattr(self, 'neo_style_enabled', True))
-        def on_neo_toggle():
-             val = self.neo_style_var.get(); self.neo_style_enabled = val; self.save_config()
-             if hasattr(self, 'root'): custom_showinfo("Restart Required", "Restart to apply Neo Style changes.")
-        card_check(card_app, "Use Neo Style (OLED Black Theme)", self.neo_style_var, on_neo_toggle)
+        # Animations & Motion Toggle
+        self.animations_enabled_var = tk.BooleanVar(value=getattr(self, 'animations_enabled', True))
+        def on_anim_toggle():
+            val = self.animations_enabled_var.get()
+            self.animations_enabled = val
+            self.save_config()
+        card_check(card_app, "Enable Smooth Transitions & Micro-Animations (60 FPS)", self.animations_enabled_var, on_anim_toggle)
+        anim_hint = tk.Label(card_app, text="Smooth tab cross-fades and hover glows. Disable to save CPU on low-end hardware.",
+                             font=("Segoe UI", 9), bg=COLORS['card_bg'], fg=COLORS['text_muted'])
+        anim_hint.pack(anchor="w", padx=(24, 0), pady=(0, 15))
 
-        card_label(card_app, "Accent Color")
+        # Curated Themes
+        card_label(card_app, "Curated Designer Themes (Instant Preview)")
+        theme_grid = tk.Frame(card_app, bg=COLORS['card_bg'])
+        theme_grid.pack(fill="x", pady=(0, 15))
+
+        current_theme = getattr(self, "theme_id", "dark_slate")
+
+        for i, (t_key, t_info) in enumerate(THEMES.items()):
+            col_idx = i % 3
+            row_idx = i // 3
+            t_card = tk.Frame(theme_grid, bg=t_info['card_bg'], cursor="hand2", padx=10, pady=8,
+                              highlightthickness=2 if t_key == current_theme else 1,
+                              highlightbackground=COLORS.get('accent_color', '#2ECC71') if t_key == current_theme else COLORS.get('border_subtle', '#2D3139'))
+            t_card.grid(row=row_idx, column=col_idx, padx=6, pady=6, sticky="ew")
+            theme_grid.columnconfigure(col_idx, weight=1)
+
+            t_name = tk.Label(t_card, text=t_info['name'], font=("Segoe UI", 10, "bold"),
+                              bg=t_info['card_bg'], fg="white", cursor="hand2")
+            t_name.pack(anchor="w")
+            
+            t_sub = tk.Label(t_card, text=t_info['description'], font=("Segoe UI", 8),
+                             bg=t_info['card_bg'], fg=t_info.get('default_accent', '#B0B0B0'), cursor="hand2")
+            t_sub.pack(anchor="w", pady=(2, 0))
+
+            def _make_theme_click(k=t_key):
+                return lambda e: getattr(self, "apply_theme", lambda k: None)(k)
+
+            t_card.bind("<Button-1>", _make_theme_click(t_key))
+            t_name.bind("<Button-1>", _make_theme_click(t_key))
+            t_sub.bind("<Button-1>", _make_theme_click(t_key))
+
+        # Accent Color
+        card_label(card_app, "Accent Color & Live Swatches")
         accent_frame = tk.Frame(card_app, bg=COLORS['card_bg'])
         accent_frame.pack(fill="x", pady=(0, 10))
         
-        _current = getattr(self, "accent_color_name", "Green")
-        _attrs = [("Green", "#2D8F36"), ("Blue", "#3498DB"), ("Orange", "#E67E22"), ("Purple", "#9B59B6"), ("Red", "#E74C3C")]
+        _current_acc = getattr(self, "custom_accent", None) or getattr(self, "accent_color_name", "Emerald")
+        _attrs = [
+            ("Emerald", "#2ECC71"),
+            ("Neon Cyan", "#00E5FF"),
+            ("Sapphire", "#3498DB"),
+            ("Violet", "#9B59B6"),
+            ("Sunset", "#F39C12"),
+            ("Crimson", "#E74C3C"),
+            ("Hot Pink", "#EC4899"),
+        ]
         
         for name, col in _attrs:
             f = tk.Frame(accent_frame, bg=COLORS['card_bg'], padx=3, pady=3)
-            f.pack(side="left", padx=5)
-            if name == _current: f.config(bg="gray")
-            btn = tk.Button(f, bg=col, width=6, height=2, relief="flat", bd=0, cursor="hand2",
-                           command=lambda n=name: self.apply_accent_color(n))
+            f.pack(side="left", padx=4)
+            is_sel = (_current_acc == name or _current_acc == col)
+            if is_sel:
+                f.config(bg="white")
+            btn = tk.Button(f, bg=col, width=5, height=2, relief="flat", bd=0, cursor="hand2",
+                           command=lambda c=col, n=name: getattr(self, "apply_accent_color", lambda x: None)(c))
             btn.config(activebackground=col)
             btn.pack()
+
+        # Custom Hex Color Input
+        hex_row = tk.Frame(card_app, bg=COLORS['card_bg'])
+        hex_row.pack(fill="x", pady=(5, 10))
+        tk.Label(hex_row, text="Custom Hex:", font=("Segoe UI", 9), bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(side="left", padx=(0, 8))
+        self.custom_hex_entry = tk.Entry(hex_row, font=("Segoe UI", 9), bg=COLORS['input_bg'], fg="white", width=10, relief="flat", insertbackground="white")
+        self.custom_hex_entry.insert(0, getattr(self, "custom_accent", "") or "#2ECC71")
+        self.custom_hex_entry.pack(side="left", ipady=3)
+
+        def on_apply_custom_hex():
+            val = self.custom_hex_entry.get().strip()
+            if not val.startswith("#"):
+                val = f"#{val}"
+            if len(val) == 7 and all(c in "0123456789abcdefABCDEF" for c in val[1:]):
+                getattr(self, "apply_accent_color", lambda x: None)(val)
+            else:
+                custom_showerror("Invalid Color", "Please enter a valid 6-character hex color (e.g. #00E5FF).")
+
+        apply_hex_btn = tk.Button(hex_row, text="Apply Hex", font=("Segoe UI", 9, "bold"),
+                                  bg=COLORS.get('input_bg', '#3A3B3C'), fg="white",
+                                  relief="flat", cursor="hand2", padx=10, pady=2,
+                                  command=on_apply_custom_hex)
+        apply_hex_btn.pack(side="left", padx=(8, 0))
 
         # JAVA
         card_java, lbl_java = create_card(main_wrapper, "JAVA & DIRECTORY")
@@ -422,6 +492,31 @@ class SettingsScreenMixin:
                       selectcolor=COLORS['main_bg'], activebackground=COLORS['main_bg'],
                       command=on_neo_toggle).pack(anchor="w", pady=(0, 15))
         
+        # Animations & Motion Toggle
+        self.animations_enabled_var = tk.BooleanVar(value=getattr(self, 'animations_enabled', True))
+        def on_anim_toggle():
+            val = self.animations_enabled_var.get()
+            self.animations_enabled = val
+            self.save_config()
+        tk.Checkbutton(main_container, text="Enable Smooth Transitions & Micro-Animations (60 FPS)", variable=self.animations_enabled_var,
+                       bg=COLORS['main_bg'], fg=COLORS['text_primary'],
+                       selectcolor=COLORS['main_bg'], activebackground=COLORS['main_bg'],
+                       command=on_anim_toggle).pack(anchor="w", pady=(0, 10))
+
+        # Theme Selector
+        tk.Label(main_container, text="Theme Preset", font=("Segoe UI", 10),
+                bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(anchor="w")
+        theme_names = [f"{t['name']} ({k})" for k, t in THEMES.items()]
+        theme_combo_var = tk.StringVar(value=THEMES.get(getattr(self, "theme_id", "dark_slate"), THEMES['dark_slate'])['name'])
+        theme_combo = ttk.Combobox(main_container, textvariable=theme_combo_var, state="readonly", values=[t['name'] for t in THEMES.values()], width=28)
+        theme_combo.pack(anchor="w", pady=(3, 10))
+        def _on_theme_select(e):
+            for k, t in THEMES.items():
+                if t['name'] == theme_combo_var.get():
+                    getattr(self, "apply_theme", lambda x: None)(k)
+                    break
+        theme_combo.bind("<<ComboboxSelected>>", _on_theme_select)
+
         # Accent Color
         tk.Label(main_container, text="Accent Color", font=("Segoe UI", 10),
                 bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(anchor="w")
@@ -429,27 +524,29 @@ class SettingsScreenMixin:
         accent_frame = tk.Frame(main_container, bg=COLORS['main_bg'])
         accent_frame.pack(fill="x", pady=(5, 10))
         
-        def set_accent(name):
-            self.apply_accent_color(name)
+        def set_accent(col):
+            getattr(self, "apply_accent_color", lambda x: None)(col)
 
-        _current = getattr(self, "accent_color_name", "Green")
-        _attrs = [("Green", "#2D8F36"), ("Blue", "#3498DB"), ("Orange", "#E67E22"), ("Purple", "#9B59B6"), ("Red", "#E74C3C")]
+        _current = getattr(self, "custom_accent", None) or getattr(self, "accent_color_name", "Emerald")
+        _attrs = [
+            ("Emerald", "#2ECC71"),
+            ("Neon Cyan", "#00E5FF"),
+            ("Sapphire", "#3498DB"),
+            ("Violet", "#9B59B6"),
+            ("Sunset", "#F39C12"),
+            ("Crimson", "#E74C3C"),
+            ("Hot Pink", "#EC4899"),
+        ]
         
         for name, col in _attrs:
             f = tk.Frame(accent_frame, bg=COLORS['main_bg'], padx=2, pady=2)
-            f.pack(side="left", padx=5)
-            
-            # Indicator border if selected
-            if name == _current:
+            f.pack(side="left", padx=4)
+            if _current == name or _current == col:
                 f.config(bg="white")
 
-            btn = tk.Button(f, bg=col, width=6, height=2, relief="flat", bd=0, cursor="hand2",
-                           command=lambda n=name: set_accent(n))
-            # Hover — lighten slightly
-            _hov = col
+            btn = tk.Button(f, bg=col, width=5, height=2, relief="flat", bd=0, cursor="hand2",
+                           command=lambda c=col: set_accent(c))
             btn.config(activebackground=col)
-            btn.bind("<Enter>", lambda e, b=btn, c=col: b.config(relief="solid", bd=1))
-            btn.bind("<Leave>", lambda e, b=btn: b.config(relief="flat", bd=0))
             btn.pack()
 
         # Review Onboarding

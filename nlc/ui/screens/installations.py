@@ -210,7 +210,7 @@ class InstallationsScreenMixin:
         
         # Determine Icon
         loader = inst.get("loader", "Vanilla")
-        custom_icon = inst.get("icon") or ("icons/grass_block_side.png" if loader == "Vanilla" else "icons/crafting_table_front.png")
+        custom_icon = inst.get("icon")
         
         # Try loading as image
         icon_img = self.get_icon_image(custom_icon, (40, 40))
@@ -304,7 +304,7 @@ class InstallationsScreenMixin:
         self.inst_ver_lbl.config(text=ver)
         
         # Update Icon
-        icon_path = inst.get("icon") or "icons/crafting_table_front.png"
+        icon_path = inst.get("icon", "icons/crafting_table_front.png")
         img = self.get_icon_image(icon_path, (32, 32))
         
         if img:
@@ -417,7 +417,7 @@ class InstallationsScreenMixin:
         for i, inst in enumerate(self.installations):
             name = inst.get("name", "Unnamed")
             ver = inst.get("version", "Latest")
-            icon_path = inst.get("icon") or "icons/crafting_table_front.png"
+            icon_path = inst.get("icon", "icons/crafting_table_front.png")
             
             # Row Container
             row = tk.Frame(scroll_frame, bg=COLORS['card_bg'], cursor="hand2")
