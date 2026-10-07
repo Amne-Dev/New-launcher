@@ -2904,830 +2904,831 @@ class MinecraftLauncher(
         threading.Thread(target=fetch_changelog, daemon=True).start()
 
     def show_onboarding_wizard(self):
-        """Shows the First Run Wizard — modern redesign with step indicators and smooth transitions."""
-        existing_wizard = getattr(self, "_onboarding_wizard", None)
-        if existing_wizard:
+        """Shows the First Run Wizard — modern in-app view without popups, with step indicators and smooth transitions."""
+        if getattr(self, "_in_onboarding", False) and hasattr(self, "_onboarding_view") and self._onboarding_view and self._onboarding_view.winfo_exists():
+            return
+
+        self._in_onboarding = True
+
+        root_parent = self.window_content if self.window_content is not None else self.root
+
+        # Hide main launcher chrome while onboarding is active
+        if hasattr(self, 'sidebar') and self.sidebar and self.sidebar.winfo_exists():
+            self.sidebar.pack_forget()
+        if hasattr(self, 'content_area') and self.content_area and self.content_area.winfo_exists():
+            self.content_area.pack_forget()
+
+        # Remove previous onboarding view if any
+        if hasattr(self, '_onboarding_view') and self._onboarding_view and self._onboarding_view.winfo_exists():
             try:
-                if existing_wizard.winfo_exists():
-                    if str(existing_wizard.state()) == "withdrawn":
-                        existing_wizard.deiconify()
-                    self._schedule_onboarding_raise()
-                    existing_wizard.focus_force()
-                    if os.name != "nt":
-                        existing_wizard.grab_set()
-                    return
+                self._onboarding_view.destroy()
             except Exception:
-                self._onboarding_wizard = None
-                self._onboarding_overlay = None
+                pass
 
-        try:
-            # Clean up stale bindings/windows from prior onboarding implementations.
-            self._clear_onboarding_focus_bindings()
+        main_bg = COLORS['main_bg']
+        card_bg = COLORS['card_bg']
+        input_bg = COLORS['input_bg']
+        text_primary = COLORS['text_primary']
+        text_secondary = COLORS.get('text_secondary', '#A0AAB0')
+        border_col = COLORS.get('border_subtle', '#33373E')
 
-            stale_overlay = getattr(self, "_onboarding_overlay", None)
-            if stale_overlay and stale_overlay.winfo_exists():
+        onboarding_view = tk.Frame(root_parent, bg=main_bg)
+        self._onboarding_view = onboarding_view
+        onboarding_view.pack(fill="both", expand=True)
+
+        # ── Step indicator (top bar) ──
+        STEPS = ["Account", "Preferences", "Theme", "Ready"]
+        step_bar = tk.Frame(onboarding_view, bg=COLORS.get('sidebar_bg', '#1E1E1E'), height=56)
+        step_bar.pack(fill="x")
+        step_bar.pack_propagate(False)
+
+        # Logo/title at left
+        tk.Label(
+            step_bar,
+            text="NEW LAUNCHER",
+            font=("Segoe UI", 10, "bold"),
+            bg=COLORS.get('sidebar_bg', '#1E1E1E'),
+            fg=text_secondary,
+        ).pack(side="left", padx=24)
+
+        # Exit/Skip Setup link at far right
+        exit_btn = tk.Label(
+            step_bar,
+            text="✕ Exit Setup",
+            font=("Segoe UI", 9),
+            bg=COLORS.get('sidebar_bg', '#1E1E1E'),
+            fg=text_secondary,
+            cursor="hand2",
+        )
+        exit_btn.pack(side="right", padx=24)
+        exit_btn.bind("<Button-1>", lambda e: self.close_onboarding_wizard(start_tour=False))
+        exit_btn.bind("<Enter>", lambda e: exit_btn.config(fg="white"))
+        exit_btn.bind("<Leave>", lambda e: exit_btn.config(fg=text_secondary))
+
+        # Step dots
+        dots_frame = tk.Frame(step_bar, bg=COLORS.get('sidebar_bg', '#1E1E1E'))
+        dots_frame.pack(side="right", padx=16)
+        dot_labels = []
+        for i, step_name in enumerate(STEPS):
+            dot_f = tk.Frame(dots_frame, bg=COLORS.get('sidebar_bg', '#1E1E1E'))
+            dot_f.pack(side="left", padx=10)
+            dot = tk.Label(dot_f, text=f"{i + 1}", font=("Segoe UI", 8, "bold"),
+                           bg="#3A3A3A", fg="white", width=2, height=1)
+            dot.pack(side="left", padx=(0, 4))
+            lbl = tk.Label(dot_f, text=step_name, font=("Segoe UI", 8),
+                           bg=COLORS.get('sidebar_bg', '#1E1E1E'), fg="#707070")
+            lbl.pack(side="left")
+            dot_labels.append((dot, lbl))
+
+        def update_dots(active_idx):
+            for i, (dot, lbl) in enumerate(dot_labels):
+                if i < active_idx:
+                    dot.config(text="✓", bg=COLORS.get('success_green', '#2D8F36'), fg="white")
+                    lbl.config(fg=COLORS.get('success_green', '#2D8F36'))
+                elif i == active_idx:
+                    dot.config(text=f"{i + 1}", bg=COLORS.get('accent_blue', '#3498DB'), fg="white")
+                    lbl.config(fg="white")
+                else:
+                    dot.config(text=f"{i + 1}", bg="#3A3A3A", fg="#707070")
+                    lbl.config(fg="#707070")
+
+        # ── Scrollable or centered content area ──
+        content_canvas = tk.Canvas(onboarding_view, bg=main_bg, highlightthickness=0)
+        content_canvas.pack(fill="both", expand=True)
+
+        content = tk.Frame(content_canvas, bg=main_bg)
+        content_window = content_canvas.create_window((0, 0), window=content, anchor="n")
+
+        def center_content(event):
+            content_canvas.coords(content_window, event.width // 2, 20)
+
+        content_canvas.bind("<Configure>", center_content)
+
+        self.wizard_account_data = {}
+
+        def clear_page():
+            for w in content.winfo_children():
+                w.destroy()
+
+        def make_btn(parent, text, bg_color, command, width=20, font_size=10, bold=True):
+            weight = "bold" if bold else ""
+            b = tk.Button(parent, text=text, font=("Segoe UI", font_size, weight),
+                         bg=bg_color, fg="white", activebackground=bg_color,
+                         activeforeground="white", relief="flat", cursor="hand2",
+                         command=command, bd=0)
+            b.config(padx=16, pady=8)
+            return b
+
+        def make_link(parent, text, command):
+            l = tk.Label(parent, text=text, font=("Segoe UI", 9),
+                        bg=main_bg, fg=text_secondary, cursor="hand2")
+            l.bind("<Button-1>", lambda e: command())
+            l.bind("<Enter>", lambda e: l.config(fg="white"))
+            l.bind("<Leave>", lambda e: l.config(fg=text_secondary))
+            return l
+
+        # STEP 0 — Account Type Selection
+        def show_step_account_type():
+            clear_page()
+            update_dots(0)
+
+            tk.Frame(content, bg=main_bg, height=20).pack()
+
+            tk.Label(content, text="Welcome to New Launcher",
+                    font=("Segoe UI", 22, "bold"), fg="white",
+                    bg=main_bg).pack()
+            tk.Label(content, text="Choose how you want to sign in",
+                    font=("Segoe UI", 11), fg=text_secondary,
+                    bg=main_bg).pack(pady=(6, 26))
+
+            cards = tk.Frame(content, bg=main_bg)
+            cards.pack()
+
+            options = [
+                ("Microsoft", "#0078D7", "Official Mojang account", show_step_microsoft),
+                ("Ely.by", "#3498DB", "Third-party auth server", show_step_elyby),
+                ("Offline", "#555555", "Play without authentication", show_step_offline),
+            ]
+
+            for name, color, desc, cmd in options:
+                card = tk.Frame(cards, bg=card_bg, cursor="hand2",
+                               highlightbackground=border_col, highlightthickness=1)
+                card.pack(side="left", padx=10, ipadx=0, ipady=0)
+                card.config(width=190, height=150)
+                card.pack_propagate(False)
+
+                strip = tk.Frame(card, bg=color, height=4)
+                strip.pack(fill="x")
+
+                inner_card = tk.Frame(card, bg=card_bg, cursor="hand2")
+                inner_card.pack(fill="both", expand=True, padx=16, pady=14)
+
+                tk.Label(inner_card, text=name, font=("Segoe UI", 13, "bold"),
+                        fg="white", bg=card_bg, cursor="hand2",
+                        anchor="w").pack(anchor="w")
+                tk.Label(inner_card, text=desc, font=("Segoe UI", 9),
+                        fg=text_secondary, bg=card_bg, cursor="hand2",
+                        anchor="w", wraplength=150).pack(anchor="w", pady=(6, 0))
+
+                def on_enter(e, c=card):
+                    c.config(highlightbackground="#808080")
+                def on_leave(e, c=card):
+                    c.config(highlightbackground=border_col)
+                def on_click(e, fn=cmd):
+                    fn()
+
+                for w in [card, inner_card] + inner_card.winfo_children():
+                    w.bind("<Enter>", on_enter)
+                    w.bind("<Leave>", on_leave)
+                    w.bind("<Button-1>", on_click)
+
+        # STEP 1a — Microsoft Login
+        def show_step_microsoft():
+            clear_page()
+            update_dots(0)
+
+            tk.Frame(content, bg=main_bg, height=20).pack()
+            tk.Label(content, text="Microsoft Account",
+                    font=("Segoe UI", 18, "bold"), fg="white",
+                    bg=main_bg).pack()
+
+            status_lbl = tk.Label(content, text="Connecting to Microsoft...",
+                                 font=("Segoe UI", 10), bg=main_bg,
+                                 fg=text_secondary, wraplength=450)
+            status_lbl.pack(pady=(12, 8))
+
+            code_frame = tk.Frame(content, bg=card_bg,
+                                 highlightbackground=border_col, highlightthickness=1)
+            code_frame.pack(pady=10, ipadx=30, ipady=12)
+
+            code_lbl = tk.Label(code_frame, text="--------",
+                               font=("Consolas", 28, "bold"), bg=card_bg,
+                               fg="white")
+            code_lbl.pack()
+
+            url_lbl = tk.Label(content, text="", font=("Segoe UI", 10, "underline"),
+                              bg=main_bg, fg="#3498DB", cursor="hand2")
+            url_lbl.pack(pady=4)
+
+            btn_row = tk.Frame(content, bg=main_bg)
+            btn_row.pack(pady=12)
+
+            copy_btn = make_btn(btn_row, "Copy Code", "#404040",
+                               lambda: None, font_size=9, bold=False)
+            copy_btn.pack(side="left", padx=6)
+            copy_btn.config(state="disabled")
+
+            make_link(btn_row, "← Back to Options", show_step_account_type).pack(side="left", padx=12)
+
+            url_lbl.bind("<Button-1>", lambda e: webbrowser.open(url_lbl.cget("text")) if url_lbl.cget("text") else None)
+
+            inst_lbl = tk.Label(content, text="",
+                               font=("Segoe UI", 9), bg=main_bg,
+                               fg=text_secondary, justify="center")
+            inst_lbl.pack(pady=(8, 0))
+
+            def run_flow():
                 try:
-                    stale_overlay.destroy()
-                except Exception:
-                    pass
-            self._onboarding_overlay = None
+                    client_id = MSA_CLIENT_ID
+                    scope = "XboxLive.signin offline_access"
+                    if not onboarding_view.winfo_exists(): return
+                    status_lbl.config(text="Requesting device code...")
 
-            self.root.update_idletasks()
-            rx, ry = self.root.winfo_rootx(), self.root.winfo_rooty()
-            rw, rh = self.root.winfo_width(), self.root.winfo_height()
+                    r = requests.post("https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode",
+                                      data={"client_id": client_id, "scope": scope})
+                    if r.status_code != 200:
+                        if onboarding_view.winfo_exists():
+                            status_lbl.config(text=f"Error: {r.text}", fg=COLORS['error_red'])
+                        return
 
-            # ── Wizard Window ──
-            wizard = tk.Toplevel(self.root)
-            wizard.withdraw()
-            wizard.title("Welcome")
-            wizard.configure(bg=COLORS['main_bg'])
-            if os.name != "nt":
-                wizard.transient(self.root)
-            wizard.resizable(False, False)
+                    data = r.json()
+                    user_code = data.get("user_code")
+                    verification_uri = data.get("verification_uri")
+                    device_code = data.get("device_code")
+                    interval = data.get("interval", 5)
 
-            wiz_w, wiz_h = 660, 520
-            x = rx + (rw // 2) - (wiz_w // 2)
-            y = ry + (rh // 2) - (wiz_h // 2)
-            wizard.geometry(f"{wiz_w}x{wiz_h}+{x}+{y}")
+                    if onboarding_view.winfo_exists():
+                        code_lbl.config(text=user_code)
+                        url_lbl.config(text=verification_uri)
+                        status_lbl.config(text="Enter the code above at the link below")
+                        inst_lbl.config(text="1. Click the link  2. Paste the code  3. Sign in with Microsoft")
+                        copy_btn.config(state="normal",
+                            command=lambda: (self.root.clipboard_clear(),
+                                             self.root.clipboard_append(user_code),
+                                             copy_btn.config(text="Copied!", fg="#2D8F36"),
+                                             self.root.after(1500, lambda: copy_btn.config(text="Copy Code", fg="white") if copy_btn.winfo_exists() else None)))
 
-            wizard.deiconify()
-            wizard.lift()
-            wizard.focus_force()
-            if os.name != "nt":
-                wizard.grab_set()
-            self._onboarding_wizard = wizard
+                    while onboarding_view.winfo_exists():
+                        time.sleep(interval)
+                        r_poll = requests.post("https://login.microsoftonline.com/consumers/oauth2/v2.0/token",
+                            data={"grant_type": "device_code", "client_id": client_id, "device_code": device_code})
 
-            def cleanup_onboarding_state(*_):
-                if getattr(self, "_onboarding_wizard", None) is wizard:
-                    self._onboarding_wizard = None
-                    self._clear_onboarding_focus_bindings()
-                    self._cancel_onboarding_raise_burst()
-            wizard.bind("<Destroy>", cleanup_onboarding_state, add="+")
-            wizard.bind("<FocusIn>", self._schedule_onboarding_raise, add="+")
+                        if r_poll.status_code == 200:
+                            token_data = r_poll.json()
+                            access_token = token_data["access_token"]
+                            refresh_token = token_data["refresh_token"]
 
-            wizard_root = self._apply_custom_toplevel_chrome(wizard, "Welcome Setup")
-            self._bind_onboarding_focus_tracking()
-            self._schedule_onboarding_raise()
+                            if onboarding_view.winfo_exists(): status_lbl.config(text="Authenticating with Xbox Live...")
+                            xbl = minecraft_launcher_lib.microsoft_account.authenticate_with_xbl(access_token)
 
-            # ── Rounded border effect ──
-            border_frame = tk.Frame(wizard_root, bg="#3A3A3A", padx=1, pady=1)
-            border_frame.pack(fill="both", expand=True)
-            inner = tk.Frame(border_frame, bg=COLORS['main_bg'])
-            inner.pack(fill="both", expand=True)
+                            if onboarding_view.winfo_exists(): status_lbl.config(text="Authenticating with XSTS...")
+                            xsts = minecraft_launcher_lib.microsoft_account.authenticate_with_xsts(xbl["Token"])
 
-            # ── Step indicator (top bar) ──
-            STEPS = ["Account", "Preferences", "Theme", "Ready"]
-            step_bar = tk.Frame(inner, bg="#1A1A1A", height=52)
-            step_bar.pack(fill="x")
-            step_bar.pack_propagate(False)
+                            if onboarding_view.winfo_exists(): status_lbl.config(text="Authenticating with Minecraft...")
+                            mc_auth = minecraft_launcher_lib.microsoft_account.authenticate_with_minecraft(
+                                xbl["DisplayClaims"]["xui"][0]["uhs"], xsts["Token"])
 
-            # Logo/title at left
-            tk.Label(step_bar, text="NEW LAUNCHER", font=("Segoe UI", 9, "bold"),
-                     bg="#1A1A1A", fg="#606060").pack(side="left", padx=18)
+                            if onboarding_view.winfo_exists(): status_lbl.config(text="Fetching profile...")
+                            profile = minecraft_launcher_lib.microsoft_account.get_profile(mc_auth["access_token"])
 
-            # Step dots at right
-            dots_frame = tk.Frame(step_bar, bg="#1A1A1A")
-            dots_frame.pack(side="right", padx=18)
-            dot_labels = []
-            for i, step_name in enumerate(STEPS):
-                dot_f = tk.Frame(dots_frame, bg="#1A1A1A")
-                dot_f.pack(side="left", padx=6)
-                dot = tk.Label(dot_f, text="●", font=("Segoe UI", 8),
-                              bg="#1A1A1A", fg="#404040")
-                dot.pack()
-                lbl = tk.Label(dot_f, text=step_name, font=("Segoe UI", 7),
-                              bg="#1A1A1A", fg="#505050")
-                lbl.pack()
-                dot_labels.append((dot, lbl))
+                            self.wizard_account_data = {
+                                "name": profile["name"], "uuid": profile["id"],
+                                "type": "microsoft", "skin_path": "",
+                                "access_token": mc_auth["access_token"],
+                                "refresh_token": refresh_token
+                            }
+                            if onboarding_view.winfo_exists():
+                                self.root.after(0, save_account_and_continue)
+                            break
 
-            def update_dots(active_idx):
-                for i, (dot, lbl) in enumerate(dot_labels):
-                    if i < active_idx:
-                        dot.config(fg=COLORS.get('success_green', '#2D8F36'))
-                        lbl.config(fg=COLORS.get('success_green', '#2D8F36'))
-                    elif i == active_idx:
-                        dot.config(fg="white")
-                        lbl.config(fg="white")
-                    else:
-                        dot.config(fg="#404040")
-                        lbl.config(fg="#505050")
+                        err = r_poll.json()
+                        err_code = err.get("error")
+                        if err_code == "authorization_pending": continue
+                        elif err_code == "slow_down": interval += 2
+                        elif err_code == "expired_token":
+                            if onboarding_view.winfo_exists():
+                                status_lbl.config(text="Code expired. Please try again.", fg=COLORS['error_red'])
+                            break
+                        else:
+                            if onboarding_view.winfo_exists():
+                                status_lbl.config(text=f"Error: {err.get('error_description', 'Unknown')}", fg=COLORS['error_red'])
+                            break
+                except Exception as e:
+                    logger.error("Wizard Login Error: %s", e)
+                    if onboarding_view.winfo_exists():
+                        status_lbl.config(text=f"Error: {e}", fg=COLORS['error_red'])
 
-            # ── Content area ──
-            content = tk.Frame(inner, bg=COLORS['main_bg'])
-            content.pack(fill="both", expand=True)
+            threading.Thread(target=run_flow, daemon=True).start()
 
-            self.wizard_account_data = {}
+        # STEP 1b — Offline
+        def show_step_offline():
+            clear_page()
+            update_dots(0)
 
-            def clear_page():
-                for w in content.winfo_children():
-                    w.destroy()
+            tk.Frame(content, bg=main_bg, height=30).pack()
+            tk.Label(content, text="Offline Mode",
+                    font=("Segoe UI", 18, "bold"), fg="white",
+                    bg=main_bg).pack()
+            tk.Label(content, text="Enter a username to play without authentication",
+                    font=("Segoe UI", 10), fg=text_secondary,
+                    bg=main_bg).pack(pady=(6, 26))
 
-            def make_btn(parent, text, bg_color, command, width=20, font_size=10, bold=True):
-                """Utility to create consistent styled buttons."""
-                weight = "bold" if bold else ""
-                b = tk.Button(parent, text=text, font=("Segoe UI", font_size, weight),
-                             bg=bg_color, fg="white", activebackground=bg_color,
-                             activeforeground="white", relief="flat", cursor="hand2",
-                             command=command, bd=0)
-                b.config(padx=16, pady=8)
-                return b
+            form = tk.Frame(content, bg=main_bg)
+            form.pack(fill="x", padx=100)
 
-            def make_link(parent, text, command):
-                """Utility to create text-link buttons."""
-                l = tk.Label(parent, text=text, font=("Segoe UI", 9),
-                            bg=COLORS['main_bg'], fg="#808080", cursor="hand2")
-                l.bind("<Button-1>", lambda e: command())
-                l.bind("<Enter>", lambda e: l.config(fg="white"))
-                l.bind("<Leave>", lambda e: l.config(fg="#808080"))
-                return l
+            tk.Label(form, text="USERNAME", font=("Segoe UI", 8, "bold"),
+                    fg=text_secondary, bg=main_bg).pack(anchor="w")
+            name_var = tk.StringVar(value="Player")
+            e = tk.Entry(form, textvariable=name_var, font=("Segoe UI", 12),
+                        bg=input_bg, fg="white", relief="flat",
+                        insertbackground="white", bd=0)
+            e.pack(fill="x", ipady=8, pady=(4, 0))
+            tk.Frame(form, bg=border_col, height=2).pack(fill="x")
+            e.focus_set()
 
-            # ═══════════════════════════════════════════════════
-            # STEP 0 — Account Type Selection
-            # ═══════════════════════════════════════════════════
-            def show_step_account_type():
-                clear_page()
-                update_dots(0)
+            btn_frame = tk.Frame(form, bg=main_bg)
+            btn_frame.pack(fill="x", pady=(24, 0))
 
-                # Spacer
-                tk.Frame(content, bg=COLORS['main_bg'], height=30).pack()
+            def do_next():
+                name = name_var.get().strip() or "Player"
+                self.wizard_account_data = {
+                    "name": name, "type": "offline",
+                    "skin_path": "", "uuid": ""
+                }
+                save_account_and_continue()
 
-                tk.Label(content, text="Welcome to New Launcher",
-                        font=("Segoe UI", 22, "bold"), fg="white",
-                        bg=COLORS['main_bg']).pack()
-                tk.Label(content, text="Choose how you want to sign in",
-                        font=("Segoe UI", 11), fg="#909090",
-                        bg=COLORS['main_bg']).pack(pady=(6, 30))
+            make_btn(btn_frame, "Continue", COLORS.get('success_green', '#2D8F36'),
+                    do_next).pack(fill="x")
+            make_link(btn_frame, "← Back to Options", show_step_account_type).pack(anchor="w", pady=(12, 0))
 
-                # Card container
-                cards = tk.Frame(content, bg=COLORS['main_bg'])
-                cards.pack()
+        # STEP 1c — Ely.by
+        def show_step_elyby():
+            clear_page()
+            update_dots(0)
 
-                options = [
-                    ("Microsoft", "#0078D7", "Official Mojang account", show_step_microsoft),
-                    ("Ely.by", "#3498DB", "Third-party auth server", show_step_elyby),
-                    ("Offline", "#555555", "Play without authentication", show_step_offline),
-                ]
+            tk.Frame(content, bg=main_bg, height=24).pack()
+            tk.Label(content, text="Ely.by Login",
+                    font=("Segoe UI", 18, "bold"), fg="white",
+                    bg=main_bg).pack()
+            tk.Label(content, text="Sign in with your Ely.by credentials",
+                    font=("Segoe UI", 10), fg=text_secondary,
+                    bg=main_bg).pack(pady=(6, 20))
 
-                for name, color, desc, cmd in options:
-                    card = tk.Frame(cards, bg=COLORS['card_bg'], cursor="hand2",
-                                   highlightbackground="#404040", highlightthickness=1)
-                    card.pack(side="left", padx=8, ipadx=0, ipady=0)
-                    card.config(width=175, height=140)
-                    card.pack_propagate(False)
+            form = tk.Frame(content, bg=main_bg)
+            form.pack(fill="x", padx=100)
 
-                    # Color accent strip at top
-                    strip = tk.Frame(card, bg=color, height=4)
-                    strip.pack(fill="x")
+            tk.Label(form, text="USERNAME / EMAIL", font=("Segoe UI", 8, "bold"),
+                    fg=text_secondary, bg=main_bg).pack(anchor="w")
+            ue = tk.Entry(form, font=("Segoe UI", 11), bg=input_bg,
+                         fg="white", relief="flat", insertbackground="white", bd=0)
+            ue.pack(fill="x", ipady=7, pady=(4, 0))
+            tk.Frame(form, bg=border_col, height=2).pack(fill="x")
 
-                    # Inner content
-                    inner_card = tk.Frame(card, bg=COLORS['card_bg'], cursor="hand2")
-                    inner_card.pack(fill="both", expand=True, padx=16, pady=14)
+            tk.Frame(form, bg=main_bg, height=14).pack()
 
-                    tk.Label(inner_card, text=name, font=("Segoe UI", 13, "bold"),
-                            fg="white", bg=COLORS['card_bg'], cursor="hand2",
-                            anchor="w").pack(anchor="w")
-                    tk.Label(inner_card, text=desc, font=("Segoe UI", 8),
-                            fg="#808080", bg=COLORS['card_bg'], cursor="hand2",
-                            anchor="w", wraplength=140).pack(anchor="w", pady=(4, 0))
+            tk.Label(form, text="PASSWORD", font=("Segoe UI", 8, "bold"),
+                    fg=text_secondary, bg=main_bg).pack(anchor="w")
+            pe = tk.Entry(form, font=("Segoe UI", 11), bg=input_bg,
+                         fg="white", relief="flat", show="●",
+                         insertbackground="white", bd=0)
+            pe.pack(fill="x", ipady=7, pady=(4, 0))
+            tk.Frame(form, bg=border_col, height=2).pack(fill="x")
 
-                    # Hover + click
-                    def on_enter(e, c=card):
-                        c.config(highlightbackground="#808080")
-                    def on_leave(e, c=card):
-                        c.config(highlightbackground="#404040")
-                    def on_click(e, fn=cmd):
-                        fn()
+            err_lbl = tk.Label(form, text="", font=("Segoe UI", 9),
+                              bg=main_bg, fg=COLORS['error_red'])
+            err_lbl.pack(anchor="w", pady=(8, 0))
 
-                    for w in [card, inner_card] + inner_card.winfo_children():
-                        w.bind("<Enter>", on_enter)
-                        w.bind("<Leave>", on_leave)
-                        w.bind("<Button-1>", on_click)
-                    card.bind("<Enter>", on_enter)
-                    card.bind("<Leave>", on_leave)
-                    card.bind("<Button-1>", on_click)
+            ue.focus_set()
 
-            # ═══════════════════════════════════════════════════
-            # STEP 1a — Microsoft Login
-            # ═══════════════════════════════════════════════════
-            def show_step_microsoft():
-                clear_page()
-                update_dots(0)
+            btn_frame = tk.Frame(form, bg=main_bg)
+            btn_frame.pack(fill="x", pady=(16, 0))
 
-                tk.Frame(content, bg=COLORS['main_bg'], height=20).pack()
-                tk.Label(content, text="Microsoft Account",
-                        font=("Segoe UI", 18, "bold"), fg="white",
-                        bg=COLORS['main_bg']).pack()
-
-                status_lbl = tk.Label(content, text="Connecting to Microsoft...",
-                                     font=("Segoe UI", 10), bg=COLORS['main_bg'],
-                                     fg="#909090", wraplength=450)
-                status_lbl.pack(pady=(12, 8))
-
-                # Code display box
-                code_frame = tk.Frame(content, bg=COLORS['card_bg'],
-                                     highlightbackground="#404040", highlightthickness=1)
-                code_frame.pack(pady=10, ipadx=30, ipady=12)
-
-                code_lbl = tk.Label(code_frame, text="--------",
-                                   font=("Consolas", 28, "bold"), bg=COLORS['card_bg'],
-                                   fg="white")
-                code_lbl.pack()
-
-                url_lbl = tk.Label(content, text="", font=("Segoe UI", 10, "underline"),
-                                  bg=COLORS['main_bg'], fg="#3498DB", cursor="hand2")
-                url_lbl.pack(pady=4)
-
-                btn_row = tk.Frame(content, bg=COLORS['main_bg'])
-                btn_row.pack(pady=12)
-
-                copy_btn = make_btn(btn_row, "Copy Code", "#404040",
-                                   lambda: None, font_size=9, bold=False)
-                copy_btn.pack(side="left", padx=6)
-                copy_btn.config(state="disabled")
-
-                make_link(btn_row, "Cancel", show_step_account_type).pack(side="left", padx=12)
-
-                url_lbl.bind("<Button-1>", lambda e: webbrowser.open(url_lbl.cget("text")) if url_lbl.cget("text") else None)
-
-                # Instructions
-                inst_lbl = tk.Label(content, text="",
-                                   font=("Segoe UI", 9), bg=COLORS['main_bg'],
-                                   fg="#707070", justify="center")
-                inst_lbl.pack(pady=(8, 0))
-
-                def run_flow():
-                    try:
-                        client_id = MSA_CLIENT_ID
-                        scope = "XboxLive.signin offline_access"
-                        if not wizard.winfo_exists(): return
-                        status_lbl.config(text="Requesting device code...")
-
-                        r = requests.post("https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode",
-                                          data={"client_id": client_id, "scope": scope})
-                        if r.status_code != 200:
-                            if wizard.winfo_exists():
-                                status_lbl.config(text=f"Error: {r.text}", fg=COLORS['error_red'])
-                            return
-
-                        data = r.json()
-                        user_code = data.get("user_code")
-                        verification_uri = data.get("verification_uri")
-                        device_code = data.get("device_code")
-                        interval = data.get("interval", 5)
-
-                        if wizard.winfo_exists():
-                            code_lbl.config(text=user_code)
-                            url_lbl.config(text=verification_uri)
-                            status_lbl.config(text="Enter the code above at the link below")
-                            inst_lbl.config(text="1. Click the link  2. Paste the code  3. Sign in with Microsoft")
-                            copy_btn.config(state="normal",
-                                command=lambda: (self.root.clipboard_clear(),
-                                                 self.root.clipboard_append(user_code),
-                                                 copy_btn.config(text="Copied!", fg="#2D8F36"),
-                                                 self.root.after(1500, lambda: copy_btn.config(text="Copy Code", fg="white") if copy_btn.winfo_exists() else None)))
-
-                        while wizard.winfo_exists():
-                            time.sleep(interval)
-                            r_poll = requests.post("https://login.microsoftonline.com/consumers/oauth2/v2.0/token",
-                                data={"grant_type": "device_code", "client_id": client_id, "device_code": device_code})
-
-                            if r_poll.status_code == 200:
-                                token_data = r_poll.json()
-                                access_token = token_data["access_token"]
-                                refresh_token = token_data["refresh_token"]
-
-                                if wizard.winfo_exists(): status_lbl.config(text="Authenticating with Xbox Live...")
-                                xbl = minecraft_launcher_lib.microsoft_account.authenticate_with_xbl(access_token)
-
-                                if wizard.winfo_exists(): status_lbl.config(text="Authenticating with XSTS...")
-                                xsts = minecraft_launcher_lib.microsoft_account.authenticate_with_xsts(xbl["Token"])
-
-                                if wizard.winfo_exists(): status_lbl.config(text="Authenticating with Minecraft...")
-                                mc_auth = minecraft_launcher_lib.microsoft_account.authenticate_with_minecraft(
-                                    xbl["DisplayClaims"]["xui"][0]["uhs"], xsts["Token"])
-
-                                if wizard.winfo_exists(): status_lbl.config(text="Fetching profile...")
-                                profile = minecraft_launcher_lib.microsoft_account.get_profile(mc_auth["access_token"])
-
-                                self.wizard_account_data = {
-                                    "name": profile["name"], "uuid": profile["id"],
-                                    "type": "microsoft", "skin_path": "",
-                                    "access_token": mc_auth["access_token"],
-                                    "refresh_token": refresh_token
-                                }
-                                if wizard.winfo_exists():
-                                    wizard.after(0, save_account_and_continue)
-                                break
-
-                            err = r_poll.json()
-                            err_code = err.get("error")
-                            if err_code == "authorization_pending": continue
-                            elif err_code == "slow_down": interval += 2
-                            elif err_code == "expired_token":
-                                if wizard.winfo_exists():
-                                    status_lbl.config(text="Code expired. Please try again.", fg=COLORS['error_red'])
-                                break
-                            else:
-                                if wizard.winfo_exists():
-                                    status_lbl.config(text=f"Error: {err.get('error_description', 'Unknown')}", fg=COLORS['error_red'])
-                                break
-                    except Exception as e:
-                        print(f"Wizard Login Error: {e}")
-                        if wizard.winfo_exists():
-                            status_lbl.config(text=f"Error: {e}", fg=COLORS['error_red'])
-
-                threading.Thread(target=run_flow, daemon=True).start()
-
-            # ═══════════════════════════════════════════════════
-            # STEP 1b — Offline
-            # ═══════════════════════════════════════════════════
-            def show_step_offline():
-                clear_page()
-                update_dots(0)
-
-                tk.Frame(content, bg=COLORS['main_bg'], height=40).pack()
-                tk.Label(content, text="Offline Mode",
-                        font=("Segoe UI", 18, "bold"), fg="white",
-                        bg=COLORS['main_bg']).pack()
-                tk.Label(content, text="Enter a username to play without authentication",
-                        font=("Segoe UI", 10), fg="#808080",
-                        bg=COLORS['main_bg']).pack(pady=(6, 30))
-
-                form = tk.Frame(content, bg=COLORS['main_bg'])
-                form.pack(fill="x", padx=180)
-
-                tk.Label(form, text="USERNAME", font=("Segoe UI", 8, "bold"),
-                        fg="#707070", bg=COLORS['main_bg']).pack(anchor="w")
-                name_var = tk.StringVar(value="Player")
-                e = tk.Entry(form, textvariable=name_var, font=("Segoe UI", 12),
-                            bg=COLORS['input_bg'], fg="white", relief="flat",
-                            insertbackground="white", bd=0)
-                e.pack(fill="x", ipady=8, pady=(4, 0))
-                # Underline accent
-                tk.Frame(form, bg="#555555", height=2).pack(fill="x")
-                e.focus_set()
-
-                btn_frame = tk.Frame(form, bg=COLORS['main_bg'])
-                btn_frame.pack(fill="x", pady=(24, 0))
-
-                def do_next():
-                    name = name_var.get().strip() or "Player"
+            def do_auth():
+                user_input = ue.get().strip()
+                pw = pe.get().strip()
+                if not user_input or not pw:
+                    err_lbl.config(text="Please fill in both fields")
+                    return
+                err_lbl.config(text="")
+                res = ElyByAuth.authenticate(user_input, pw)
+                if "error" in res:
+                    err_lbl.config(text=res['error'])
+                else:
+                    prof = cast(dict, res.get("selectedProfile", {}))
+                    name = prof.get("name", user_input)
                     self.wizard_account_data = {
-                        "name": name, "type": "offline",
-                        "skin_path": "", "uuid": ""
+                        "name": name, "type": "ely.by",
+                        "uuid": prof.get("id", ""),
+                        "skin_path": ""
                     }
                     save_account_and_continue()
 
-                make_btn(btn_frame, "Continue", COLORS.get('success_green', '#2D8F36'),
-                        do_next).pack(fill="x")
-                make_link(btn_frame, "← Back", show_step_account_type).pack(anchor="w", pady=(12, 0))
+            make_btn(btn_frame, "Sign In", "#3498DB", do_auth).pack(fill="x")
+            make_link(btn_frame, "← Back to Options", show_step_account_type).pack(anchor="w", pady=(12, 0))
 
-            # ═══════════════════════════════════════════════════
-            # STEP 1c — Ely.by
-            # ═══════════════════════════════════════════════════
-            def show_step_elyby():
-                clear_page()
-                update_dots(0)
+        # Save & transition
+        def save_account_and_continue():
+            is_default = False
+            if len(self.profiles) == 1:
+                p = self.profiles[0]
+                if p.get("name") == "Steve" and p.get("type") == "offline" and not p.get("uuid"):
+                    is_default = True
 
-                tk.Frame(content, bg=COLORS['main_bg'], height=30).pack()
-                tk.Label(content, text="Ely.by Login",
-                        font=("Segoe UI", 18, "bold"), fg="white",
-                        bg=COLORS['main_bg']).pack()
-                tk.Label(content, text="Sign in with your Ely.by credentials",
-                        font=("Segoe UI", 10), fg="#808080",
-                        bg=COLORS['main_bg']).pack(pady=(6, 24))
+            if not self.profiles or is_default:
+                self.profiles = [self.wizard_account_data]
+                self.current_profile_index = 0
+            else:
+                self.profiles.append(self.wizard_account_data)
+                self.current_profile_index = len(self.profiles) - 1
 
-                form = tk.Frame(content, bg=COLORS['main_bg'])
-                form.pack(fill="x", padx=180)
+            self.save_config(sync_ui=False)
+            self.update_active_profile()
+            show_step_preferences()
 
-                tk.Label(form, text="USERNAME / EMAIL", font=("Segoe UI", 8, "bold"),
-                        fg="#707070", bg=COLORS['main_bg']).pack(anchor="w")
-                ue = tk.Entry(form, font=("Segoe UI", 11), bg=COLORS['input_bg'],
-                             fg="white", relief="flat", insertbackground="white", bd=0)
-                ue.pack(fill="x", ipady=7, pady=(4, 0))
-                tk.Frame(form, bg="#555555", height=2).pack(fill="x")
+        # STEP 2 — Preferences
+        def show_step_preferences():
+            clear_page()
+            update_dots(1)
 
-                tk.Frame(form, bg=COLORS['main_bg'], height=14).pack()
+            tk.Frame(content, bg=main_bg, height=24).pack()
+            tk.Label(content, text="Game Preferences",
+                    font=("Segoe UI", 18, "bold"), fg="white",
+                    bg=main_bg).pack()
+            tk.Label(content, text="Configure memory and launcher behavior",
+                    font=("Segoe UI", 10), fg=text_secondary,
+                    bg=main_bg).pack(pady=(6, 20))
 
-                tk.Label(form, text="PASSWORD", font=("Segoe UI", 8, "bold"),
-                        fg="#707070", bg=COLORS['main_bg']).pack(anchor="w")
-                pe = tk.Entry(form, font=("Segoe UI", 11), bg=COLORS['input_bg'],
-                             fg="white", relief="flat", show="●",
-                             insertbackground="white", bd=0)
-                pe.pack(fill="x", ipady=7, pady=(4, 0))
-                tk.Frame(form, bg="#555555", height=2).pack(fill="x")
+            form = tk.Frame(content, bg=main_bg)
+            form.pack(fill="x", padx=60)
 
-                err_lbl = tk.Label(form, text="", font=("Segoe UI", 9),
-                                  bg=COLORS['main_bg'], fg=COLORS['error_red'])
-                err_lbl.pack(anchor="w", pady=(8, 0))
+            # RAM section
+            ram_card = tk.Frame(form, bg=card_bg, padx=18, pady=14,
+                                highlightbackground=border_col, highlightthickness=1)
+            ram_card.pack(fill="x", pady=(0, 16))
 
-                ue.focus_set()
+            ram_header = tk.Frame(ram_card, bg=card_bg)
+            ram_header.pack(fill="x")
+            tk.Label(ram_header, text="Memory Allocation",
+                    font=("Segoe UI", 11, "bold"), fg="white",
+                    bg=card_bg).pack(side="left")
+            ram_val_lbl = tk.Label(ram_header, text=f"{self.ram_allocation} MB",
+                                  font=("Segoe UI", 10), fg=COLORS.get('success_green', '#2D8F36'),
+                                  bg=card_bg)
+            ram_val_lbl.pack(side="right")
 
-                btn_frame = tk.Frame(form, bg=COLORS['main_bg'])
-                btn_frame.pack(fill="x", pady=(16, 0))
+            ram_v = tk.IntVar(value=self.ram_allocation)
 
-                def do_auth():
-                    user_input = ue.get().strip()
-                    pw = pe.get().strip()
-                    if not user_input or not pw:
-                        err_lbl.config(text="Please fill in both fields")
-                        return
-                    err_lbl.config(text="")
-                    res = ElyByAuth.authenticate(user_input, pw)
-                    if "error" in res:
-                        err_lbl.config(text=res['error'])
-                    else:
-                        prof = cast(dict, res.get("selectedProfile", {}))
-                        name = prof.get("name", user_input)
-                        self.wizard_account_data = {
-                            "name": name, "type": "ely.by",
-                            "uuid": prof.get("id", ""),
-                            "skin_path": ""
-                        }
-                        save_account_and_continue()
+            def on_ram_change(val):
+                ram_val_lbl.config(text=f"{int(float(val))} MB")
 
-                make_btn(btn_frame, "Sign In", "#3498DB", do_auth).pack(fill="x")
-                make_link(btn_frame, "← Back", show_step_account_type).pack(anchor="w", pady=(12, 0))
+            ram_scale = tk.Scale(ram_card, from_=1024, to=16384, orient="horizontal",
+                                resolution=512, variable=ram_v, showvalue=False,
+                                bg=card_bg, fg="white",
+                                troughcolor=input_bg, highlightthickness=0,
+                                activebackground=COLORS.get('success_green', '#2D8F36'),
+                                command=on_ram_change, length=440)
+            ram_scale.pack(fill="x", pady=(8, 0))
 
-            # ═══════════════════════════════════════════════════
-            # Save & transition
-            # ═══════════════════════════════════════════════════
-            def save_account_and_continue():
-                is_default = False
-                if len(self.profiles) == 1:
-                    p = self.profiles[0]
-                    if p.get("name") == "Steve" and p.get("type") == "offline" and not p.get("uuid"):
-                        is_default = True
+            # Toggles
+            toggle_card = tk.Frame(form, bg=card_bg, padx=18, pady=14,
+                                   highlightbackground=border_col, highlightthickness=1)
+            toggle_card.pack(fill="x")
 
-                if not self.profiles or is_default:
-                    self.profiles = [self.wizard_account_data]
-                    self.current_profile_index = 0
-                else:
-                    self.profiles.append(self.wizard_account_data)
-                    self.current_profile_index = len(self.profiles) - 1
+            c_launch = tk.BooleanVar(value=getattr(self, 'close_launcher', True))
+            c_tray = tk.BooleanVar(value=getattr(self, 'minimize_to_tray', False))
 
+            for txt, var in [("Close launcher when game starts", c_launch),
+                             ("Minimize to system tray on close", c_tray)]:
+                row = tk.Frame(toggle_card, bg=card_bg)
+                row.pack(fill="x", pady=4)
+                tk.Checkbutton(row, text=txt, variable=var, font=("Segoe UI", 10),
+                              bg=card_bg, fg="white",
+                              selectcolor=input_bg,
+                              activebackground=card_bg,
+                              activeforeground="white").pack(anchor="w")
+
+            btn_frame = tk.Frame(form, bg=main_bg)
+            btn_frame.pack(fill="x", pady=(20, 0))
+
+            def do_next():
+                self.ram_allocation = ram_v.get()
+                self.close_launcher = c_launch.get()
+                self.minimize_to_tray = c_tray.get()
                 self.save_config(sync_ui=False)
-                self.update_active_profile()
-                show_step_preferences()
+                show_step_theme()
 
-            # ═══════════════════════════════════════════════════
-            # STEP 2 — Preferences
-            # ═══════════════════════════════════════════════════
-            def show_step_preferences():
-                clear_page()
-                update_dots(1)
+            make_btn(btn_frame, "Continue", COLORS.get('success_green', '#2D8F36'),
+                    do_next).pack(fill="x")
+            make_link(btn_frame, "← Back to Account", show_step_account_type).pack(anchor="w", pady=(10, 0))
 
-                tk.Frame(content, bg=COLORS['main_bg'], height=30).pack()
-                tk.Label(content, text="Game Preferences",
-                        font=("Segoe UI", 18, "bold"), fg="white",
-                        bg=COLORS['main_bg']).pack()
-                tk.Label(content, text="Configure memory and launcher behavior",
-                        font=("Segoe UI", 10), fg="#808080",
-                        bg=COLORS['main_bg']).pack(pady=(6, 24))
+        # STEP 3 — Theme / Accent Color
+        def show_step_theme():
+            clear_page()
+            update_dots(2)
 
-                form = tk.Frame(content, bg=COLORS['main_bg'])
-                form.pack(fill="x", padx=100)
+            tk.Frame(content, bg=main_bg, height=24).pack()
+            tk.Label(content, text="Pick Your Color",
+                    font=("Segoe UI", 18, "bold"), fg="white",
+                    bg=main_bg).pack()
+            tk.Label(content, text="Choose an accent color for the launcher",
+                    font=("Segoe UI", 10), fg=text_secondary,
+                    bg=main_bg).pack(pady=(6, 24))
 
-                # RAM section
-                ram_card = tk.Frame(form, bg=COLORS['card_bg'], padx=18, pady=14)
-                ram_card.pack(fill="x", pady=(0, 16))
+            colors_list = [
+                ("Green",  "#2D8F36"),
+                ("Blue",   "#3498DB"),
+                ("Orange", "#E67E22"),
+                ("Purple", "#9B59B6"),
+                ("Red",    "#E74C3C"),
+            ]
 
-                ram_header = tk.Frame(ram_card, bg=COLORS['card_bg'])
-                ram_header.pack(fill="x")
-                tk.Label(ram_header, text="Memory Allocation",
-                        font=("Segoe UI", 11, "bold"), fg="white",
-                        bg=COLORS['card_bg']).pack(side="left")
-                ram_val_lbl = tk.Label(ram_header, text=f"{self.ram_allocation} MB",
-                                      font=("Segoe UI", 10), fg=COLORS.get('success_green', '#2D8F36'),
-                                      bg=COLORS['card_bg'])
-                ram_val_lbl.pack(side="right")
+            palette = tk.Frame(content, bg=main_bg)
+            palette.pack()
 
-                ram_v = tk.IntVar(value=self.ram_allocation)
+            selected = [getattr(self, "accent_color_name", "Green")]
+            swatch_widgets = []
 
-                def on_ram_change(val):
-                    ram_val_lbl.config(text=f"{int(float(val))} MB")
+            finish_btn = None
 
-                ram_scale = tk.Scale(ram_card, from_=1024, to=16384, orient="horizontal",
-                                    resolution=512, variable=ram_v, showvalue=False,
-                                    bg=COLORS['card_bg'], fg="white",
-                                    troughcolor=COLORS['input_bg'], highlightthickness=0,
-                                    activebackground=COLORS.get('success_green', '#2D8F36'),
-                                    command=on_ram_change, length=400)
-                ram_scale.pack(fill="x", pady=(8, 0))
+            def select_color(name, color):
+                selected[0] = name
+                self.apply_accent_color(name)
+                self.save_config(sync_ui=False)
+                for sn, sw, sl in swatch_widgets:
+                    if sn == name:
+                        sw.config(highlightbackground="white", highlightthickness=2)
+                        sl.config(fg="white")
+                    else:
+                        sw.config(highlightbackground=border_col, highlightthickness=1)
+                        sl.config(fg=text_secondary)
+                if finish_btn:
+                    finish_btn.config(bg=color, activebackground=color)
 
-                # Toggles
-                toggle_card = tk.Frame(form, bg=COLORS['card_bg'], padx=18, pady=14)
-                toggle_card.pack(fill="x")
+            for name, color in colors_list:
+                col = tk.Frame(palette, bg=main_bg)
+                col.pack(side="left", padx=12)
 
-                c_launch = tk.BooleanVar(value=True)
-                c_tray = tk.BooleanVar(value=False)
+                is_active = (name == selected[0])
+                swatch = tk.Frame(col, bg=color, width=54, height=54, cursor="hand2",
+                                 highlightbackground="white" if is_active else border_col,
+                                 highlightthickness=2 if is_active else 1)
+                swatch.pack()
+                swatch.pack_propagate(False)
 
-                for txt, var in [("Close launcher when game starts", c_launch),
-                                 ("Minimize to system tray on close", c_tray)]:
-                    row = tk.Frame(toggle_card, bg=COLORS['card_bg'])
-                    row.pack(fill="x", pady=4)
-                    tk.Checkbutton(row, text=txt, variable=var, font=("Segoe UI", 10),
-                                  bg=COLORS['card_bg'], fg="white",
-                                  selectcolor=COLORS['input_bg'],
-                                  activebackground=COLORS['card_bg'],
-                                  activeforeground="white").pack(anchor="w")
+                lbl = tk.Label(col, text=name, font=("Segoe UI", 8),
+                              bg=main_bg,
+                              fg="white" if is_active else text_secondary)
+                lbl.pack(pady=(4, 0))
 
-                btn_frame = tk.Frame(form, bg=COLORS['main_bg'])
-                btn_frame.pack(fill="x", pady=(20, 0))
+                swatch_widgets.append((name, swatch, lbl))
 
-                def do_next():
-                    self.ram_allocation = ram_v.get()
-                    self.close_launcher = c_launch.get()
-                    self.minimize_to_tray = c_tray.get()
-                    self.save_config(sync_ui=False)
-                    show_step_theme()
+                swatch.bind("<Button-1>", lambda e, n=name, c=color: select_color(n, c))
+                for child in swatch.winfo_children():
+                    child.bind("<Button-1>", lambda e, n=name, c=color: select_color(n, c))
 
-                make_btn(btn_frame, "Continue", COLORS.get('success_green', '#2D8F36'),
-                        do_next).pack(fill="x")
+            current_accent = dict(colors_list).get(selected[0], "#2D8F36")
+            finish_btn = make_btn(content, "Finish Setup", current_accent, show_step_done)
+            finish_btn.pack(pady=(36, 0), ipadx=24)
+            make_link(content, "← Back to Preferences", show_step_preferences).pack(pady=(12, 0))
 
-            # ═══════════════════════════════════════════════════
-            # STEP 3 — Theme / Accent Color
-            # ═══════════════════════════════════════════════════
-            def show_step_theme():
-                clear_page()
-                update_dots(2)
+        # STEP 4 — Done
+        def show_step_done():
+            clear_page()
+            update_dots(3)
 
-                tk.Frame(content, bg=COLORS['main_bg'], height=40).pack()
-                tk.Label(content, text="Pick Your Color",
-                        font=("Segoe UI", 18, "bold"), fg="white",
-                        bg=COLORS['main_bg']).pack()
-                tk.Label(content, text="Choose an accent color for the launcher",
-                        font=("Segoe UI", 10), fg="#808080",
-                        bg=COLORS['main_bg']).pack(pady=(6, 30))
+            tk.Frame(content, bg=main_bg, height=36).pack()
 
-                colors_list = [
-                    ("Green",  "#2D8F36"),
-                    ("Blue",   "#3498DB"),
-                    ("Orange", "#E67E22"),
-                    ("Purple", "#9B59B6"),
-                    ("Red",    "#E74C3C"),
-                ]
+            tk.Label(content, text="✓", font=("Segoe UI", 40),
+                    fg=COLORS.get('success_green', '#2D8F36'),
+                    bg=main_bg).pack()
+            tk.Label(content, text="You're All Set!",
+                    font=("Segoe UI", 22, "bold"), fg="white",
+                    bg=main_bg).pack(pady=(8, 6))
+            tk.Label(content, text="Create an installation to start playing",
+                    font=("Segoe UI", 11), fg=text_secondary,
+                    bg=main_bg).pack()
 
-                palette = tk.Frame(content, bg=COLORS['main_bg'])
-                palette.pack()
+            make_btn(content, "Get Started", COLORS.get('success_green', '#2D8F36'),
+                    lambda: self.close_onboarding_wizard(start_tour=True)).pack(pady=(32, 0), ipadx=24)
 
-                selected = [getattr(self, "accent_color_name", "Green")]
-                swatch_widgets = []
+        show_step_account_type()
 
-                def select_color(name, color):
-                    selected[0] = name
-                    self.apply_accent_color(name)
-                    self.save_config(sync_ui=False)
-                    # Update swatch highlights
-                    for sn, sw, sl in swatch_widgets:
-                        if sn == name:
-                            sw.config(highlightbackground="white", highlightthickness=2)
-                            sl.config(fg="white")
-                        else:
-                            sw.config(highlightbackground="#303030", highlightthickness=1)
-                            sl.config(fg="#707070")
-                    # Update finish button
-                    if finish_btn:
-                        finish_btn.config(bg=color, activebackground=color)
+    def close_onboarding_wizard(self, start_tour=False):
+        """Cleanly tears down the in-app onboarding view and restores main launcher views."""
+        self._in_onboarding = False
+        self.first_run = False
+        self.save_config()
 
-                finish_btn = None
-
-                for name, color in colors_list:
-                    col = tk.Frame(palette, bg=COLORS['main_bg'])
-                    col.pack(side="left", padx=12)
-
-                    is_active = (name == selected[0])
-                    swatch = tk.Frame(col, bg=color, width=50, height=50, cursor="hand2",
-                                     highlightbackground="white" if is_active else "#303030",
-                                     highlightthickness=2 if is_active else 1)
-                    swatch.pack()
-                    swatch.pack_propagate(False)
-
-                    lbl = tk.Label(col, text=name, font=("Segoe UI", 8),
-                                  bg=COLORS['main_bg'],
-                                  fg="white" if is_active else "#707070")
-                    lbl.pack(pady=(4, 0))
-
-                    swatch_widgets.append((name, swatch, lbl))
-
-                    # Click handlers
-                    swatch.bind("<Button-1>", lambda e, n=name, c=color: select_color(n, c))
-                    for child in swatch.winfo_children():
-                        child.bind("<Button-1>", lambda e, n=name, c=color: select_color(n, c))
-
-                current_accent = dict(colors_list).get(selected[0], "#2D8F36")
-                finish_btn = make_btn(content, "Finish Setup", current_accent, show_step_done)
-                finish_btn.pack(pady=(40, 0), ipadx=24)
-
-            # ═══════════════════════════════════════════════════
-            # STEP 4 — Done
-            # ═══════════════════════════════════════════════════
-            def show_step_done():
-                clear_page()
-                update_dots(3)
-
-                tk.Frame(content, bg=COLORS['main_bg'], height=50).pack()
-
-                tk.Label(content, text="✓", font=("Segoe UI", 36),
-                        fg=COLORS.get('success_green', '#2D8F36'),
-                        bg=COLORS['main_bg']).pack()
-                tk.Label(content, text="You're All Set!",
-                        font=("Segoe UI", 20, "bold"), fg="white",
-                        bg=COLORS['main_bg']).pack(pady=(8, 6))
-                tk.Label(content, text="Create an installation to start playing",
-                        font=("Segoe UI", 11), fg="#808080",
-                        bg=COLORS['main_bg']).pack()
-
-                def finish():
-                    self.first_run = False
-                    self.save_config()
-                    if wizard.winfo_exists():
-                        wizard.destroy()
-                    self._focus_main_window()
-                    self.show_tab("Installations")
-                    self.root.after(80, self.update_active_profile)
-                    self.root.after(180, self.refresh_skin)
-                    # Start post-onboarding guidance cards after the wizard closes.
-                    self.root.after(260, self.start_installations_tour)
-                    self.root.after(420, self._focus_main_window)
-
-                make_btn(content, "Get Started", COLORS.get('success_green', '#2D8F36'),
-                        finish).pack(pady=(36, 0), ipadx=24)
-
-            # ── Start ──
-            show_step_account_type()
-
-        except Exception as e:
-            logging.exception("Error showing wizard")
-            print(f"Error showing wizard: {e}")
-            traceback.print_exc()
+        if hasattr(self, '_onboarding_view') and self._onboarding_view and self._onboarding_view.winfo_exists():
             try:
-                if 'wizard' in locals() and wizard.winfo_exists(): # type: ignore
-                    wizard.destroy() # type: ignore
-                self._onboarding_wizard = None
-                self._onboarding_overlay = None
-                self._clear_onboarding_focus_bindings()
-                self._cancel_onboarding_raise_burst()
-            except: pass
+                self._onboarding_view.destroy()
+            except Exception:
+                pass
+            self._onboarding_view = None
+
+        if hasattr(self, 'sidebar') and self.sidebar and self.sidebar.winfo_exists():
+            self.sidebar.pack(side="left", fill="y")
+        if hasattr(self, 'content_area') and self.content_area and self.content_area.winfo_exists():
+            self.content_area.pack(side="right", fill="both", expand=True)
+
+        self.show_tab("Installations")
+        self.root.after(80, self.update_active_profile)
+        self.root.after(180, self.refresh_skin)
+        if start_tour:
+            self.root.after(260, self.start_installations_tour)
+        self.root.after(350, self._focus_main_window)
 
     def start_installations_tour(self):
-        """Step 2: Installations"""
+        """Tour Step 1: Installations"""
         self.show_tab("Installations")
         self.root.update()
         self._focus_main_window()
 
-        target = None
-        try:
-            if hasattr(self, 'new_inst_btn') and self.new_inst_btn.winfo_exists():
-                target = self.new_inst_btn
-        except Exception:
-            target = None
-
-        if not target and "Installations" in self.tabs:
-            target = self.tabs["Installations"]
-
-        if target:
-            self.show_coach_mark(
-                target,
-                "Create and manage game installations here.\nUse New installation to add one quickly.",
-                next_action=self.start_locker_tour
-            )
-        else:
-            self.start_locker_tour()
+        target = getattr(self, 'new_inst_btn', None)
+        self.show_coach_mark(
+            target,
+            "Create and manage game installations here.\nUse 'New installation' to add versions, mods, and loaders.",
+            next_action=self.start_locker_tour,
+            step_info="TOUR 1 OF 3 • INSTALLATIONS",
+        )
 
     def start_locker_tour(self):
-        """Step 3: Locker (Skins/Wallpapers)"""
-        # Switch to Locker Tab
+        """Tour Step 2: Locker (Skins/Wallpapers)"""
         self.show_tab("Locker")
         self.root.update()
         
-        # Explain Locker
         target = None
         if hasattr(self, 'locker_btns') and "Skins" in self.locker_btns:
-             target = self.locker_btns["Skins"]
+            target = self.locker_btns["Skins"]
         elif "Locker" in self.tabs:
-             target = self.tabs["Locker"]
+            target = self.tabs["Locker"]
 
-        if target:
-             self.show_coach_mark(target, "Customize your look here!\nSwitch between Skins and Wallpapers.",
-                                  next_action=self.start_settings_tour)
-        else:
-             self.start_settings_tour()
-
-
+        self.show_coach_mark(
+            target,
+            "Customize your look here!\nSwitch between Skins and Wallpapers.",
+            next_action=self.start_settings_tour,
+            step_info="TOUR 2 OF 3 • LOCKER",
+        )
 
     def start_settings_tour(self):
-        """Step 4: Settings"""
+        """Tour Step 3: Settings"""
         self.show_tab("Settings")
         self.root.update()
         
-        # Show a generic center message or find a widget
         target = None
         if "Settings" in self.tabs:
-             # Try children first
-             try:
-                 children = self.tabs["Settings"].winfo_children()
-                 if children: target = children[0]
-             except: pass
-             # Fallback to main tab
-             if not target: target = self.tabs["Settings"]
+            try:
+                children = self.tabs["Settings"].winfo_children()
+                if children:
+                    target = children[0]
+            except Exception:
+                pass
+            if not target:
+                target = self.tabs["Settings"]
         
-        if target:
-            self.show_coach_mark(target, "Finally, configure advanced options\nand account management here.",
-                                 next_action=lambda: custom_showinfo("All Set!", "You are ready to play!\nHave fun with the New Launcher."))
-        else:
-             custom_showinfo("All Set!", "You are ready to play!\nHave fun with the New Launcher.")
+        self.show_coach_mark(
+            target,
+            "Finally, configure advanced options, memory,\nand account management here.",
+            next_action=self.finish_tour_celebration,
+            step_info="TOUR 3 OF 3 • SETTINGS",
+        )
 
-    def show_coach_mark(self, widget, text, next_action=None):
-        try:
-            # Get coords
-            x = widget.winfo_rootx()
-            y = widget.winfo_rooty()
-            w = widget.winfo_width()
-            h = widget.winfo_height()
-            
-            # Create tooltip window
-            tip = tk.Toplevel(self.root)
-            tip.overrideredirect(True)
-            tip.attributes("-topmost", True)
-            tip.transient(self.root)
-            
-            # Calc position (below-left aligned) with screen bounds checking
-            tip.update_idletasks()
-            tip_w = 350  # Approximate tooltip width
-            tip_h = 120  # Approximate tooltip height
-            
-            screen_w = self.root.winfo_screenwidth()
-            screen_h = self.root.winfo_screenheight()
-            
-            tip_x = x - 150 + w 
-            tip_y = y + h + 10
-            
-            # Prevent tooltip from going off-screen
-            if tip_x + tip_w > screen_w:
-                tip_x = screen_w - tip_w - 10
-            if tip_x < 0:
-                tip_x = 10
-            if tip_y + tip_h > screen_h:
-                # Position above instead of below
-                tip_y = y - tip_h - 10
-            if tip_y < 0:
-                tip_y = 10
-                
-            tip.geometry(f"+{tip_x}+{tip_y}")
-            tip.deiconify()
-            tip.lift()
-            
-            # Style
-            bg = "#0078D7" # Blue accent
-            fg = "white"
-            border_color = "#1E90FF"
-            
-            # Outer border frame for subtle outline
-            outer_frame = tk.Frame(tip, bg=border_color, padx=1, pady=1)
-            outer_frame.pack()
-            
-            frame = tk.Frame(outer_frame, bg=bg, padx=2, pady=2)
-            frame.pack()
-            
-            # Content
-            lbl = tk.Label(frame, text=text, font=("Segoe UI", 10, "bold"), bg=bg, fg=fg, padx=10, pady=8, justify="left")
-            lbl.pack()
-            
-            # Wrapper for controls to sit at bottom
-            controls = tk.Frame(frame, bg=bg)
-            controls.pack(fill="x", padx=10, pady=(4, 8))
+    def finish_tour_celebration(self):
+        """In-app celebration badge at the end of the tour without modal popups."""
+        self._dismiss_coach_mark()
+        if not hasattr(self, 'content_area') or not self.content_area.winfo_exists():
+            return
 
-            # Skip Link (Hyperlink style)
+        card = tk.Frame(
+            self.content_area,
+            bg=COLORS.get('card_bg', '#1e1e24'),
+            highlightthickness=1,
+            highlightbackground=COLORS.get('accent_color', '#0078D7'),
+            padx=20,
+            pady=16,
+        )
+        card.place(relx=0.5, rely=0.88, anchor="s")
+
+        header = tk.Frame(card, bg=COLORS.get('card_bg', '#1e1e24'))
+        header.pack(fill="x")
+        tk.Label(
+            header,
+            text="🎉 ALL SET!",
+            font=("Segoe UI", 10, "bold"),
+            bg=COLORS.get('card_bg', '#1e1e24'),
+            fg=COLORS.get('accent_color', '#0078D7'),
+        ).pack(side="left")
+
+        tk.Label(
+            card,
+            text="You're ready to play! Have fun with New Launcher.",
+            font=("Segoe UI", 11, "bold"),
+            bg=COLORS.get('card_bg', '#1e1e24'),
+            fg=COLORS.get('text_main', '#ffffff'),
+        ).pack(anchor="w", pady=(6, 12))
+
+        def dismiss():
+            if card.winfo_exists():
+                card.destroy()
+
+        btn = tk.Label(
+            card,
+            text="Let's Go",
+            font=("Segoe UI", 10, "bold"),
+            bg=COLORS.get('accent_color', '#0078D7'),
+            fg="white",
+            padx=16,
+            pady=6,
+            cursor="hand2",
+        )
+        btn.pack(anchor="e")
+        btn.bind("<Button-1>", lambda e: dismiss())
+
+        # Auto-dismiss after 6 seconds
+        self.root.after(6000, dismiss)
+
+    def _dismiss_coach_mark(self):
+        if hasattr(self, 'tour_card') and self.tour_card and self.tour_card.winfo_exists():
+            try:
+                self.tour_card.destroy()
+            except Exception:
+                pass
+        self.tour_card = None
+
+    def show_coach_mark(self, widget, text, next_action=None, step_info=None):
+        """Displays a sleek in-app floating tour guide card at bottom of content area."""
+        self._dismiss_coach_mark()
+        if not hasattr(self, 'content_area') or not self.content_area.winfo_exists():
             if next_action:
-                def on_skip(e):
-                    if tip.winfo_exists(): tip.destroy()
-                    
-                skip_lbl = tk.Label(controls, text="Skip tutorial", font=("Segoe UI", 8, "underline"), 
-                                  bg=bg, fg="#D1E8FF", cursor="hand2")
-                skip_lbl.pack(side="left")
-                skip_lbl.bind("<Button-1>", on_skip)
+                self.root.after(100, next_action)
+            return
 
-            # Continue Button
-            btn_text = "Continue" if next_action else "Finish"
-            
-            def on_click(e=None):
-                if not tip.winfo_exists(): return
-                tip.destroy()
-                if next_action:
-                    self.root.after(200, next_action)
-            
-            btn = tk.Label(controls, text=btn_text, font=("Segoe UI", 9, "bold"), 
-                          bg="#005A9E", fg="white", padx=10, pady=4, cursor="hand2")
-            btn.pack(side="right")
-            btn.bind("<Button-1>", on_click)
-            
-            # NOTE: We do NOT bind to the widget or set a timeout.
-            # The tooltip persists until 'Continue' or 'Skip' is clicked.
-            
-        except Exception as e:
-            print(f"Coach mark error: {e}")
-            if next_action: next_action()
+        card = tk.Frame(
+            self.content_area,
+            bg=COLORS.get('card_bg', '#1e1e24'),
+            highlightthickness=1,
+            highlightbackground=COLORS.get('accent_color', '#0078D7'),
+            padx=18,
+            pady=14,
+        )
+        self.tour_card = card
+        card.place(relx=0.5, rely=0.92, anchor="s")
+
+        header = tk.Frame(card, bg=COLORS.get('card_bg', '#1e1e24'))
+        header.pack(fill="x", pady=(0, 4))
+
+        if step_info:
+            tk.Label(
+                header,
+                text=step_info,
+                font=("Segoe UI", 8, "bold"),
+                bg=COLORS.get('card_bg', '#1e1e24'),
+                fg=COLORS.get('accent_color', '#0078D7'),
+            ).pack(side="left")
+
+        close_lbl = tk.Label(
+            header,
+            text="✕",
+            font=("Segoe UI", 9, "bold"),
+            bg=COLORS.get('card_bg', '#1e1e24'),
+            fg=COLORS.get('text_muted', '#8a8a93'),
+            cursor="hand2",
+        )
+        close_lbl.pack(side="right")
+        close_lbl.bind("<Button-1>", lambda e: self._dismiss_coach_mark())
+
+        body_lbl = tk.Label(
+            card,
+            text=text,
+            font=("Segoe UI", 10),
+            bg=COLORS.get('card_bg', '#1e1e24'),
+            fg=COLORS.get('text_main', '#ffffff'),
+            justify="left",
+        )
+        body_lbl.pack(anchor="w", pady=(2, 10))
+
+        controls = tk.Frame(card, bg=COLORS.get('card_bg', '#1e1e24'))
+        controls.pack(fill="x")
+
+        skip_lbl = tk.Label(
+            controls,
+            text="Skip Tour",
+            font=("Segoe UI", 8, "underline"),
+            bg=COLORS.get('card_bg', '#1e1e24'),
+            fg=COLORS.get('text_muted', '#8a8a93'),
+            cursor="hand2",
+        )
+        skip_lbl.pack(side="left")
+        skip_lbl.bind("<Button-1>", lambda e: self._dismiss_coach_mark())
+
+        btn_text = "Continue ➔" if next_action else "Finish"
+        def on_advance(e=None):
+            self._dismiss_coach_mark()
+            if next_action:
+                self.root.after(150, next_action)
+
+        btn = tk.Label(
+            controls,
+            text=btn_text,
+            font=("Segoe UI", 9, "bold"),
+            bg=COLORS.get('accent_color', '#0078D7'),
+            fg="white",
+            padx=14,
+            pady=5,
+            cursor="hand2",
+        )
+        btn.pack(side="right")
+        btn.bind("<Button-1>", on_advance)
 
     def open_global_settings(self):
         cur = getattr(self, 'current_tab', 'Play')
