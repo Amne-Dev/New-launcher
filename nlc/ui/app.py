@@ -4107,8 +4107,17 @@ class MinecraftLauncher(
             self.load_versions()
             self.render_screenshot_browser()
 
+    def _set_update_status(self, text: str, fg: str):
+        self._update_status_text = text
+        self._update_status_color = fg
+        if hasattr(self, 'update_status_lbl') and self.update_status_lbl and self.update_status_lbl.winfo_exists():
+            try:
+                self.update_status_lbl.config(text=text, fg=fg)
+            except Exception:
+                pass
+
     def check_for_updates(self):
-        self.update_status_lbl.config(text="Checking for updates...", fg=COLORS['text_secondary'])
+        self._set_update_status("Checking for updates...", COLORS['text_secondary'])
         threading.Thread(target=self._update_check_thread, daemon=True).start()
 
     def _update_check_thread(self):
@@ -4166,15 +4175,15 @@ class MinecraftLauncher(
                         ),
                     )
                 else:
-                     self.root.after(0, lambda: self.update_status_lbl.config(text="You are on the latest version.", fg=COLORS['success_green']))
+                     self.root.after(0, lambda: self._set_update_status("You are on the latest version.", COLORS['success_green']))
             else:
-                 self.root.after(0, lambda: self.update_status_lbl.config(text=f"Failed to check: {response.status_code}", fg=COLORS['error_red']))
+                 self.root.after(0, lambda: self._set_update_status(f"Failed to check: {response.status_code}", COLORS['error_red']))
         except Exception as e:
-            self.root.after(0, lambda: self.update_status_lbl.config(text=f"Error checking updates", fg=COLORS['error_red']))
+            self.root.after(0, lambda: self._set_update_status("Error checking updates", COLORS['error_red']))
             print(f"Update check error: {e}")
 
     def _on_update_found(self, version, html_url, asset_url, asset_name=""):
-        self.update_status_lbl.config(text=f"New version available: {version}", fg=COLORS['accent_blue'])
+        self._set_update_status(f"New version available: {version}", COLORS['accent_blue'])
         
         # Choice: Yes -> Auto Update, Manual -> Visit Page, No -> Dismiss
         btns = [
@@ -4527,9 +4536,18 @@ class MinecraftLauncher(
                  self.auto_download_var.set(False)
         
         if hasattr(self, 'user_entry'):
-            self.user_entry.delete(0, tk.END)
-            self.user_entry.insert(0, p.get("name", "Steve"))
-            self.user_entry.config(show="*" if self._is_streamer_mode_enabled() else "")
+            try:
+                if self.user_entry.winfo_exists():
+                    self.user_entry.delete(0, tk.END)
+                    self.user_entry.insert(0, p.get("name", "Steve"))
+                    self.user_entry.config(show="*" if self._is_streamer_mode_enabled() else "")
+            except Exception:
+                pass
+        if hasattr(self, 'username_var'):
+            try:
+                self.username_var.set(p.get("name", "Steve"))
+            except Exception:
+                pass
         
         # Update Model Radio var BEFORE rendering
         if hasattr(self, 'skin_model_var'):
