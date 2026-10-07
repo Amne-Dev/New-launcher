@@ -775,7 +775,56 @@ class MinecraftLauncher(
         x = (ws/2) - (w/2)
         y = (hs/2) - (h/2)
         self.root.geometry('%dx%d+%d+%d' % (w, h, x, y))
+
+        # Config Priority: 
+        # 1. Local "launcher_config.json" (Portable / Dev mode)
+        # 2. AppData/.nlc (Standard Install)
+        local_config = "launcher_config.json"
         
+        if os.path.exists(local_config):
+            self.config_file = os.path.abspath(local_config)
+            self.config_dir = os.path.dirname(self.config_file)
+            print(f"Using local config: {self.config_file}")
+        else:
+            app_data = os.getenv('APPDATA')
+            if app_data:
+                self.config_dir = os.path.join(app_data, ".nlc")
+            else:
+                self.config_dir = os.path.join(os.path.expanduser("~"), ".nlc")
+                
+            if not os.path.exists(self.config_dir):
+                os.makedirs(self.config_dir, exist_ok=True)
+                
+            self.config_file = os.path.join(self.config_dir, "launcher_config.json")
+            print(f"Using global config: {self.config_file}")
+        
+        # --- Pre-load Theme, Accent Color & Custom Titlebar ---
+        self.theme_id = "dark_slate"
+        self.custom_accent = None
+        self.accent_color_name = "Green"
+        try:
+            if os.path.exists(self.config_file):
+                with open(self.config_file, "r", encoding="utf-8") as f:
+                    _d = json.load(f)
+                    
+                    self.theme_id = _d.get("theme_id", "dark_slate")
+                    if self.theme_id not in THEMES:
+                        self.theme_id = "dark_slate"
+                    self.custom_accent = _d.get("custom_accent", None)
+                    self.accent_color_name = _d.get("accent_color", self.custom_accent or THEMES[self.theme_id].get('default_accent', '#2ECC71'))
+                    
+                    # Pre-load custom titlebar setting BEFORE window creation
+                    if "custom_titlebar_enabled" in _d:
+                        self.custom_titlebar_enabled = _d["custom_titlebar_enabled"] and os.name == 'nt'
+                    
+                    self.neo_style_enabled = _d.get("neo_style_enabled", True)
+                    self.animations_enabled = _d.get("animations_enabled", True)
+
+                    # Initialize global COLORS design tokens with the user's saved theme before creating widgets
+                    THEME_MANAGER.apply(self.theme_id, self.custom_accent, notify=False)
+        except Exception as e:
+            print(f"Error pre-loading config: {e}")
+
         self.root.configure(bg=COLORS['main_bg'])
         self.minecraft_dir = get_minecraft_dir()
         self.custom_titlebar_enabled = True # Will be overridden by config, but default to true on windows
@@ -838,56 +887,6 @@ class MinecraftLauncher(
         self.download_tasks = {} # id -> {ui_elements, data}
         self.addons_config: dict[str, Any] = {} # Addons configuration
         self.download_queue_visible = False
-        
-        # Config Priority: 
-        # 1. Local "launcher_config.json" (Portable / Dev mode)
-        # 2. AppData/.nlc (Standard Install)
-        
-        local_config = "launcher_config.json"
-        
-        if os.path.exists(local_config):
-            self.config_file = os.path.abspath(local_config)
-            self.config_dir = os.path.dirname(self.config_file)
-            print(f"Using local config: {self.config_file}")
-        else:
-            app_data = os.getenv('APPDATA')
-            if app_data:
-                self.config_dir = os.path.join(app_data, ".nlc")
-            else:
-                self.config_dir = os.path.join(os.path.expanduser("~"), ".nlc")
-                
-            if not os.path.exists(self.config_dir):
-                os.makedirs(self.config_dir, exist_ok=True)
-                
-            self.config_file = os.path.join(self.config_dir, "launcher_config.json")
-            print(f"Using global config: {self.config_file}")
-        
-        # --- Pre-load Theme, Accent Color & Custom Titlebar ---
-        self.theme_id = "dark_slate"
-        self.custom_accent = None
-        self.accent_color_name = "Green"
-        try:
-            if os.path.exists(self.config_file):
-                with open(self.config_file, "r", encoding="utf-8") as f:
-                    _d = json.load(f)
-                    
-                    self.theme_id = _d.get("theme_id", "dark_slate")
-                    if self.theme_id not in THEMES:
-                        self.theme_id = "dark_slate"
-                    self.custom_accent = _d.get("custom_accent", None)
-                    self.accent_color_name = _d.get("accent_color", self.custom_accent or THEMES[self.theme_id].get('default_accent', '#2ECC71'))
-                    
-                    # Pre-load custom titlebar setting BEFORE window creation
-                    if "custom_titlebar_enabled" in _d:
-                        self.custom_titlebar_enabled = _d["custom_titlebar_enabled"] and os.name == 'nt'
-                    
-                    self.neo_style_enabled = _d.get("neo_style_enabled", True)
-                    self.animations_enabled = _d.get("animations_enabled", True)
-
-                    # Initialize global COLORS design tokens with the user's saved theme before creating widgets
-                    THEME_MANAGER.apply(self.theme_id, self.custom_accent, notify=False)
-        except Exception as e:
-            print(f"Error pre-loading config: {e}")
 
         self.last_version = ""
         self.profiles = [] # List of {"name": str, "type": "offline", "skin_path": str, "uuid": str} (ACCOUNTS)
@@ -2477,7 +2476,7 @@ class MinecraftLauncher(
             self.set_active_sidebar(self.minecraft_btn_frame)
         self.show_tab("Play")
 
-    def apply_theme(self, theme_key: str, custom_accent: Optional[str] = None):
+    def apply_theme(self, theme_key: str, custom_accent: Optional[str] = None, save: bool = True):
         """Apply a curated theme and optional custom accent, refreshing active widgets in real-time."""
         self.theme_id = theme_key if theme_key in THEMES else "dark_slate"
         self.custom_accent = custom_accent
@@ -2495,9 +2494,20 @@ class MinecraftLauncher(
         try:
             if hasattr(self, 'root') and self.root.winfo_exists():
                 self.root.config(bg=new_tokens['main_bg'])
+            if hasattr(self, 'window_shell') and self.window_shell and self.window_shell.winfo_exists():
+                self.window_shell.config(bg=new_tokens.get('sidebar_bg', '#141414'))
+            if hasattr(self, 'window_titlebar') and self.window_titlebar and self.window_titlebar.winfo_exists():
+                self.window_titlebar.config(bg=new_tokens.get('tab_bar_bg', '#252526'))
             if hasattr(self, 'content_area') and self.content_area.winfo_exists():
                 self.content_area.config(bg=new_tokens['main_bg'])
+            if hasattr(self, 'tab_container') and self.tab_container.winfo_exists():
+                self.tab_container.config(bg=new_tokens['main_bg'])
+            for tab_frame in getattr(self, 'tabs', {}).values():
+                if tab_frame and tab_frame.winfo_exists():
+                    tab_frame.config(bg=new_tokens['main_bg'])
             self.refresh_sidebar_theme()
+            if hasattr(self, 'refresh_play_screen_theme'):
+                self.refresh_play_screen_theme()
         except Exception:
             pass
 
@@ -2535,7 +2545,8 @@ class MinecraftLauncher(
         except Exception:
             pass
 
-        self.save_config(sync_ui=True, immediate=True)
+        if save:
+            self.save_config(sync_ui=True, immediate=True)
 
     def apply_accent_color(self, name_or_hex: str):
         _named_accents = {
@@ -4830,7 +4841,7 @@ class MinecraftLauncher(
                         self.theme_id = "dark_slate"
                     self.custom_accent = data.get("custom_accent", getattr(self, "custom_accent", None))
                     self.animations_enabled = data.get("animations_enabled", True)
-                    self.apply_theme(self.theme_id, self.custom_accent)
+                    self.apply_theme(self.theme_id, self.custom_accent, save=False)
                     
                     if self.rpc_enabled:
                         self.root.after(1000, self.connect_rpc)

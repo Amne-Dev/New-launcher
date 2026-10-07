@@ -79,17 +79,37 @@ def main() -> int:
         return 1
 
     try:
+        # Pre-load saved theme for splash and root window
+        try:
+            import json
+            from nlc.storage.paths import get_config_path
+            from nlc.ui.theme import THEME_MANAGER, COLORS, THEMES
+
+            cfg_candidate = Path("launcher_config.json").resolve()
+            cfg_path = cfg_candidate if cfg_candidate.exists() else get_config_path()
+            if cfg_path.exists():
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    _cfg = json.load(f)
+                    _theme_id = _cfg.get("theme_id", "dark_slate")
+                    if _theme_id in THEMES:
+                        _custom_acc = _cfg.get("custom_accent", None)
+                        THEME_MANAGER.apply(_theme_id, _custom_acc, notify=False)
+        except Exception as e:
+            logger.debug("Could not pre-load theme in main: %s", e)
+
         root = tk.Tk()
         root.withdraw()
+        root.configure(bg=COLORS.get('main_bg', '#1E2025'))
 
         splash = tk.Toplevel(root)
         splash.overrideredirect(True)
 
+        splash_bg = COLORS.get('sidebar_bg', '#181A1E')
         try:
-            splash.attributes("-transparentcolor", "#050505")
+            splash.attributes("-transparentcolor", splash_bg)
         except Exception:
             pass
-        splash.configure(bg="#050505")
+        splash.configure(bg=splash_bg)
 
         splash_width = 300
         splash_height = 300
@@ -104,13 +124,13 @@ def main() -> int:
             if os.path.exists(logo_path):
                 img = Image.open(logo_path).resize((256, 256), Image.Resampling.LANCZOS)
                 splash_logo = ImageTk.PhotoImage(img)
-                logo_lbl = tk.Label(splash, image=splash_logo, bg="#050505")
+                logo_lbl = tk.Label(splash, image=splash_logo, bg=splash_bg)
                 logo_lbl.image = splash_logo  # type: ignore
                 logo_lbl.pack(expand=True)
             else:
-                tk.Label(splash, text="NLC", font=("Segoe UI", 48, "bold"), fg="white", bg="#050505").pack(expand=True)
+                tk.Label(splash, text="NLC", font=("Segoe UI", 48, "bold"), fg="white", bg=splash_bg).pack(expand=True)
         except Exception:
-            tk.Label(splash, text="NLC", font=("Segoe UI", 48, "bold"), fg="white", bg="#050505").pack(expand=True)
+            tk.Label(splash, text="NLC", font=("Segoe UI", 48, "bold"), fg="white", bg=splash_bg).pack(expand=True)
 
         alpha_state = {"alpha": 0.0, "fading_in": True}
         splash.attributes("-alpha", alpha_state["alpha"])

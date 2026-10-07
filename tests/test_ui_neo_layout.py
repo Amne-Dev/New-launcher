@@ -2,6 +2,7 @@
 tests/test_ui_neo_layout.py - Tests for unified Neo layout and sidebar navigation.
 """
 
+import json
 import pytest
 import tkinter as tk
 from unittest.mock import MagicMock
@@ -14,10 +15,20 @@ def test_theme_neo_metrics():
     assert METRICS.get("sidebar_width_neo") == 240
     assert "nav_bar_height" not in METRICS
 
-def test_neo_layout_no_top_navbar(tk_root):
+def test_neo_layout_no_top_navbar(tk_root, tmp_path, monkeypatch):
     """Verify that MinecraftLauncher initializes only the Neo sidebar and no classic nav bar."""
     if not tk_root:
         pytest.skip("Tkinter not available")
+
+    # Isolate launcher config in tmp_path so user's real ~/.nlc config is never mutated
+    cfg_file = tmp_path / "launcher_config.json"
+    cfg_data = {
+        "theme_id": "dark_slate",
+        "first_run_completed": True,
+        "neo_style_enabled": True
+    }
+    cfg_file.write_text(json.dumps(cfg_data), encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
 
     # Mock external network/filesystem calls
     try:
@@ -125,6 +136,9 @@ def test_theme_persistence_on_startup(tmp_path, tk_root, monkeypatch):
         assert app.custom_accent == "#88C0D0"
         assert COLORS["sidebar_bg"] == THEMES["nord"]["sidebar_bg"]
         assert app.sidebar.cget("bg") == THEMES["nord"]["sidebar_bg"]
+        assert app.root.cget("bg") == THEMES["nord"]["main_bg"]
+        assert app.hero_canvas.cget("bg") == THEMES["nord"]["main_bg"]
+        assert app.tab_container.cget("bg") == THEMES["nord"]["main_bg"]
     finally:
         if hasattr(app, "close_rpc"):
             try: app.close_rpc()

@@ -28,7 +28,7 @@ class PlayScreenMixin:
         # if self.addons_config.get("p3_menu", False): ... (Removed)
 
         # Hero Section (Background) - fills most of the space except bottom bar
-        self.hero_canvas = tk.Canvas(frame, bg="#181818", highlightthickness=0)
+        self.hero_canvas = tk.Canvas(frame, bg=COLORS['main_bg'], highlightthickness=0)
         self.hero_canvas.pack(fill="both", expand=True) # Ensure it's packed!
         
         # Debounce resize events to prevent lag
@@ -44,6 +44,7 @@ class PlayScreenMixin:
         bottom_bar = tk.Frame(frame, bg=COLORS['bottom_bar_bg'], height=100) # Increased height
         bottom_bar.pack(fill="x", side="bottom")
         bottom_bar.pack_propagate(False)
+        self.bottom_bar = bottom_bar
 
         # We use grid for 3 distinct sections in the bottom bar to ensure centering
         bottom_bar.columnconfigure(0, weight=1) # Left
@@ -53,6 +54,7 @@ class PlayScreenMixin:
         # 1. Left (Installation Selector)
         left_frame = tk.Frame(bottom_bar, bg=COLORS['bottom_bar_bg'])
         left_frame.grid(row=0, column=0, sticky="w", padx=30)
+        self.bottom_bar_left = left_frame
         
         # Custom Dropdown Trigger
         self.inst_selector_frame = tk.Frame(left_frame, bg=COLORS['bottom_bar_bg'], cursor="hand2")
@@ -109,6 +111,7 @@ class PlayScreenMixin:
         # 2. Center (Play Button)
         center_frame = tk.Frame(bottom_bar, bg=COLORS['bottom_bar_bg'])
         center_frame.grid(row=0, column=1, pady=25)
+        self.bottom_bar_center = center_frame
 
         # Composite Play Button (Frame)
         self.play_container = tk.Frame(center_frame, bg=COLORS['play_btn_green'])
@@ -140,6 +143,7 @@ class PlayScreenMixin:
         # 3. Right (Status / Account)
         right_frame = tk.Frame(bottom_bar, bg=COLORS['bottom_bar_bg'])
         right_frame.grid(row=0, column=2, sticky="e", padx=30)
+        self.bottom_bar_right = right_frame
         
         self.status_label = tk.Label(right_frame, text="Ready to launch", 
                                     font=("Segoe UI", 9), bg=COLORS['bottom_bar_bg'], fg=COLORS['text_secondary'], anchor="e")
@@ -249,5 +253,18 @@ class PlayScreenMixin:
         self.hero_canvas.create_text(w//2, h*0.4, text="MINECRAFT", font=("Segoe UI", 40, "bold"), fill="white", anchor="center")
         self.hero_canvas.create_text(w//2, h*0.4 + 50, text="JAVA EDITION", font=("Segoe UI", 14), fill=COLORS['text_secondary'], anchor="center")
 
-    # --- INSTALLATIONS TAB (New) ---
-
+    def refresh_play_screen_theme(self):
+        """Update Play tab widgets with active design tokens."""
+        if hasattr(self, 'tabs') and 'Play' in self.tabs and self.tabs['Play'].winfo_exists():
+            self.tabs['Play'].config(bg=COLORS['main_bg'])
+        if hasattr(self, 'hero_canvas') and self.hero_canvas.winfo_exists():
+            self.hero_canvas.config(bg=COLORS['main_bg'])
+        if hasattr(self, 'bottom_bar') and self.bottom_bar.winfo_exists():
+            self.bottom_bar.config(bg=COLORS['bottom_bar_bg'])
+        for attr in ['bottom_bar_left', 'bottom_bar_center', 'bottom_bar_right',
+                     'inst_selector_frame', 'inst_selector_text_frame',
+                     'inst_name_lbl', 'inst_ver_lbl', 'inst_selector_icon',
+                     'inst_selector_arrow', 'status_label', 'bottom_gamertag']:
+            w = getattr(self, attr, None)
+            if w and w.winfo_exists():
+                w.config(bg=COLORS['bottom_bar_bg'])
