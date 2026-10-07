@@ -2414,6 +2414,8 @@ class MinecraftLauncher(
             _neo_nav(self.sidebar_nav_frame, "Locker", "Locker", "enchanting_table_side.png")
 
         def exit_modrinth():
+            if hasattr(self, 'close_project_details'):
+                self.close_project_details()
             prev = getattr(self, '_prev_tab_modrinth', 'Play')
             if prev in ("Mods", "Settings"):
                 prev = "Play"
@@ -2436,6 +2438,8 @@ class MinecraftLauncher(
             
             def nav_modrinth(mode):
                 def _action():
+                    if hasattr(self, 'close_project_details'):
+                        self.close_project_details()
                     self.show_tab("Mods")
                     if hasattr(self, 'switch_modrinth_mode'):
                         self.switch_modrinth_mode(mode)
