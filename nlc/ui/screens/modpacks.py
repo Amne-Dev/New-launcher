@@ -10,14 +10,20 @@ import shutil
 import zipfile
 import logging
 import threading
+import tempfile
+import urllib.parse
 from datetime import datetime
 import tkinter as tk
-from tkinter import ttk, filedialog
+from tkinter import ttk, filedialog, messagebox
 import requests
+import minecraft_launcher_lib
 
+from nlc.storage.paths import resource_path
 from nlc.ui.theme import COLORS, FONT_FAMILY
-from nlc.ui.components.dialogs import custom_showinfo, custom_showerror, custom_askyesno
+from nlc.ui.components.dialogs import custom_showinfo, custom_showerror, custom_askyesno, _schedule_window_centering
 from nlc.net.http import get_http_session
+from nlc.net.downloader import _atomic_download
+from nlc.core.launch import safe_extract_zip as _safe_extract_zip
 
 logger = logging.getLogger(__name__)
 

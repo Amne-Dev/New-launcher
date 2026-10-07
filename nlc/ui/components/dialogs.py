@@ -161,3 +161,36 @@ def _build_missing_skin_head(size: int = 35):
         return ImageTk.PhotoImage(img.resize((size, size), RESAMPLE_NEAREST))
     except Exception:
         return None
+
+def schedule_window_centering(win, parent=None, width=None, height=None):
+    def apply_center():
+        try:
+            if not win.winfo_exists():
+                return
+            win.update_idletasks()
+            w = width or win.winfo_width() or win.winfo_reqwidth()
+            h = height or win.winfo_height() or win.winfo_reqheight()
+            if parent and parent.winfo_exists():
+                px = parent.winfo_rootx()
+                py = parent.winfo_rooty()
+                pw = parent.winfo_width()
+                ph = parent.winfo_height()
+                x = px + (pw // 2) - (w // 2)
+                y = py + (ph // 2) - (h // 2)
+            else:
+                sw = win.winfo_screenwidth()
+                sh = win.winfo_screenheight()
+                x = (sw // 2) - (w // 2)
+                y = (sh // 2) - (h // 2)
+            win.geometry(f"{w}x{h}+{max(0, x)}+{max(0, y)}")
+        except Exception:
+            pass
+
+    apply_center()
+    for delay in (0, 30, 100):
+        try:
+            win.after(delay, apply_center)
+        except Exception:
+            pass
+
+_schedule_window_centering = schedule_window_centering

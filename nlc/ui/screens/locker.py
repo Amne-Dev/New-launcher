@@ -7,6 +7,8 @@ import sys
 import shutil
 import logging
 import threading
+import hashlib
+import time
 import tkinter as tk
 from tkinter import ttk, filedialog
 from PIL import Image, ImageTk

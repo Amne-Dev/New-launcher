@@ -11,6 +11,7 @@ from datetime import datetime
 import tkinter as tk
 from tkinter import ttk
 from typing import cast
+import requests
 
 import minecraft_launcher_lib
 

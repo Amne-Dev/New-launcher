@@ -11,9 +11,9 @@ from PIL import Image
 from nlc.storage.paths import RESAMPLE_NEAREST, AFFINE, FLIP_LEFT_RIGHT
 
 try:
-    from skinpy import Skin, BodyPart, Scene # type: ignore
+    from skinpy import Skin, BodyPart, Perspective  # type: ignore
 except ImportError:
-    Skin = BodyPart = Scene = None
+    Skin = BodyPart = Perspective = None
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,7 @@ class SkinRenderer3D:
 
             # Try using skinpy (Library: https://github.com/t-mart/skinpy)
             try:
-                if 'skinpy' in sys.modules:
+                if Skin is not None and Perspective is not None:
                     skin = Skin.from_image(src) # type: ignore
 
                     # Handle Slim (Alex) Model

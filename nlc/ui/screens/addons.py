@@ -16,8 +16,12 @@ import tkinter as tk
 from tkinter import ttk, filedialog
 from PIL import Image, ImageTk
 
+from nlc.storage.paths import resource_path
 from nlc.ui.theme import COLORS, FONT_FAMILY
 from nlc.ui.components.dialogs import custom_showinfo, custom_showerror, custom_askyesno
+
+def _get_streamer_hidden_name():
+    return "Hidden Account"
 
 try:
     from agent import (
@@ -1110,8 +1114,6 @@ How to use:
             return # Already running
             
         try:
-            cwd = os.path.dirname(os.path.abspath(__file__))
-            
             # Determine command based on environment (Frozen vs Source)
             if getattr(sys, 'frozen', False):
                 base_dir = os.path.dirname(sys.executable)
@@ -1123,8 +1125,9 @@ How to use:
                 cmd = [agent_exe, self.config_dir]
                 cwd = base_dir
             else:
-                script = os.path.join(cwd, "agent.py")
+                script = resource_path("agent.py")
                 cmd = [sys.executable, script, self.config_dir]
+                cwd = os.path.dirname(script)
             
             # Start detached process with pipes
             startupinfo = None
@@ -1170,8 +1173,15 @@ How to use:
                     
                     if req_id in self.agent_callbacks:
                         callback = self.agent_callbacks.pop(req_id)
-                        # Run callback on main thread
-                        self.root.after(0, lambda c=callback, d=data.get("result"): c(d))
+                        # Run callback safely on main thread
+                        res_val = data.get("result")
+                        if hasattr(self, "dispatch_ui"):
+                            self.dispatch_ui(callback, res_val)
+                        else:
+                            try:
+                                self.root.after(0, lambda c=callback, d=res_val: c(d))
+                            except Exception:
+                                pass
                         
                 except json.JSONDecodeError:
                     pass
@@ -1179,10 +1189,29 @@ How to use:
             print(f"Agent listener error: {e}")
             
         # Cleanup if process died
-        self.root.after(0, self._on_agent_exit)
+        if hasattr(self, "dispatch_ui"):
+            self.dispatch_ui(self._on_agent_exit)
+        else:
+            try:
+                self.root.after(0, self._on_agent_exit)
+            except Exception:
+                pass
 
     def _on_agent_exit(self):
         self.agent_process = None
+        # Drain and notify any pending callbacks so callers do not hang indefinitely
+        with getattr(self, "agent_lock", threading.Lock()):
+            callbacks = list(self.agent_callbacks.values())
+            self.agent_callbacks.clear()
+        for cb in callbacks:
+            err_dict = {"status": "error", "msg": "Agent disconnected"}
+            if hasattr(self, "dispatch_ui"):
+                self.dispatch_ui(cb, err_dict)
+            else:
+                try:
+                    self.root.after(0, lambda c=cb: c(err_dict))
+                except Exception:
+                    pass
 
     def send_agent_request(self, action, payload, callback=None):
         if not self.agent_process or self.agent_process.poll() is not None:
@@ -1191,7 +1220,7 @@ How to use:
             # If still failed, abort
             if not self.agent_process or self.agent_process.poll() is not None:
                 if callback:
-                    callback({"status": "error", "msg": "Agent not running"})
+                    self.root.after(0, lambda: callback({"status": "error", "msg": "Agent not running"}))
                 return
 
         req_id = str(uuid.uuid4())

@@ -4,6 +4,7 @@ nlc.ui.screens.installations - Installations tab and installation editor/selecto
 
 import os
 import sys
+import io
 import json
 import uuid
 import shutil
@@ -14,12 +15,14 @@ from datetime import datetime
 import tkinter as tk
 from tkinter import ttk, filedialog
 from PIL import Image, ImageTk
+import minecraft_launcher_lib
 
 try:
     RESAMPLE_NEAREST = Image.Resampling.NEAREST
 except AttributeError:
     RESAMPLE_NEAREST = Image.NEAREST
 
+from nlc.storage.paths import resource_path
 from nlc.ui.theme import COLORS, FONT_FAMILY
 from nlc.ui.components.dialogs import custom_showinfo, custom_showerror, custom_askyesno
 
@@ -162,36 +165,43 @@ class InstallationsScreenMixin:
 
     def get_icon_image(self, icon_identifier, size=(40, 40)):
         # icon_identifier can be a path "icons/grass.png" or just "grass" or an emoji
-        if not icon_identifier: return None
+        if not icon_identifier:
+            return None
         
-        # Check if it's a known image file
-        if str(icon_identifier).endswith(".png"):
-            key = (icon_identifier, size)
-            # Check cache first
-            if key in self.icon_cache: 
-                # Verify the cached image is still valid
-                try:
-                    if self.icon_cache[key].width() > 0:
-                        return self.icon_cache[key]
-                    else:
-                        # Invalid cache entry, remove it
-                        del self.icon_cache[key]
-                except:
-                    # Invalid cache entry, remove it
-                    del self.icon_cache[key]
-                
+        # Check cache first
+        key = (str(icon_identifier), size)
+        if hasattr(self, "icon_cache") and key in self.icon_cache: 
             try:
-                # Try finding it
-                path = resource_path(icon_identifier)
-                if os.path.exists(path):
+                cached = self.icon_cache[key]
+                if cached.width() > 0:
+                    return cached
+                del self.icon_cache[key]
+            except Exception:
+                self.icon_cache.pop(key, None)
+
+        candidates = []
+        raw_id = str(icon_identifier).strip()
+        candidates.append(raw_id)
+        if not raw_id.startswith("icons/"):
+            candidates.append(f"icons/{raw_id}")
+        if not raw_id.endswith(".png"):
+            candidates.append(f"{raw_id}.png")
+            if not raw_id.startswith("icons/"):
+                candidates.append(f"icons/{raw_id}.png")
+
+        for cand in candidates:
+            try:
+                path = resource_path(cand)
+                if os.path.exists(path) and os.path.isfile(path):
                     img = Image.open(path).convert("RGBA")
-                    # For perfectly sharp pixel art scaling, convert back after mode change isn't strictly necessary, RGBA resizes fine
                     img = img.resize(size, RESAMPLE_NEAREST)
                     photo = ImageTk.PhotoImage(img)
+                    if not hasattr(self, "icon_cache"):
+                        self.icon_cache = {}
                     self.icon_cache[key] = photo
                     return photo
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed loading icon candidate %s: %s", cand, e)
         return None
 
     def create_installation_item(self, parent, idx, inst):
@@ -648,12 +658,21 @@ class InstallationsScreenMixin:
              sel_win.lift()
              sel_root = self._apply_custom_toplevel_chrome(sel_win, "Select Icon")
 
-             tk.Label(sel_root, text="Select Block", font=("Segoe UI", 12, "bold"), bg="#2d2d2d", fg="white").pack(pady=(15,10))
+             tk.Label(sel_root, text="Select Icon", font=("Segoe UI", 12, "bold"), bg="#2d2d2d", fg="white").pack(pady=(12, 6))
              
+             # Search bar for icons
+             search_frame = tk.Frame(sel_root, bg="#1e1e1e", padx=8, pady=4)
+             search_frame.pack(fill="x", padx=15, pady=(0, 8))
+             
+             tk.Label(search_frame, text="🔍", bg="#1e1e1e", fg="#888888").pack(side="left", padx=(0, 5))
+             icon_search_var = tk.StringVar()
+             icon_search_entry = tk.Entry(search_frame, textvariable=icon_search_var, bg="#1e1e1e", fg="white",
+                                         insertbackground="white", relief="flat", font=("Segoe UI", 9))
+             icon_search_entry.pack(side="left", fill="x", expand=True)
 
              # Scrollable Frame for Icons
              container = tk.Frame(sel_root, bg="#2d2d2d")
-             container.pack(expand=True, fill="both", padx=10, pady=10)
+             container.pack(expand=True, fill="both", padx=10, pady=(0, 10))
              
              canvas = tk.Canvas(container, bg="#2d2d2d", highlightthickness=0)
              scrollbar = tk.Scrollbar(container, orient="vertical", command=canvas.yview)
@@ -666,17 +685,15 @@ class InstallationsScreenMixin:
              )
              
              canvas.create_window((0, 0), window=icons_grid, anchor="nw")
-             
              canvas.configure(yscrollcommand=scrollbar.set)
              
              canvas.pack(side="left", fill="both", expand=True)
              scrollbar.pack(side="right", fill="y")
              
-             # Bind scrolling to the window so it works when hovering anywhere in the modal
              self._bind_wheel_events(sel_win, lambda e, c=canvas: self._smooth_scroll(c, e), f"direct_{id(canvas)}")
              
              # Popular Minecraft Blocks
-             block_names = [
+             popular_blocks = [
                  "grass_block_side.png", "dirt.png", "stone.png", "cobblestone.png", "oak_planks.png", 
                  "crafting_table_front.png", "furnace_front.png", "barrel_side.png", "tnt_side.png", "bookshelf.png",
                  "sand.png", "gravel.png", "bedrock.png", "obsidian.png", "spruce_log.png",
@@ -685,51 +702,70 @@ class InstallationsScreenMixin:
                  "snow.png", "ice.png", "clay.png", "pumpkin_side.png", "melon_side.png",
                  "netherrack.png", "soul_sand.png", "glowstone.png", "end_stone.png", "red_wool.png"
              ]
-             
-             # Inventory Slot Style
-             slot_bg = "#8b8b8b"
-             
-             cols = 5
-             for i, name in enumerate(block_names):
-                 path = f"icons/{name}"
-                 
-                 # Slot Container
-                 slot = tk.Frame(icons_grid, bg=slot_bg, width=64, height=64, 
-                                highlightbackground="white", highlightthickness=0)
-                 slot.grid(row=i//cols, column=i%cols, padx=6, pady=6)
-                 slot.pack_propagate(False)
-                 
-                 # Image
-                 img = self.get_icon_image(path, (48, 48))
-                 
-                 lbl = tk.Label(slot, bg=slot_bg, cursor="hand2")
-                 if img:
-                     lbl.config(image=img)
-                     lbl.image = img # type: ignore
-                 else:
-                     lbl.config(text="?", fg="white")
-                 
-                 lbl.place(relx=0.5, rely=0.5, anchor="center")
-                 
-                 def set_ico(val=path):
-                     current_icon_var.set(val)
-                     update_main_icon(val)
-                     sel_win.destroy()
-                     
-                 def on_hover(s=slot, l=lbl):
-                     s.config(bg="#a0a0a0")
-                     l.config(bg="#a0a0a0")
-                     
-                 def on_leave(s=slot, l=lbl):
-                     s.config(bg=slot_bg)
-                     l.config(bg=slot_bg)
 
-                 lbl.bind("<Button-1>", lambda e, val=path: set_ico(val))
-                 slot.bind("<Button-1>", lambda e, val=path: set_ico(val))
-                 lbl.bind("<Enter>", lambda e: on_hover())
-                 lbl.bind("<Leave>", lambda e: on_leave())
-                 slot.bind("<Enter>", lambda e: on_hover())
-                 slot.bind("<Leave>", lambda e: on_leave())
+             # Discover all PNG icons in the icons directory
+             icons_dir = resource_path("icons")
+             all_found_icons = []
+             if os.path.isdir(icons_dir):
+                 try:
+                     all_found_icons = sorted([f for f in os.listdir(icons_dir) if f.lower().endswith(".png")])
+                 except Exception:
+                     pass
+             
+             seen_blocks = set(popular_blocks)
+             all_icon_files = list(popular_blocks) + [f for f in all_found_icons if f not in seen_blocks]
+             
+             slot_bg = "#8b8b8b"
+             cols = 5
+
+             def populate_icons(filter_str=""):
+                 for w in icons_grid.winfo_children():
+                     w.destroy()
+
+                 f_lower = filter_str.strip().lower()
+                 matches = [name for name in all_icon_files if f_lower in name.lower()] if f_lower else all_icon_files
+                 display_list = matches if f_lower else matches[:120]
+
+                 for i, name in enumerate(display_list):
+                     path = f"icons/{name}"
+                     slot = tk.Frame(icons_grid, bg=slot_bg, width=64, height=64, 
+                                    highlightbackground="white", highlightthickness=0)
+                     slot.grid(row=i//cols, column=i%cols, padx=6, pady=6)
+                     slot.pack_propagate(False)
+                     
+                     img = self.get_icon_image(path, (48, 48))
+                     lbl = tk.Label(slot, bg=slot_bg, cursor="hand2")
+                     if img:
+                         lbl.config(image=img)
+                         lbl.image = img # type: ignore
+                     else:
+                         lbl.config(text="?", fg="white")
+                     lbl.place(relx=0.5, rely=0.5, anchor="center")
+                     
+                     def set_ico(val=path):
+                         current_icon_var.set(val)
+                         update_main_icon(val)
+                         sel_win.destroy()
+                         
+                     def on_hover(s=slot, l=lbl):
+                         s.config(bg="#a0a0a0")
+                         l.config(bg="#a0a0a0")
+                         
+                     def on_leave(s=slot, l=lbl):
+                         s.config(bg=slot_bg)
+                         l.config(bg=slot_bg)
+
+                     lbl.bind("<Button-1>", lambda e, val=path: set_ico(val))
+                     slot.bind("<Button-1>", lambda e, val=path: set_ico(val))
+                     lbl.bind("<Enter>", lambda e, s=slot, l=lbl: on_hover(s, l))
+                     lbl.bind("<Leave>", lambda e, s=slot, l=lbl: on_leave(s, l))
+                     slot.bind("<Enter>", lambda e, s=slot, l=lbl: on_hover(s, l))
+                     slot.bind("<Leave>", lambda e, s=slot, l=lbl: on_leave(s, l))
+
+                 canvas.yview_moveto(0)
+
+             populate_icons()
+             icon_search_var.trace_add("write", lambda *_: populate_icons(icon_search_var.get()))
         
         icon_btn.bind("<Button-1>", open_icon_selector)
 
@@ -969,7 +1005,7 @@ class InstallationsScreenMixin:
             except Exception as e:
                 print(f"Fetch error: {e}")
                 if win.winfo_exists():
-                    self.root.after(0, lambda: self.modal_status_lbl.config(text=f"Error: {e}"))
+                    self.root.after(0, lambda err=str(e): self.modal_status_lbl.config(text=f"Error: {err}"))
 
         def update_list():
             if not win.winfo_exists(): return

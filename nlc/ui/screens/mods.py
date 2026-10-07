@@ -12,14 +12,20 @@ import shutil
 import logging
 import threading
 import webbrowser
+import tempfile
+import urllib.parse
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, messagebox
 from PIL import Image, ImageTk
 import requests
+import minecraft_launcher_lib
 
+from nlc.storage.paths import resource_path
 from nlc.ui.theme import COLORS, FONT_FAMILY
 from nlc.ui.components.dialogs import custom_showinfo, custom_showerror, custom_askyesno
 from nlc.net.http import get_http_session
+from nlc.net.downloader import _atomic_download
+from nlc.core.launch import safe_extract_zip as _safe_extract_zip
 
 logger = logging.getLogger(__name__)
 
@@ -323,13 +329,58 @@ class ModsScreenMixin:
         if version_facet:
             payload["facets"].append(f'versions:{version_facet}')
 
-        # The helper process performs network work; no extra Python thread is
-        # required here.  A generation token rejects stale responses from a
-        # query/filter that the user has already replaced.
-        self.send_agent_request(
-            "search_mods", payload,
-            lambda res, g=generation, is_reset=reset: self._on_mod_search_result(res, is_reset, g),
-        )
+        def handle_response(res):
+            if res and res.get("status") == "success":
+                self._on_mod_search_result(res, reset, generation)
+            else:
+                # If agent is unavailable or returns an error, fallback to direct search
+                threading.Thread(
+                    target=self._direct_search_mods_worker,
+                    args=(payload, reset, generation),
+                    daemon=True
+                ).start()
+
+        # Try agent if running, otherwise use direct worker
+        if getattr(self, "agent_process", None) and self.agent_process.poll() is None:
+            self.send_agent_request("search_mods", payload, handle_response)
+        else:
+            threading.Thread(
+                target=self._direct_search_mods_worker,
+                args=(payload, reset, generation),
+                daemon=True
+            ).start()
+
+    def _direct_search_mods_worker(self, payload, reset, generation):
+        if generation != self._mod_search_generation:
+            return
+        try:
+            query = payload.get("query", "")
+            limit = payload.get("limit", 20)
+            offset = payload.get("offset", 0)
+            facets = payload.get("facets", [])
+            
+            params = f"limit={limit}&offset={offset}"
+            if query:
+                params += f"&query={urllib.parse.quote(query)}"
+            else:
+                params += "&index=downloads"
+
+            if facets:
+                facet_str = ",".join(f'["{f}"]' for f in facets)
+                enc = urllib.parse.quote(f'[{facet_str}]')
+                params += f'&facets={enc}'
+
+            url = f"https://api.modrinth.com/v2/search?{params}"
+            session = get_http_session()
+            response = session.get(url, headers={"User-Agent": "AmneDev/NewLauncher"}, timeout=15)
+            if response.status_code == 200:
+                result = {"status": "success", "data": response.json()}
+            else:
+                result = {"status": "error", "code": response.status_code, "msg": response.text}
+        except Exception as e:
+            result = {"status": "error", "msg": str(e)}
+
+        self.root.after(0, lambda: self._on_mod_search_result(result, reset, generation))
 
     def _on_mod_search_result(self, result, reset, generation=None):
         if generation is not None and generation != self._mod_search_generation:

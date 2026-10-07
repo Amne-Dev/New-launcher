@@ -24,8 +24,18 @@ import platform
 import threading
 import traceback
 import subprocess
+import webbrowser
+import hashlib
+try:
+    import ctypes
+    from ctypes import wintypes
+except (ImportError, AttributeError):
+    ctypes = None
+    wintypes = None
 from datetime import datetime
 from typing import Any, cast
+
+logger = logging.getLogger(__name__)
 
 import tkinter as tk
 from tkinter import font, ttk, messagebox, filedialog, scrolledtext
@@ -52,6 +62,7 @@ from nlc.ui.components.dialogs import (
 from nlc.ui.components.toasts import ToastManager, PopupManager
 from nlc.ui.components.skin_renderer import SkinRenderer3D
 from nlc.ui.components.downloads import DownloadManager, DownloadQueueMixin
+from nlc.ui.dispatcher import EventDispatcher
 from nlc.ui.screens.accounts import AccountsScreenMixin
 from nlc.ui.screens.settings import SettingsScreenMixin
 from nlc.ui.screens.addons import AddonsScreenMixin
@@ -689,6 +700,8 @@ class MinecraftLauncher(
 ):
     def __init__(self, root):
         self.root = root
+        self.dispatcher = EventDispatcher(self.root)
+        self.dispatcher.start()
         self.download_manager = DownloadManager(self)
         self.root.title("NLC | New launcher")
         
@@ -963,6 +976,16 @@ class MinecraftLauncher(
             self.root.after(1000, lambda: self.show_whats_new(CURRENT_VERSION))
             self.last_version = CURRENT_VERSION
             self.save_config()
+
+    def dispatch_ui(self, fn, *args, **kwargs):
+        """Thread-safe marshaling of callbacks to the main Tk thread."""
+        if hasattr(self, "dispatcher") and self.dispatcher:
+            self.dispatcher.post(fn, *args, **kwargs)
+        else:
+            try:
+                self.root.after(0, lambda: fn(*args, **kwargs))
+            except Exception:
+                pass
 
     def load_modpacks(self):
         self.modpacks = []
@@ -2639,7 +2662,7 @@ class MinecraftLauncher(
                 else:
                     self.root.after(0, lambda: update_text(f"Could not load release notes automatically (Status {r.status_code}).\nCheck out the GitHub releases page!"))
             except Exception as e:
-                self.root.after(0, lambda: update_text(f"Failed to fetch release notes: {e}"))
+                self.root.after(0, lambda err=str(e): update_text(f"Failed to fetch release notes: {err}"))
 
         def update_text(msg):
             try:

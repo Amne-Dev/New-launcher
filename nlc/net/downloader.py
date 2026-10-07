@@ -83,3 +83,17 @@ def download_file(
             except Exception:
                 pass
         raise
+
+def atomic_download(url, destination, *, cancel_event=None, chunk_size=64 * 1024, progress=None, headers=None, rate_limit_kib=0, expected_sha1=None):
+    return download_file(
+        url,
+        Path(destination),
+        cancel_event=cancel_event,
+        chunk_size=chunk_size,
+        progress=progress,
+        headers=headers,
+        rate_limit_kib=rate_limit_kib,
+        expected_sha1=expected_sha1,
+    )
+
+_atomic_download = atomic_download

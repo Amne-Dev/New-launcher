@@ -2,6 +2,7 @@
 nlc.ui.components.downloads - Download queue manager, task tracking, and progress UI
 """
 
+import uuid
 import threading
 import logging
 import tkinter as tk
