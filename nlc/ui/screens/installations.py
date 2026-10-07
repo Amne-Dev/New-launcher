@@ -445,22 +445,39 @@ class InstallationsScreenMixin:
                     bg=COLORS['card_bg'], fg=COLORS['text_secondary'], anchor="w", cursor="hand2").pack(fill="x")
             
             # Hover & Click
-            def on_enter(e, r=row):
-                r["bg"] = "#454545"
-                for c in r.winfo_children():
-                    c["bg"] = "#454545"
-                    for gc in c.winfo_children(): # Text frame children
-                        gc["bg"] = "#454545"
-                        
-            def on_leave(e, r=row):
-                r["bg"] = COLORS['card_bg']
-                for c in r.winfo_children():
-                    c["bg"] = COLORS['card_bg']
-                    for gc in c.winfo_children():
-                        gc["bg"] = COLORS['card_bg']
+            def _is_row_pointer_inside(r):
+                try:
+                    if not r.winfo_exists(): return False
+                    px, py = r.winfo_pointerxy()
+                    under = r.winfo_containing(px, py)
+                    if under is None: return False
+                    curr = under
+                    while curr is not None:
+                        if curr == r: return True
+                        curr = getattr(curr, "master", None)
+                    return False
+                except Exception:
+                    return False
 
-            row.bind("<Enter>", on_enter)
-            row.bind("<Leave>", on_leave)
+            def _update_row_bg(r, bg):
+                r["bg"] = bg
+                for c in r.winfo_children():
+                    c["bg"] = bg
+                    for gc in c.winfo_children():
+                        gc["bg"] = bg
+
+            def on_enter(e=None, r=row):
+                hover_bg = COLORS.get('hover_bg', '#3A3F4D')
+                _update_row_bg(r, hover_bg)
+
+            def on_leave(e=None, r=row):
+                if _is_row_pointer_inside(r):
+                    return
+                _update_row_bg(r, COLORS['card_bg'])
+
+            for w in [row, ico_lbl, txt_cx] + list(txt_cx.winfo_children()):
+                w.bind("<Enter>", on_enter, add="+")
+                w.bind("<Leave>", on_leave, add="+")
             
             def do_select(e, idx=i):
                 self.select_installation(idx)

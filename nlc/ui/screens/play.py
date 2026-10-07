@@ -82,28 +82,66 @@ class PlayScreenMixin:
         self.inst_selector_arrow.pack(side="right", padx=(15, 5))
 
         # Hover logic
-        def on_hover(e):
-             bg = COLORS.get('hover_bg', '#3A3F4D')
-             self.inst_selector_frame.config(bg=bg)
-             self.inst_selector_text_frame.config(bg=bg)
-             self.inst_name_lbl.config(bg=bg)
-             self.inst_ver_lbl.config(bg=bg)
-             self.inst_selector_icon.config(bg=bg)
-             self.inst_selector_arrow.config(bg=bg)
+        selector_widgets = [self.inst_selector_frame, self.inst_selector_text_frame, self.inst_name_lbl, self.inst_ver_lbl, self.inst_selector_icon, self.inst_selector_arrow]
+        hover_state = {"is_hovered": False}
 
-        def on_leave(e):
-             bg = COLORS['bottom_bar_bg']
-             self.inst_selector_frame.config(bg=bg)
-             self.inst_selector_text_frame.config(bg=bg)
-             self.inst_name_lbl.config(bg=bg)
-             self.inst_ver_lbl.config(bg=bg)
-             self.inst_selector_icon.config(bg=bg)
-             self.inst_selector_arrow.config(bg=bg)
+        def _is_selector_pointer_inside():
+            try:
+                if not self.inst_selector_frame.winfo_exists():
+                    return False
+                x, y = self.inst_selector_frame.winfo_pointerxy()
+                under = self.inst_selector_frame.winfo_containing(x, y)
+                if under is None:
+                    return False
+                curr = under
+                while curr is not None:
+                    if curr == self.inst_selector_frame:
+                        return True
+                    curr = getattr(curr, "master", None)
+                return False
+            except Exception:
+                return False
 
-        for w in [self.inst_selector_frame, self.inst_selector_text_frame, self.inst_name_lbl, self.inst_ver_lbl, self.inst_selector_icon, self.inst_selector_arrow]:
-             w.bind("<Enter>", on_hover, add="+")
-             w.bind("<Leave>", on_leave, add="+")
-             w.bind("<Button-1>", lambda e, s=self: s.open_selector_menu(e), add="+")
+        def _update_selector_bg(bg_col):
+            for w in selector_widgets:
+                try:
+                    if w and w.winfo_exists():
+                        w.config(bg=bg_col)
+                except Exception:
+                    pass
+
+        def on_hover(e=None):
+            if hover_state["is_hovered"]:
+                return
+            hover_state["is_hovered"] = True
+            bg = COLORS.get('hover_bg', '#3A3F4D')
+            if getattr(self, 'animator', None) and self.animator.is_enabled:
+                self.animator.animate_color(
+                    self.inst_selector_frame, "bg", self.inst_selector_frame.cget("bg"), bg,
+                    duration_ms=80,
+                    on_step=_update_selector_bg
+                )
+            else:
+                _update_selector_bg(bg)
+
+        def on_leave(e=None):
+            if _is_selector_pointer_inside():
+                return
+            hover_state["is_hovered"] = False
+            bg = COLORS['bottom_bar_bg']
+            if getattr(self, 'animator', None) and self.animator.is_enabled:
+                self.animator.animate_color(
+                    self.inst_selector_frame, "bg", self.inst_selector_frame.cget("bg"), bg,
+                    duration_ms=80,
+                    on_step=_update_selector_bg
+                )
+            else:
+                _update_selector_bg(bg)
+
+        for w in selector_widgets:
+            w.bind("<Enter>", on_hover, add="+")
+            w.bind("<Leave>", on_leave, add="+")
+            w.bind("<Button-1>", lambda e, s=self: s.open_selector_menu(e), add="+")
         
         # Populate with installations
         self.update_installation_dropdown()
@@ -255,16 +293,51 @@ class PlayScreenMixin:
 
     def refresh_play_screen_theme(self):
         """Update Play tab widgets with active design tokens."""
+        main_bg = COLORS['main_bg']
+        bottom_bg = COLORS['bottom_bar_bg']
+        text_primary = COLORS['text_primary']
+        text_secondary = COLORS['text_secondary']
+        play_green = COLORS['play_btn_green']
+        play_hover = COLORS['play_btn_hover']
+        play_fg = COLORS.get('play_btn_text', 'white')
+
         if hasattr(self, 'tabs') and 'Play' in self.tabs and self.tabs['Play'].winfo_exists():
-            self.tabs['Play'].config(bg=COLORS['main_bg'])
+            self.tabs['Play'].config(bg=main_bg)
         if hasattr(self, 'hero_canvas') and self.hero_canvas.winfo_exists():
-            self.hero_canvas.config(bg=COLORS['main_bg'])
+            self.hero_canvas.config(bg=main_bg)
+            try:
+                w = self.hero_canvas.winfo_width()
+                h = self.hero_canvas.winfo_height()
+                if w > 10 and h > 10:
+                    self._update_hero_layout(type('Event', (), {'width': w, 'height': h})())
+            except Exception:
+                pass
+
         if hasattr(self, 'bottom_bar') and self.bottom_bar.winfo_exists():
-            self.bottom_bar.config(bg=COLORS['bottom_bar_bg'])
+            self.bottom_bar.config(bg=bottom_bg)
         for attr in ['bottom_bar_left', 'bottom_bar_center', 'bottom_bar_right',
                      'inst_selector_frame', 'inst_selector_text_frame',
-                     'inst_name_lbl', 'inst_ver_lbl', 'inst_selector_icon',
-                     'inst_selector_arrow', 'status_label', 'bottom_gamertag']:
+                     'inst_selector_icon']:
             w = getattr(self, attr, None)
             if w and w.winfo_exists():
-                w.config(bg=COLORS['bottom_bar_bg'])
+                w.config(bg=bottom_bg)
+
+        if hasattr(self, 'inst_name_lbl') and self.inst_name_lbl.winfo_exists():
+            self.inst_name_lbl.config(bg=bottom_bg, fg=text_primary)
+        if hasattr(self, 'inst_ver_lbl') and self.inst_ver_lbl.winfo_exists():
+            self.inst_ver_lbl.config(bg=bottom_bg, fg=text_secondary)
+        if hasattr(self, 'inst_selector_arrow') and self.inst_selector_arrow.winfo_exists():
+            self.inst_selector_arrow.config(bg=bottom_bg, fg=text_secondary)
+        if hasattr(self, 'status_label') and self.status_label.winfo_exists():
+            self.status_label.config(bg=bottom_bg, fg=text_secondary)
+        if hasattr(self, 'bottom_gamertag') and self.bottom_gamertag.winfo_exists():
+            self.bottom_gamertag.config(bg=bottom_bg, fg=text_secondary)
+
+        if hasattr(self, 'play_container') and self.play_container.winfo_exists():
+            self.play_container.config(bg=play_green)
+        if hasattr(self, 'launch_sep') and self.launch_sep.winfo_exists():
+            self.launch_sep.config(bg=play_green)
+        if hasattr(self, 'launch_btn') and self.launch_btn.winfo_exists():
+            self.launch_btn.config(bg=play_green, fg=play_fg, activebackground=play_hover, activeforeground=play_fg)
+        if hasattr(self, 'launch_opts_btn') and self.launch_opts_btn.winfo_exists():
+            self.launch_opts_btn.config(bg=play_green, fg=play_fg, activebackground=play_hover, activeforeground=play_fg)

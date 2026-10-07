@@ -155,6 +155,39 @@ def _center_window_on_parent(win, parent=None, width=None, height=None):
         pass
 
 
+def _get_widget_descendants(widget):
+    """Recursively return all descendant widgets of a widget."""
+    descendants = []
+    try:
+        if not widget or not widget.winfo_exists():
+            return descendants
+        for child in widget.winfo_children():
+            descendants.append(child)
+            descendants.extend(_get_widget_descendants(child))
+    except Exception:
+        pass
+    return descendants
+
+
+def _is_pointer_inside(widget):
+    """Return True if mouse pointer is inside widget or any of its descendants."""
+    try:
+        if not widget or not widget.winfo_exists():
+            return False
+        x, y = widget.winfo_pointerxy()
+        under = widget.winfo_containing(x, y)
+        if under is None:
+            return False
+        curr = under
+        while curr is not None:
+            if curr == widget:
+                return True
+            curr = getattr(curr, "master", None)
+        return False
+    except Exception:
+        return False
+
+
 def _resolve_dialog_parent(preferred_parent=None, fallback_widget=None):
     candidates = []
     if preferred_parent is not None:
@@ -2508,6 +2541,8 @@ class MinecraftLauncher(
             self.refresh_sidebar_theme()
             if hasattr(self, 'refresh_play_screen_theme'):
                 self.refresh_play_screen_theme()
+            if hasattr(self, 'refresh_settings_screen_theme'):
+                self.refresh_settings_screen_theme()
         except Exception:
             pass
 
@@ -3758,56 +3793,105 @@ class MinecraftLauncher(
                     bar.pack_forget()
 
             target_bg = hover_col if is_target else sidebar_col
+            fg_col = COLORS['text_primary'] if is_target else COLORS['text_secondary']
+
+            def _update_descendants_active(c, target_frame=frame, target_bar=bar):
+                for child in _get_widget_descendants(target_frame):
+                    if getattr(child, '_is_category_header', False) or getattr(child, "_keep_sidebar_bg", False):
+                        continue
+                    try:
+                        if isinstance(child, tk.Frame) and child != target_bar:
+                            child.config(bg=c)
+                        elif isinstance(child, tk.Label):
+                            child.config(bg=c, fg=fg_col)
+                    except Exception:
+                        pass
+
             if getattr(self, 'animator', None) and self.animator.is_enabled:
-                self.animator.animate_color(frame, "bg", frame.cget("bg"), target_bg, duration_ms=90)
+                self.animator.animate_color(
+                    frame, "bg", frame.cget("bg"), target_bg,
+                    duration_ms=90,
+                    on_step=_update_descendants_active
+                )
             else:
                 frame.config(bg=target_bg)
-
-            for child in frame.winfo_children():
-                if getattr(child, '_is_category_header', False):
-                    continue
-                if isinstance(child, tk.Label):
-                    if not getattr(child, "_keep_sidebar_bg", False):
-                        fg_col = COLORS['text_primary'] if is_target else COLORS['text_secondary']
-                        child.config(bg=target_bg, fg=fg_col)
+                _update_descendants_active(target_bg)
 
     def _attach_sidebar_hover(self, frame):
-        def on_enter(e):
+        hover_state = {"is_hovered": False}
+
+        def _update_descendants_hover(bg_col, is_hover):
+            is_active = getattr(frame, "is_active", False)
+            bar = getattr(frame, "_active_bar", None)
+            is_profile = (frame == getattr(self, "profile_frame", None))
+
+            for child in _get_widget_descendants(frame):
+                if getattr(child, "_keep_sidebar_bg", False) or getattr(child, "_is_category_header", False):
+                    continue
+                try:
+                    if isinstance(child, tk.Frame) and child != bar:
+                        child.config(bg=bg_col)
+                    elif isinstance(child, tk.Label):
+                        if is_profile:
+                            if child == getattr(self, 'sidebar_username', None):
+                                child.config(bg=bg_col, fg=COLORS['text_primary'])
+                            elif child in (getattr(self, 'sidebar_acct_type', None), getattr(self, 'sidebar_chevron', None)):
+                                child.config(bg=bg_col, fg=COLORS['text_primary'] if is_hover else COLORS.get('text_muted', '#6B7280'))
+                            else:
+                                child.config(bg=bg_col)
+                        else:
+                            fg_col = COLORS['text_primary'] if (is_hover or is_active) else COLORS['text_secondary']
+                            child.config(bg=bg_col, fg=fg_col)
+                except Exception:
+                    pass
+
+        def on_enter(e=None):
+            if hover_state["is_hovered"]:
+                return
+            hover_state["is_hovered"] = True
             hover_col = COLORS.get('hover_bg', '#3A3F4D')
             if getattr(self, 'animator', None) and self.animator.is_enabled:
-                self.animator.animate_color(frame, "bg", frame.cget("bg"), hover_col, duration_ms=80)
+                self.animator.animate_color(
+                    frame, "bg", frame.cget("bg"), hover_col,
+                    duration_ms=80,
+                    on_step=lambda c: _update_descendants_hover(c, is_hover=True)
+                )
             else:
                 frame.config(bg=hover_col)
-            for child in frame.winfo_children():
-                if getattr(child, '_is_category_header', False):
-                    continue
-                if isinstance(child, tk.Label):
-                    if not getattr(child, "_keep_sidebar_bg", False):
-                        child.config(bg=hover_col, fg=COLORS['text_primary'])
+                _update_descendants_hover(hover_col, is_hover=True)
 
-        def on_leave(e):
+        def on_leave(e=None):
+            if _is_pointer_inside(frame):
+                return
+            hover_state["is_hovered"] = False
             is_active = getattr(frame, "is_active", False)
             hover_col = COLORS.get('hover_bg', '#3A3F4D')
             sidebar_col = COLORS.get('sidebar_bg', '#181A1E')
             target_bg = hover_col if is_active else sidebar_col
-            fg_col = COLORS['text_primary'] if is_active else COLORS['text_secondary']
 
             if getattr(self, 'animator', None) and self.animator.is_enabled:
-                self.animator.animate_color(frame, "bg", frame.cget("bg"), target_bg, duration_ms=80)
+                self.animator.animate_color(
+                    frame, "bg", frame.cget("bg"), target_bg,
+                    duration_ms=80,
+                    on_step=lambda c: _update_descendants_hover(c, is_hover=False)
+                )
             else:
                 frame.config(bg=target_bg)
-
-            for child in frame.winfo_children():
-                if getattr(child, '_is_category_header', False):
-                    continue
-                if isinstance(child, tk.Label):
-                    if not getattr(child, "_keep_sidebar_bg", False):
-                        child.config(bg=target_bg, fg=fg_col)
+                _update_descendants_hover(target_bg, is_hover=False)
 
         frame._on_enter = on_enter  # type: ignore[attr-defined]
         frame._on_leave = on_leave  # type: ignore[attr-defined]
         frame.bind("<Enter>", on_enter)
         frame.bind("<Leave>", on_leave)
+
+        def _bind_all_descendants():
+            for child in _get_widget_descendants(frame):
+                if getattr(child, "_keep_sidebar_bg", False):
+                    continue
+                child.bind("<Enter>", on_enter, add="+")
+                child.bind("<Leave>", on_leave, add="+")
+
+        frame.after_idle(_bind_all_descendants)
 
     def refresh_sidebar_theme(self):
         """Synchronize all sidebar components, active bars, and section headers with active theme tokens."""
@@ -3822,20 +3906,28 @@ class MinecraftLauncher(
             for child in self.sidebar.winfo_children():
                 if isinstance(child, tk.Frame) and child.cget("height") == 1:
                     child.config(bg=sep_col)
+
+        # Synchronize nav frame and all category headers inside it
         if hasattr(self, 'sidebar_nav_frame') and self.sidebar_nav_frame.winfo_exists():
             self.sidebar_nav_frame.config(bg=sidebar_bg)
+            for child in self.sidebar_nav_frame.winfo_children():
+                if getattr(child, '_is_category_header', False):
+                    child.config(bg=sidebar_bg, fg=muted_col)
+
+        # Synchronize account / profile button and all nested labels/frames
         if hasattr(self, 'profile_frame') and self.profile_frame.winfo_exists():
             self.profile_frame.config(bg=sidebar_bg)
-            for child in self.profile_frame.winfo_children():
-                if isinstance(child, tk.Label):
+            for child in _get_widget_descendants(self.profile_frame):
+                if isinstance(child, (tk.Frame, tk.Label)):
                     child.config(bg=sidebar_bg)
             if hasattr(self, 'sidebar_username') and self.sidebar_username.winfo_exists():
-                self.sidebar_username.config(fg=COLORS['text_primary'])
+                self.sidebar_username.config(bg=sidebar_bg, fg=COLORS['text_primary'])
             if hasattr(self, 'sidebar_acct_type') and self.sidebar_acct_type.winfo_exists():
-                self.sidebar_acct_type.config(fg=muted_col)
+                self.sidebar_acct_type.config(bg=sidebar_bg, fg=muted_col)
             if hasattr(self, 'sidebar_chevron') and self.sidebar_chevron.winfo_exists():
-                self.sidebar_chevron.config(fg=muted_col)
+                self.sidebar_chevron.config(bg=sidebar_bg, fg=muted_col)
 
+        # Synchronize all sidebar items and dock links
         for frame in getattr(self, 'sidebar_items', []):
             if not getattr(frame, 'winfo_exists', lambda: False)():
                 continue
@@ -3847,12 +3939,14 @@ class MinecraftLauncher(
             if bar and bar.winfo_exists():
                 bar.config(bg=accent_col)
 
-            for child in frame.winfo_children():
+            for child in _get_widget_descendants(frame):
                 if getattr(child, '_is_category_header', False):
                     child.config(bg=sidebar_bg, fg=muted_col)
                 elif isinstance(child, tk.Label):
                     if not getattr(child, '_keep_sidebar_bg', False):
                         child.config(bg=target_bg, fg=COLORS['text_primary'] if is_active else COLORS['text_secondary'])
+                elif isinstance(child, tk.Frame) and child != bar:
+                    child.config(bg=target_bg)
 
     def _create_sidebar_link(self, text, url_or_command, indicator_text=None, indicator_color=None, is_action=False, pack_side="top", icon=None):
         frame = tk.Frame(self.sidebar, bg=COLORS['sidebar_bg'], cursor="hand2", padx=15, pady=8)

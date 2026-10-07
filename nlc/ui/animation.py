@@ -90,7 +90,8 @@ class AnimationManager:
         end_hex: str,
         duration_ms: int = 80,
         anim_id: Optional[str] = None,
-        on_done: Optional[Callable[[], None]] = None
+        on_done: Optional[Callable[[], None]] = None,
+        on_step: Optional[Callable[[str], None]] = None
     ) -> None:
         """
         Smoothly interpolate widget color property (e.g. 'bg', 'fg', 'highlightbackground').
@@ -110,6 +111,11 @@ class AnimationManager:
                 widget[prop_name] = end_hex
             except Exception:
                 pass
+            if on_step:
+                try:
+                    on_step(end_hex)
+                except Exception:
+                    pass
             if on_done:
                 try:
                     on_done()
@@ -138,6 +144,12 @@ class AnimationManager:
                 self._active_anims.pop(key, None)
                 return
 
+            if on_step:
+                try:
+                    on_step(current_color)
+                except Exception:
+                    pass
+
             if t < 1.0:
                 self._active_anims[key] = self.root.after(16, _step)  # ~60 FPS
             else:
@@ -146,6 +158,11 @@ class AnimationManager:
                     widget[prop_name] = end_hex
                 except Exception:
                     pass
+                if on_step:
+                    try:
+                        on_step(end_hex)
+                    except Exception:
+                        pass
                 if on_done:
                     try:
                         on_done()

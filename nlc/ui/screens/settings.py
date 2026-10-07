@@ -89,17 +89,20 @@ class SettingsScreenMixin:
         # --- Top Header ---
         header_frame = tk.Frame(container, bg=COLORS['sidebar_bg'], height=60)
         header_frame.pack(side="top", fill="x")
+        self.settings_header_frame = header_frame
 
         title_box = tk.Frame(header_frame, bg=COLORS['sidebar_bg'])
         title_box.pack(side="left", padx=25, pady=12)
+        self.settings_title_box = title_box
 
-        tk.Label(
+        self.settings_title_lbl = tk.Label(
             title_box,
             text="SETTINGS",
             font=(FONT_FAMILY, 13, "bold"),
             bg=COLORS['sidebar_bg'],
             fg=COLORS['text_primary']
-        ).pack(side="left")
+        )
+        self.settings_title_lbl.pack(side="left")
 
         self.header_breadcrumb_lbl = tk.Label(
             title_box,
@@ -114,6 +117,7 @@ class SettingsScreenMixin:
         self.nav_rail = None
         content_wrapper = tk.Frame(container, bg=COLORS['main_bg'])
         content_wrapper.pack(side="top", fill="both", expand=True)
+        self.settings_content_wrapper = content_wrapper
 
         canvas = tk.Canvas(content_wrapper, bg=COLORS['main_bg'], highlightthickness=0)
         scrollbar = ttk.Scrollbar(content_wrapper, orient="vertical", command=canvas.yview, style="Launcher.Vertical.TScrollbar")
@@ -143,6 +147,35 @@ class SettingsScreenMixin:
 
         # Render initially selected category
         self.switch_settings_category(self.current_settings_category)
+
+    def refresh_settings_screen_theme(self):
+        """Update Settings screen header, canvas, and active category content with new theme colors."""
+        sidebar_bg = COLORS['sidebar_bg']
+        main_bg = COLORS['main_bg']
+        accent_col = COLORS.get('accent_color', '#2ECC71')
+        text_primary = COLORS['text_primary']
+
+        if hasattr(self, 'tabs') and 'Settings' in self.tabs and self.tabs['Settings'].winfo_exists():
+            self.tabs['Settings'].config(bg=main_bg)
+        if hasattr(self, 'settings_header_frame') and self.settings_header_frame.winfo_exists():
+            self.settings_header_frame.config(bg=sidebar_bg)
+        if hasattr(self, 'settings_title_box') and self.settings_title_box.winfo_exists():
+            self.settings_title_box.config(bg=sidebar_bg)
+        if hasattr(self, 'settings_title_lbl') and self.settings_title_lbl.winfo_exists():
+            self.settings_title_lbl.config(bg=sidebar_bg, fg=text_primary)
+        if hasattr(self, 'header_breadcrumb_lbl') and self.header_breadcrumb_lbl.winfo_exists():
+            self.header_breadcrumb_lbl.config(bg=sidebar_bg, fg=accent_col)
+        if hasattr(self, 'settings_content_wrapper') and self.settings_content_wrapper.winfo_exists():
+            self.settings_content_wrapper.config(bg=main_bg)
+        if hasattr(self, 'settings_canvas') and self.settings_canvas.winfo_exists():
+            self.settings_canvas.config(bg=main_bg)
+        if hasattr(self, 'settings_scroll_frame') and self.settings_scroll_frame.winfo_exists():
+            self.settings_scroll_frame.config(bg=main_bg)
+
+        # Re-render active settings category so all cards, setting rows, buttons, toggles and text use the new theme!
+        current_cat = getattr(self, 'current_settings_category', 'General')
+        if hasattr(self, 'switch_settings_category'):
+            self.switch_settings_category(current_cat)
 
     def switch_settings_category(self, category_name: str):
         """Switch active category in the right content pane."""
