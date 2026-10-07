@@ -63,11 +63,11 @@ from nlc.ui.components.dialogs import (
 from nlc.ui.components.toasts import ToastManager, PopupManager
 from nlc.ui.components.skin_renderer import SkinRenderer3D
 from nlc.ui.components.downloads import DownloadManager, DownloadQueueMixin
-from nlc.ui.components.buttons import make_button, make_badge
+from nlc.ui.components.buttons import make_button, make_badge, refresh_all_buttons
 from nlc.ui.components.cards import create_card
 from nlc.ui.dispatcher import EventDispatcher
 from nlc.ui.screens.accounts import AccountsScreenMixin
-from nlc.ui.screens.settings import SettingsScreenMixin
+from nlc.ui.screens.settings import SettingsScreenMixin, CATEGORIES
 from nlc.ui.screens.addons import AddonsScreenMixin
 from nlc.ui.screens.modpacks import ModpacksScreenMixin
 from nlc.ui.screens.mods import ModsScreenMixin
@@ -2374,7 +2374,11 @@ class MinecraftLauncher(
                 lbl.config(fg=COLORS['text_primary'])
                 bar.pack(side="left", fill="y", padx=(0, 6), before=getattr(frame, "_lbl_icon", None))
 
+            return frame
+
         def build_main_sidebar():
+            self._in_settings_sidebar = False
+            self._in_modrinth_sidebar = False
             for widget in self.sidebar_nav_frame.winfo_children():
                 widget.destroy()
             self.sidebar_items = [item for item in getattr(self, 'sidebar_items', []) if item.winfo_exists() and item.master != self.sidebar_nav_frame]
@@ -2390,11 +2394,13 @@ class MinecraftLauncher(
             _neo_nav(self.sidebar_nav_frame, "Locker", "Locker", "enchanting_table_side.png")
 
         def build_modrinth_sidebar():
+            self._in_modrinth_sidebar = True
+            self._in_settings_sidebar = False
             for widget in self.sidebar_nav_frame.winfo_children():
                 widget.destroy()
             self.sidebar_items = [item for item in getattr(self, 'sidebar_items', []) if item.winfo_exists() and item.master != self.sidebar_nav_frame]
             
-            _neo_nav(self.sidebar_nav_frame, "← Back", "Back", None, action=build_main_sidebar)
+            _neo_nav(self.sidebar_nav_frame, "← Back", "Back", "observer_back.png", action=build_main_sidebar)
             
             _make_category_header(self.sidebar_nav_frame, "MODRINTH NETWORK")
             
@@ -2410,15 +2416,50 @@ class MinecraftLauncher(
             _neo_nav(self.sidebar_nav_frame, "Modpacks", "Modpacks", "shulker_box.png", action=nav_modrinth("modpack"))
             _neo_nav(self.sidebar_nav_frame, "Shaders", "Shaders", "glowstone.png", action=nav_modrinth("shader"))
 
+        def build_settings_sidebar():
+            self._in_settings_sidebar = True
+            self._in_modrinth_sidebar = False
+            for widget in self.sidebar_nav_frame.winfo_children():
+                widget.destroy()
+            self.sidebar_items = [item for item in getattr(self, 'sidebar_items', []) if item.winfo_exists() and item.master != self.sidebar_nav_frame]
+            self.settings_nav_items = {}
+
+            # Back button to return to regular sidebar and previous screen
+            _neo_nav(self.sidebar_nav_frame, "← Back", "Back", "observer_back.png", action=self.exit_settings)
+
+            _make_category_header(self.sidebar_nav_frame, "SETTINGS")
+
+            for cat_name, icon_name, desc in CATEGORIES:
+                def make_cat_action(c=cat_name):
+                    def _action():
+                        self.show_tab("Settings")
+                        if hasattr(self, 'switch_settings_category'):
+                            self.switch_settings_category(c)
+                    return _action
+
+                btn_frame = _neo_nav(
+                    self.sidebar_nav_frame,
+                    cat_name,
+                    cat_name,
+                    icon_name,
+                    action=make_cat_action(cat_name)
+                )
+                self.settings_nav_items[cat_name] = btn_frame
+
+            cur_cat = getattr(self, 'current_settings_category', 'General')
+            if cur_cat in self.settings_nav_items:
+                self.set_active_sidebar(self.settings_nav_items[cur_cat])
+
         self.build_main_sidebar = build_main_sidebar
         self.build_modrinth_sidebar = build_modrinth_sidebar
+        self.build_settings_sidebar = build_settings_sidebar
         build_main_sidebar()
 
-        # Settings Link (Gear) - Packed to bottom first to be at the very bottom
-        self._create_sidebar_link("Settings", lambda: self.open_global_settings(), is_action=True, pack_side="bottom", icon="⚙")
+        # Settings Link - Packed to bottom first to be at the very bottom
+        self._create_sidebar_link("Settings", lambda: self.open_global_settings(), is_action=True, pack_side="bottom", icon="command_block_front.png")
 
         # GitHub Link - Packed to bottom next to be above Settings
-        self._create_sidebar_link("GitHub", "https://github.com/Amne-Dev/New-launcher", pack_side="bottom")
+        self._create_sidebar_link("GitHub", "https://github.com/Amne-Dev/New-launcher", pack_side="bottom", icon="chiseled_bookshelf_occupied.png")
 
         # Download Queue UI (Initially hidden or empty)
         self.create_download_queue_ui()
@@ -2490,17 +2531,21 @@ class MinecraftLauncher(
         if hasattr(self, 'locker_btns'):
             self.refresh_locker_view()
 
-        # 4. Settings Tab (rebuild to refresh active theme card borders and swatches)
+        # 4. Settings Tab (refresh current category in-place so user stays in Appearance view)
         if "Settings" in self.tabs:
             is_active = (getattr(self, 'current_tab', None) == "Settings")
-            try:
-                self.tabs["Settings"].destroy()
-                del self.tabs["Settings"]
-                self.create_settings_tab()
-                if is_active and "Settings" in self.tabs:
-                    self.tabs["Settings"].pack(fill="both", expand=True)
-            except Exception:
-                pass
+            if is_active and hasattr(self, 'switch_settings_category'):
+                try:
+                    cur_cat = getattr(self, 'current_settings_category', 'Appearance')
+                    self.switch_settings_category(cur_cat)
+                except Exception:
+                    pass
+
+        # 5. Global live refresh for all buttons across the entire application
+        try:
+            refresh_all_buttons()
+        except Exception:
+            pass
 
         self.save_config()
 
@@ -3577,7 +3622,20 @@ class MinecraftLauncher(
             if next_action: next_action()
 
     def open_global_settings(self):
+        cur = getattr(self, 'current_tab', 'Play')
+        if cur != "Settings":
+            self._prev_tab = cur
         self.show_tab("Settings")
+        if hasattr(self, 'build_settings_sidebar'):
+            self.build_settings_sidebar()
+
+    def exit_settings(self):
+        prev = getattr(self, '_prev_tab', 'Play')
+        if prev == "Settings":
+            prev = "Play"
+        if hasattr(self, 'build_main_sidebar'):
+            self.build_main_sidebar()
+        self.show_tab(prev)
         
     def show_modrinth_enable_dialog(self):
         dialog = tk.Toplevel(self.root)
@@ -3803,9 +3861,19 @@ class MinecraftLauncher(
         
         # Icon
         if icon:
-             # Use a larger font for the symbol
-             tk.Label(frame, text=icon, font=(FONT_FAMILY, 12), bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'], 
-                      cursor="hand2").pack(side="left", padx=(0, 10))
+            if icon.endswith(".png"):
+                icon_path = f"icons/{icon}" if not icon.startswith("icons/") else icon
+                img = getattr(self, "get_icon_image", lambda x, y: None)(icon_path, (18, 18))
+                if img:
+                    lbl_img = tk.Label(frame, image=img, bg=COLORS['sidebar_bg'], cursor="hand2")
+                    lbl_img.image = img  # type: ignore[attr-defined]
+                    lbl_img.pack(side="left", padx=(0, 10))
+                    frame._lbl_icon = lbl_img  # type: ignore[attr-defined]
+                else:
+                    tk.Label(frame, text="•", font=(FONT_FAMILY, 10), bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'], cursor="hand2").pack(side="left", padx=(0, 10))
+            else:
+                tk.Label(frame, text=icon, font=(FONT_FAMILY, 12), bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'], 
+                         cursor="hand2").pack(side="left", padx=(0, 10))
 
         lbl = tk.Label(frame, text=text, font=(FONT_FAMILY, 9), bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'], cursor="hand2")
         lbl.pack(side="left")
@@ -4122,6 +4190,14 @@ class MinecraftLauncher(
                 if hasattr(self, 'mods_tab_initialized') and not self.mods_tab_initialized:
                     self.mods_tab_initialized = True
                     self.search_mods_thread(reset=True)
+            elif tab_name == "Settings":
+                if hasattr(self, 'build_settings_sidebar') and not getattr(self, '_in_settings_sidebar', False):
+                    self.build_settings_sidebar()
+            else:
+                # If returning to standard tabs, ensure main sidebar is shown
+                if getattr(self, '_in_settings_sidebar', False):
+                    if hasattr(self, 'build_main_sidebar'):
+                        self.build_main_sidebar()
 
     # --- PLAY TAB ---
     def change_minecraft_dir(self):

@@ -4,28 +4,16 @@ Supports micro-animation color transitions, badge pills, and responsive states.
 """
 
 import os
+import weakref
 import tkinter as tk
 from typing import Callable, Optional, Dict, Any
-from nlc.ui.theme import COLORS, FONT_FAMILY
+from nlc.ui.theme import COLORS, FONT_FAMILY, THEME_MANAGER
 from nlc.ui.animation import AnimationManager
 
-def make_button(
-    parent: tk.Widget,
-    text: str,
-    *,
-    style: str = "secondary",
-    command: Optional[Callable] = None,
-    font_size: int = 9,
-    bold: bool = False,
-    width: Optional[int] = None,
-    cursor: str = "hand2",
-    animator: Optional[AnimationManager] = None
-) -> tk.Button:
-    """
-    Creates a consistently styled button adhering to design tokens.
-    Styles: 'primary', 'secondary', 'danger', 'text', 'icon', 'accent'
-    """
-    weight = "bold" if bold else "normal"
+_ACTIVE_BUTTONS: weakref.WeakSet = weakref.WeakSet()
+
+def get_button_style_cfg(style: str) -> Dict[str, str]:
+    """Return styling tokens for the requested button style based on current theme tokens."""
     cfg_map: Dict[str, Dict[str, str]] = {
         "primary": {
             "bg": COLORS['play_btn_green'],
@@ -64,7 +52,58 @@ def make_button(
             "active_fg": COLORS['text_primary']
         }
     }
-    cfg = cfg_map.get(style, cfg_map["secondary"])
+    return cfg_map.get(style, cfg_map["secondary"])
+
+def update_button_style(btn: tk.Button) -> None:
+    """Synchronize a button widget with latest theme tokens."""
+    style = getattr(btn, "_btn_style", "secondary")
+    cfg = get_button_style_cfg(style)
+    try:
+        btn.config(
+            bg=cfg["bg"],
+            fg=cfg["fg"],
+            activebackground=cfg["hover"],
+            activeforeground=cfg["active_fg"],
+        )
+        if os.name != "nt":
+            btn.config(
+                highlightbackground=cfg["bg"],
+                highlightcolor=cfg["bg"],
+                disabledforeground=cfg["fg"],
+            )
+    except Exception:
+        pass
+
+def refresh_all_buttons() -> None:
+    """Synchronize all living buttons created by make_button with updated theme tokens."""
+    for btn in list(_ACTIVE_BUTTONS):
+        try:
+            if btn.winfo_exists():
+                update_button_style(btn)
+        except Exception:
+            pass
+
+# Listen for theme changes from ThemeManager
+THEME_MANAGER.add_listener(lambda tokens: refresh_all_buttons())
+
+def make_button(
+    parent: tk.Widget,
+    text: str,
+    *,
+    style: str = "secondary",
+    command: Optional[Callable] = None,
+    font_size: int = 9,
+    bold: bool = False,
+    width: Optional[int] = None,
+    cursor: str = "hand2",
+    animator: Optional[AnimationManager] = None
+) -> tk.Button:
+    """
+    Creates a consistently styled button adhering to design tokens.
+    Styles: 'primary', 'secondary', 'danger', 'text', 'icon', 'accent'
+    """
+    weight = "bold" if bold else "normal"
+    cfg = get_button_style_cfg(style)
 
     btn = tk.Button(
         parent,
@@ -79,6 +118,10 @@ def make_button(
         cursor=cursor,
         command=command
     )
+
+    btn._btn_style = style  # type: ignore[attr-defined]
+    btn._btn_animator = animator  # type: ignore[attr-defined]
+    _ACTIVE_BUTTONS.add(btn)
 
     if os.name != "nt":
         btn.config(
@@ -101,19 +144,27 @@ def make_button(
     if width is not None:
         btn.config(width=width)
 
-    # Hover animations (uses animator if provided, else instant fallback)
+    # Hover animations (dynamically reads latest style tokens)
     def on_enter(e):
-        if animator and animator.is_enabled:
-            animator.animate_color(btn, "bg", cfg["bg"], cfg["hover"], duration_ms=80)
+        btn_style = getattr(btn, "_btn_style", "secondary")
+        cur_cfg = get_button_style_cfg(btn_style)
+        cur_animator = getattr(btn, "_btn_animator", animator)
+        if cur_animator and cur_animator.is_enabled:
+            cur_animator.animate_color(btn, "bg", cur_cfg["bg"], cur_cfg["hover"], duration_ms=80)
         else:
-            btn.config(bg=cfg["hover"])
+            btn.config(bg=cur_cfg["hover"])
 
     def on_leave(e):
-        if animator and animator.is_enabled:
-            animator.animate_color(btn, "bg", cfg["hover"], cfg["bg"], duration_ms=80)
+        btn_style = getattr(btn, "_btn_style", "secondary")
+        cur_cfg = get_button_style_cfg(btn_style)
+        cur_animator = getattr(btn, "_btn_animator", animator)
+        if cur_animator and cur_animator.is_enabled:
+            cur_animator.animate_color(btn, "bg", cur_cfg["hover"], cur_cfg["bg"], duration_ms=80)
         else:
-            btn.config(bg=cfg["bg"])
+            btn.config(bg=cur_cfg["bg"])
 
+    btn._on_enter = on_enter  # type: ignore[attr-defined]
+    btn._on_leave = on_leave  # type: ignore[attr-defined]
     btn.bind("<Enter>", on_enter)
     btn.bind("<Leave>", on_leave)
 
@@ -122,13 +173,7 @@ def make_button(
             try:
                 if not btn.winfo_exists():
                     return
-                btn.config(
-                    bg=cfg["bg"],
-                    fg=cfg["fg"],
-                    activebackground=cfg["hover"],
-                    activeforeground=cfg["active_fg"],
-                )
-                btn.update_idletasks()
+                update_button_style(btn)
             except Exception:
                 pass
 

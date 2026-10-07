@@ -44,6 +44,19 @@ def test_neo_layout_no_top_navbar(tk_root):
     app.build_modrinth_sidebar()
     assert len(app.sidebar_nav_frame.winfo_children()) > 0
 
+    # Test drill-down to dynamic Settings sidebar
+    assert hasattr(app, "build_settings_sidebar")
+    app.build_settings_sidebar()
+    assert len(app.sidebar_nav_frame.winfo_children()) > 0
+    assert hasattr(app, "settings_nav_items")
+    assert "General" in app.settings_nav_items
+    assert "Appearance" in app.settings_nav_items
+
+    # Test exiting settings returns to main sidebar
+    assert hasattr(app, "exit_settings")
+    app.exit_settings()
+    assert getattr(app, "_in_settings_sidebar", True) is False
+
     # Test returning to main sidebar
     assert hasattr(app, "build_main_sidebar")
     app.build_main_sidebar()

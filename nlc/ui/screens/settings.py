@@ -26,13 +26,13 @@ from nlc.storage.config import DEFAULT_RAM, CURRENT_VERSION
 logger = logging.getLogger(__name__)
 
 CATEGORIES = [
-    ("General", "⚙", "Startup, window behavior, and launcher setup"),
-    ("Appearance", "🎨", "Themes, custom accent colors, and 60 FPS animations"),
-    ("Java & Memory", "☕", "RAM allocation, JVM runtime scanner, and directory"),
-    ("Downloads", "⚡", "Concurrent download limits and speed throttling"),
-    ("Integrations", "🎮", "Discord Rich Presence and streamer privacy mode"),
-    ("Logs & Diagnostics", "📜", "System hardware diagnostics and launcher console"),
-    ("About & Reset", "⚠️", "Version information and factory settings reset"),
+    ("General", "command_block_front.png", "Startup, window behavior, and launcher setup"),
+    ("Appearance", "painting.png", "Themes, custom accent colors, and 60 FPS animations"),
+    ("Java & Memory", "furnace_front_on.png", "RAM allocation, JVM runtime scanner, and directory"),
+    ("Downloads", "hopper_top.png", "Concurrent download limits and speed throttling"),
+    ("Integrations", "jukebox_top.png", "Discord Rich Presence and streamer privacy mode"),
+    ("Logs & Diagnostics", "lectern_top.png", "System hardware diagnostics and launcher console"),
+    ("About & Reset", "anvil.png", "Version information and factory settings reset"),
 ]
 
 
@@ -110,22 +110,10 @@ class SettingsScreenMixin:
         )
         self.header_breadcrumb_lbl.pack(side="left")
 
-        # --- Main Two-Pane Split ---
-        split_body = tk.Frame(container, bg=COLORS['main_bg'])
-        split_body.pack(side="top", fill="both", expand=True)
-
-        # 1. Left Category Navigation Rail
-        rail_width = 210
-        self.nav_rail = tk.Frame(split_body, bg=COLORS['sidebar_bg'], width=rail_width)
-        self.nav_rail.pack(side="left", fill="y")
-        self.nav_rail.pack_propagate(False)
-
-        # Divider between rail and content
-        tk.Frame(split_body, bg=COLORS.get('border_subtle', '#2B303A'), width=1).pack(side="left", fill="y")
-
-        # 2. Right Content Scroll Area
-        content_wrapper = tk.Frame(split_body, bg=COLORS['main_bg'])
-        content_wrapper.pack(side="right", fill="both", expand=True)
+        # --- Main Content Scroll Area (Full width; navigation integrated into main dynamic sidebar) ---
+        self.nav_rail = None
+        content_wrapper = tk.Frame(container, bg=COLORS['main_bg'])
+        content_wrapper.pack(side="top", fill="both", expand=True)
 
         canvas = tk.Canvas(content_wrapper, bg=COLORS['main_bg'], highlightthickness=0)
         scrollbar = ttk.Scrollbar(content_wrapper, orient="vertical", command=canvas.yview, style="Launcher.Vertical.TScrollbar")
@@ -153,71 +141,31 @@ class SettingsScreenMixin:
         if hasattr(self, '_bind_smooth_scroll'):
             content_wrapper.bind("<Enter>", lambda e: self._bind_smooth_scroll(canvas, self.settings_scroll_frame))
 
-        # Populate Category Rail Buttons
-        rail_items_box = tk.Frame(self.nav_rail, bg=COLORS['sidebar_bg'])
-        rail_items_box.pack(fill="x", padx=10, pady=15)
-
-        for cat_name, icon, cat_desc in CATEGORIES:
-            btn_frame = tk.Frame(rail_items_box, bg=COLORS['sidebar_bg'], cursor="hand2", padx=12, pady=10)
-            btn_frame.pack(fill="x", pady=2)
-
-            ico_lbl = tk.Label(btn_frame, text=icon, font=(FONT_FAMILY, 11), bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'], cursor="hand2")
-            ico_lbl.pack(side="left", padx=(0, 10))
-
-            txt_lbl = tk.Label(btn_frame, text=cat_name, font=(FONT_FAMILY, 9, "bold"), bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'], cursor="hand2")
-            txt_lbl.pack(side="left")
-
-            self._category_buttons[cat_name] = (btn_frame, ico_lbl, txt_lbl)
-
-            def _make_cat_click(name=cat_name):
-                return lambda e: self.switch_settings_category(name)
-
-            for w in [btn_frame, ico_lbl, txt_lbl]:
-                w.bind("<Button-1>", _make_cat_click(cat_name))
-
-            def _make_hover(bf=btn_frame, il=ico_lbl, tl=txt_lbl, name=cat_name):
-                def _enter(e):
-                    if self.current_settings_category != name:
-                        bf.config(bg=COLORS.get('hover_bg', '#282C36'))
-                        il.config(bg=COLORS.get('hover_bg', '#282C36'), fg="white")
-                        tl.config(bg=COLORS.get('hover_bg', '#282C36'), fg="white")
-                def _leave(e):
-                    if self.current_settings_category != name:
-                        bf.config(bg=COLORS['sidebar_bg'])
-                        il.config(bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'])
-                        tl.config(bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'])
-                return _enter, _leave
-
-            ent, lev = _make_hover(btn_frame, ico_lbl, txt_lbl, cat_name)
-            btn_frame.bind("<Enter>", ent)
-            btn_frame.bind("<Leave>", lev)
-
         # Render initially selected category
         self.switch_settings_category(self.current_settings_category)
 
     def switch_settings_category(self, category_name: str):
         """Switch active category in the right content pane."""
         self.current_settings_category = category_name
-        self.header_breadcrumb_lbl.config(text=f"  /  {category_name.upper()}")
+        if hasattr(self, 'header_breadcrumb_lbl') and self.header_breadcrumb_lbl.winfo_exists():
+            self.header_breadcrumb_lbl.config(text=f"  /  {category_name.upper()}")
 
-        # Update rail highlight
-        for name, (bf, il, tl) in self._category_buttons.items():
-            if name == category_name:
-                active_bg = COLORS.get('hover_bg', '#282C36')
-                accent = COLORS.get('accent_color', '#2ECC71')
-                bf.config(bg=active_bg)
-                il.config(bg=active_bg, fg=accent)
-                tl.config(bg=active_bg, fg="white")
-            else:
-                bf.config(bg=COLORS['sidebar_bg'])
-                il.config(bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'])
-                tl.config(bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'])
+        # Update dynamic sidebar highlight if sidebar buttons exist
+        sidebar_items = getattr(self, 'settings_nav_items', {})
+        target_frame = sidebar_items.get(category_name)
+        if target_frame and hasattr(self, 'set_active_sidebar'):
+            try:
+                self.set_active_sidebar(target_frame)
+            except Exception:
+                pass
 
         # Clear and re-populate the content pane
-        for child in self.settings_scroll_frame.winfo_children():
-            child.destroy()
+        if hasattr(self, 'settings_scroll_frame') and self.settings_scroll_frame.winfo_exists():
+            for child in self.settings_scroll_frame.winfo_children():
+                child.destroy()
 
-        self.settings_canvas.yview_moveto(0)
+        if hasattr(self, 'settings_canvas') and self.settings_canvas.winfo_exists():
+            self.settings_canvas.yview_moveto(0)
 
         main_box = tk.Frame(self.settings_scroll_frame, bg=COLORS['main_bg'], padx=35, pady=25)
         main_box.pack(fill="both", expand=True)
@@ -696,9 +644,9 @@ class SettingsScreenMixin:
         def clear_logs_view():
             self.log_area.delete("1.0", tk.END)
 
-        make_button(tb, "📋 Copy All", style="secondary", font_size=8, command=copy_all_logs).pack(side="left", padx=(0, 6))
-        make_button(tb, "📁 Open Folder", style="secondary", font_size=8, command=open_logs_folder).pack(side="left", padx=(0, 6))
-        make_button(tb, "🧹 Clear Display", style="secondary", font_size=8, command=clear_logs_view).pack(side="left")
+        make_button(tb, "Copy All", style="secondary", font_size=8, command=copy_all_logs).pack(side="left", padx=(0, 6))
+        make_button(tb, "Open Folder", style="secondary", font_size=8, command=open_logs_folder).pack(side="left", padx=(0, 6))
+        make_button(tb, "Clear Display", style="secondary", font_size=8, command=clear_logs_view).pack(side="left")
 
         self.log_area = scrolledtext.ScrolledText(
             card_log,

@@ -235,6 +235,9 @@ class ThemeManager:
                 self._listeners.remove(callback)
         return _unsub
 
+    # Alias for convenience
+    add_listener = subscribe
+
     def apply(self, theme_key: str, custom_accent: Optional[str] = None, notify: bool = True) -> Dict[str, str]:
         """Apply theme and update global COLORS dictionary in place."""
         if theme_key in THEMES:
