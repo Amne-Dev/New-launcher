@@ -38,7 +38,7 @@ class AccountsScreenMixin:
         print("Opening profile menu")
         menu = tk.Toplevel(self.root)
         menu.overrideredirect(True)
-        menu.config(bg=COLORS['card_bg'])
+        menu.config(bg=COLORS['card_bg'], highlightthickness=1, highlightbackground=COLORS.get('border_subtle', '#2D3139'))
         menu.transient(self.root)
         menu.attributes('-topmost', True)
         self.profile_menu = menu
@@ -62,7 +62,7 @@ class AccountsScreenMixin:
         except: 
             menu.geometry("250x300")
 
-        tk.Label(menu, text="ACCOUNTS", font=("Segoe UI", 10, "bold"), 
+        tk.Label(menu, text="ACCOUNTS", font=(FONT_FAMILY, 10, "bold"), 
                 bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(anchor="w", padx=15, pady=10)
 
         # Create Footer FIRST (so we can pack it to bottom)
@@ -180,7 +180,7 @@ class AccountsScreenMixin:
         lbl_icon.image = head # type: ignore # keep ref
         lbl_icon.pack(side="left", padx=(0, 10))
         
-        tk.Label(frame, text=self._get_streamer_safe_name(profile.get("name", "Unknown")), font=("Segoe UI", 10, "bold"),
+        tk.Label(frame, text=self._get_streamer_safe_name(profile.get("name", "Unknown")), font=(FONT_FAMILY, 10, "bold"),
                 bg=bg, fg=COLORS['text_primary']).pack(side="left")
         
         # Delete Button
@@ -195,7 +195,7 @@ class AccountsScreenMixin:
         # Standard launcher behavior typically allows removing any added account.
         del_btn.pack(side="right", padx=(5, 0))
 
-        tk.Label(frame, text=profile.get("type", "offline").title(), font=("Segoe UI", 8),
+        tk.Label(frame, text=profile.get("type", "offline").title(), font=(FONT_FAMILY, 8),
                 bg=bg, fg=COLORS['text_secondary']).pack(side="right")
         
         def on_click(e):
@@ -255,7 +255,7 @@ class AccountsScreenMixin:
         win_root = self._apply_custom_toplevel_chrome(win, "Add Account")
         self._schedule_dialog_raise()
 
-        tk.Label(win_root, text="Add a new account", font=("Segoe UI", 16, "bold"),
+        tk.Label(win_root, text="Add a new account", font=(FONT_FAMILY, 16, "bold"),
                 bg=COLORS['main_bg'], fg=COLORS['text_primary']).pack(pady=(30, 20))
         
         self._make_btn(win_root, "Microsoft Account", style="primary", font_size=11,
@@ -289,21 +289,21 @@ class AccountsScreenMixin:
         parent.geometry(f"+{x}+{y}")
         self._schedule_dialog_raise()
         
-        tk.Label(content_root, text="Microsoft Login", font=("Segoe UI", 16, "bold"), 
+        tk.Label(content_root, text="Microsoft Login", font=(FONT_FAMILY, 16, "bold"), 
                 bg=COLORS['main_bg'], fg=COLORS['text_primary']).pack(pady=(20, 10))
         
         # Status Label
-        status_lbl = tk.Label(content_root, text="Initializing...", font=("Segoe UI", 10), 
+        status_lbl = tk.Label(content_root, text="Initializing...", font=(FONT_FAMILY, 10), 
                              bg=COLORS['main_bg'], fg=COLORS['text_secondary'], wraplength=450)
         status_lbl.pack(pady=10)
         
         # Code Display
-        code_lbl = tk.Label(content_root, text="", font=("Segoe UI", 24, "bold"), 
-                           bg=COLORS['main_bg'], fg=COLORS['success_green'])
+        code_lbl = tk.Label(content_root, text="", font=(FONT_FAMILY, 24, "bold"), 
+                           bg=COLORS['main_bg'], fg=COLORS.get('accent_color', COLORS['success_green']))
         code_lbl.pack(pady=10)
         
         # URL Display
-        url_lbl = tk.Label(content_root, text="", font=("Segoe UI", 11, "underline"), 
+        url_lbl = tk.Label(content_root, text="", font=(FONT_FAMILY, 11, "underline"), 
                           bg=COLORS['main_bg'], fg="#3498DB", cursor="hand2")
         url_lbl.pack(pady=5)
         
@@ -451,18 +451,18 @@ class AccountsScreenMixin:
         content_root = self._clear_toplevel_content(parent)
         self._schedule_dialog_raise()
         
-        tk.Label(content_root, text="Ely.by Login", font=("Segoe UI", 16, "bold"),
+        tk.Label(content_root, text="Ely.by Login", font=(FONT_FAMILY, 16, "bold"),
                 bg=COLORS['main_bg'], fg=COLORS['text_primary']).pack(pady=(20, 10))
 
         frame = tk.Frame(content_root, bg=COLORS['main_bg'])
         frame.pack(fill="x", padx=40)
 
-        tk.Label(frame, text="Username / Email", font=("Segoe UI", 9), bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(anchor="w")
-        user_entry = tk.Entry(frame, font=("Segoe UI", 10), bg=COLORS['input_bg'], fg=COLORS['text_primary'], relief="flat")
+        tk.Label(frame, text="Username / Email", font=(FONT_FAMILY, 9), bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(anchor="w")
+        user_entry = tk.Entry(frame, font=(FONT_FAMILY, 10), bg=COLORS['input_bg'], fg=COLORS['text_primary'], relief="flat")
         user_entry.pack(fill="x", ipady=5, pady=(5, 15))
 
-        tk.Label(frame, text="Password", font=("Segoe UI", 9), bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(anchor="w")
-        pass_entry = tk.Entry(frame, font=("Segoe UI", 10), bg=COLORS['input_bg'], fg=COLORS['text_primary'], relief="flat", show="*")
+        tk.Label(frame, text="Password", font=(FONT_FAMILY, 9), bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(anchor="w")
+        pass_entry = tk.Entry(frame, font=(FONT_FAMILY, 10), bg=COLORS['input_bg'], fg=COLORS['text_primary'], relief="flat", show="*")
         pass_entry.pack(fill="x", ipady=5, pady=(5, 20))
 
         def do_login():
@@ -509,11 +509,11 @@ class AccountsScreenMixin:
         content_root = self._clear_toplevel_content(parent)
         self._schedule_dialog_raise()
         
-        tk.Label(content_root, text="Offline Account", font=("Segoe UI", 16, "bold"),
+        tk.Label(content_root, text="Offline Account", font=(FONT_FAMILY, 16, "bold"),
                 bg=COLORS['main_bg'], fg=COLORS['text_primary']).pack(pady=(30, 10))
                 
         tk.Label(content_root, text="Username", bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(anchor="w", padx=60)
-        entry = tk.Entry(content_root, font=("Segoe UI", 11), bg=COLORS['input_bg'], fg=COLORS['text_primary'], relief="flat", insertbackground="white")
+        entry = tk.Entry(content_root, font=(FONT_FAMILY, 11), bg=COLORS['input_bg'], fg=COLORS['text_primary'], relief="flat", insertbackground="white")
         entry.pack(fill="x", padx=60, pady=(5, 30), ipady=8)
         entry.focus()
         

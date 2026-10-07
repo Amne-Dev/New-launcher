@@ -62,11 +62,11 @@ class PlayScreenMixin:
         self.inst_selector_text_frame = tk.Frame(self.inst_selector_frame, bg=COLORS['bottom_bar_bg']) 
         self.inst_selector_text_frame.pack(side="left", padx=(10, 0))
         
-        self.inst_name_lbl = tk.Label(self.inst_selector_text_frame, text="", font=("Segoe UI", 11, "bold"), 
+        self.inst_name_lbl = tk.Label(self.inst_selector_text_frame, text="", font=(FONT_FAMILY, 11, "bold"), 
                                      bg=COLORS['bottom_bar_bg'], fg="white", cursor="hand2", anchor="w")
         self.inst_name_lbl.pack(anchor="w")
         
-        self.inst_ver_lbl = tk.Label(self.inst_selector_text_frame, text="", font=("Segoe UI", 9), 
+        self.inst_ver_lbl = tk.Label(self.inst_selector_text_frame, text="", font=(FONT_FAMILY, 9), 
                                     bg=COLORS['bottom_bar_bg'], fg=COLORS['text_secondary'], cursor="hand2", anchor="w")
         self.inst_ver_lbl.pack(anchor="w")
 
@@ -75,13 +75,13 @@ class PlayScreenMixin:
         self.inst_selector_icon.pack(side="left", before=self.inst_selector_text_frame)
 
         # Chevron (Far Right)
-        self.inst_selector_arrow = tk.Label(self.inst_selector_frame, text="▼", font=("Segoe UI", 8), 
+        self.inst_selector_arrow = tk.Label(self.inst_selector_arrow if hasattr(self, 'inst_selector_arrow') else self.inst_selector_frame, text="▼", font=(FONT_FAMILY, 8), 
                                            bg=COLORS['bottom_bar_bg'], fg=COLORS['text_secondary'], cursor="hand2")
         self.inst_selector_arrow.pack(side="right", padx=(15, 5))
 
         # Hover logic
         def on_hover(e):
-             bg = "#3A3B3C" # Sidebar selected color
+             bg = COLORS.get('hover_bg', '#3A3F4D')
              self.inst_selector_frame.config(bg=bg)
              self.inst_selector_text_frame.config(bg=bg)
              self.inst_name_lbl.config(bg=bg)
@@ -114,9 +114,10 @@ class PlayScreenMixin:
         self.play_container = tk.Frame(center_frame, bg=COLORS['play_btn_green'])
         self.play_container.pack()
 
-        self.launch_btn = tk.Button(self.play_container, text="PLAY", font=("Segoe UI", 14, "bold"),
-                                   bg=COLORS['play_btn_green'], fg="white",
-                                   activebackground=COLORS['play_btn_hover'], activeforeground="white",
+        play_fg = COLORS.get('play_btn_text', 'white')
+        self.launch_btn = tk.Button(self.play_container, text="PLAY", font=(FONT_FAMILY, 14, "bold"),
+                                   bg=COLORS['play_btn_green'], fg=play_fg,
+                                   activebackground=COLORS['play_btn_hover'], activeforeground=play_fg,
                                    relief="flat", bd=0, cursor="hand2", width=14, pady=8,
                                    command=lambda: self.start_launch(force_update=False))
         self.launch_btn.pack(side="left")

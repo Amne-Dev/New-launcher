@@ -205,8 +205,10 @@ class InstallationsScreenMixin:
         return None
 
     def create_installation_item(self, parent, idx, inst):
-        item = tk.Frame(parent, bg=COLORS['card_bg'], pady=15, padx=20)
-        item.pack(fill="x", pady=2)
+        border_col = COLORS.get('border_subtle', '#2B303A')
+        item = tk.Frame(parent, bg=COLORS['card_bg'], pady=14, padx=20,
+                        highlightthickness=1, highlightbackground=border_col)
+        item.pack(fill="x", pady=4)
         
         # Determine Icon
         loader = inst.get("loader", "Vanilla")
@@ -229,7 +231,7 @@ class InstallationsScreenMixin:
             elif loader == "BatMod": icon_char = "🦇"
             elif loader == "LabyMod": icon_char = "🐺"
             
-            icon_lbl = tk.Label(item, text=icon_char, bg=COLORS['card_bg'], fg=COLORS['text_secondary'], font=("Segoe UI", 20))
+            icon_lbl = tk.Label(item, text=icon_char, bg=COLORS['card_bg'], fg=COLORS['text_secondary'], font=(FONT_FAMILY, 20))
             icon_lbl.pack(side="left", padx=(0, 20))
         
         # Details
@@ -239,8 +241,8 @@ class InstallationsScreenMixin:
         name = inst.get("name", "Unnamed Installation")
         ver = inst.get("version", "Latest")
         
-        tk.Label(info_frame, text=name, font=("Segoe UI", 11, "bold"), bg=COLORS['card_bg'], fg=COLORS['text_primary']).pack(anchor="w")
-        tk.Label(info_frame, text=f"{loader} {ver}", font=("Segoe UI", 9), bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(anchor="w")
+        tk.Label(info_frame, text=name, font=(FONT_FAMILY, 11, "bold"), bg=COLORS['card_bg'], fg=COLORS['text_primary']).pack(anchor="w")
+        tk.Label(info_frame, text=f"{loader} {ver}", font=(FONT_FAMILY, 9), bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(anchor="w")
         
         # Actions
         actions = tk.Frame(item, bg=COLORS['card_bg'])

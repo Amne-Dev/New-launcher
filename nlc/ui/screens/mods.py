@@ -66,12 +66,8 @@ class ModsScreenMixin:
 
         self.mods_active_pack_combobox.bind("<<ComboboxSelected>>", on_pack_change)
 
-        # View Mode (Mods vs Modpacks)
+        # View Mode (Mods vs Modpacks vs Resource Packs vs Shaders)
         self.browse_mode_var = tk.StringVar(value="mod")
-        
-        mode_frame = tk.Frame(top_bar, bg=COLORS['main_bg'])
-        if not getattr(self, 'neo_style_enabled', True):
-            mode_frame.pack(side="top", fill="x", pady=(0, 10))
 
         def switch_mode(m):
             self.browse_mode_var.set(m)
@@ -81,35 +77,10 @@ class ModsScreenMixin:
             if m in ["modpack", "shader", "resourcepack"]:
                 mp_frame.pack_forget()
             else:
-                mp_frame.pack(side="top", fill="x", pady=(0, 10), before=mode_frame if not getattr(self, 'neo_style_enabled', True) else search_line)
+                mp_frame.pack(side="top", fill="x", pady=(0, 10), before=search_line)
 
-            # visual update only if mode frame is packed
-            if not getattr(self, 'neo_style_enabled', True):
-                btn_mod.config(bg=COLORS['input_bg'])
-                btn_pack.config(bg=COLORS['input_bg'])
-                btn_rp.config(bg=COLORS['input_bg'])
-
-                if m == "mod":
-                    btn_mod.config(bg=COLORS['accent_blue'])
-                elif m == "modpack":
-                    btn_pack.config(bg=COLORS['accent_blue'])
-                elif m == "resourcepack":
-                    btn_rp.config(bg=COLORS['accent_blue'])
-
-        # Expose the method globally
+        # Expose the method globally for Neo sidebar drill-down
         self.switch_modrinth_mode = switch_mode
-        btn_mod = self._make_btn(mode_frame, "Mods", style="secondary", font_size=9,
-                                  width=12, command=lambda: switch_mode("mod"))
-        btn_mod.config(bg=COLORS['accent_blue'], activebackground="#2E86C1")
-        btn_mod.pack(side="left", padx=(0, 5))
-
-        btn_pack = self._make_btn(mode_frame, "Modpacks", style="secondary", font_size=9,
-                                   width=12, command=lambda: switch_mode("modpack"))
-        btn_pack.pack(side="left", padx=5)
-
-        btn_rp = self._make_btn(mode_frame, "Resource Packs", style="secondary", font_size=9,
-                                   width=14, command=lambda: switch_mode("resourcepack"))
-        btn_rp.pack(side="left", padx=5)
         
         # Search Entry
         search_line = tk.Frame(top_bar, bg=COLORS['main_bg'])

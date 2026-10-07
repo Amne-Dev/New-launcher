@@ -43,7 +43,7 @@ from PIL import Image, ImageTk, ImageDraw
 import minecraft_launcher_lib
 import requests
 
-from nlc.ui.theme import COLORS, FONT_FAMILY, THEMES, THEME_MANAGER
+from nlc.ui.theme import COLORS, METRICS, FONT_FAMILY, THEMES, THEME_MANAGER
 from nlc.ui.animation import AnimationManager
 from nlc.storage.paths import resource_path, get_minecraft_dir, is_version_installed, RESAMPLE_NEAREST, FLIP_LEFT_RIGHT, AFFINE
 from nlc.storage.config import (
@@ -63,6 +63,8 @@ from nlc.ui.components.dialogs import (
 from nlc.ui.components.toasts import ToastManager, PopupManager
 from nlc.ui.components.skin_renderer import SkinRenderer3D
 from nlc.ui.components.downloads import DownloadManager, DownloadQueueMixin
+from nlc.ui.components.buttons import make_button, make_badge
+from nlc.ui.components.cards import create_card
 from nlc.ui.dispatcher import EventDispatcher
 from nlc.ui.screens.accounts import AccountsScreenMixin
 from nlc.ui.screens.settings import SettingsScreenMixin
@@ -2234,129 +2236,184 @@ class MinecraftLauncher(
 
     def create_layout(self):
         root_parent = self.window_content if self.window_content is not None else self.root
-        # 1. Sidebar (Left) - width 250px for proper menu
-        neo_mode = getattr(self, 'neo_style_enabled', True)
-        sb_width = 240 if neo_mode else 200
+        # 1. Sidebar (Left) - width 240px for modern unified Neo sidebar
+        sb_width = METRICS.get('sidebar_width', 240)
         self.sidebar = tk.Frame(root_parent, bg=COLORS['sidebar_bg'], width=sb_width)
         self.sidebar.pack(side="left", fill="y")
         self.sidebar.pack_propagate(False)
         
         # --- Sidebar Profile Section (Top Left) ---
         self.profile_frame = tk.Frame(self.sidebar, bg=COLORS['sidebar_bg'], cursor="hand2")
-        self.profile_frame.pack(fill="x", ipady=10, padx=10, pady=10)
+        self.profile_frame.pack(fill="x", ipady=8, padx=12, pady=10)
         self.profile_frame.bind("<Button-1>", lambda e: self.toggle_profile_menu())
         
-        # Profile Icon
-        self.sidebar_head_label = tk.Label(self.profile_frame, bg=COLORS['sidebar_bg'])
-        self.sidebar_head_label.pack(side="left", padx=(5, 10))
+        # Profile Icon (Player Head)
+        self.sidebar_head_label = tk.Label(self.profile_frame, bg=COLORS['sidebar_bg'], cursor="hand2")
+        self.sidebar_head_label.pack(side="left", padx=(4, 10))
         self.sidebar_head_label.bind("<Button-1>", lambda e: self.toggle_profile_menu())
         
         # Profile Text Container
-        self.sidebar_text_frame = tk.Frame(self.profile_frame, bg=COLORS['sidebar_bg'])
-        self.sidebar_text_frame.pack(side="left", fill="x")
+        self.sidebar_text_frame = tk.Frame(self.profile_frame, bg=COLORS['sidebar_bg'], cursor="hand2")
+        self.sidebar_text_frame.pack(side="left", fill="x", expand=True)
         self.sidebar_text_frame.bind("<Button-1>", lambda e: self.toggle_profile_menu())
         
-        self.sidebar_username = tk.Label(self.sidebar_text_frame, text="Steve", font=("Segoe UI", 11, "bold"),
-                                        bg=COLORS['sidebar_bg'], fg=COLORS['text_primary'], anchor="w")
+        self.sidebar_username = tk.Label(
+            self.sidebar_text_frame,
+            text="Steve",
+            font=(FONT_FAMILY, 10, "bold"),
+            bg=COLORS['sidebar_bg'],
+            fg=COLORS['text_primary'],
+            anchor="w",
+            cursor="hand2"
+        )
         self.sidebar_username.pack(fill="x")
         self.sidebar_username.bind("<Button-1>", lambda e: self.toggle_profile_menu())
         
-        self.sidebar_acct_type = tk.Label(self.sidebar_text_frame, text="Offline", font=("Segoe UI", 8),
-                                         bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'], anchor="w")
+        self.sidebar_acct_type = tk.Label(
+            self.sidebar_text_frame,
+            text="Offline",
+            font=(FONT_FAMILY, 8),
+            bg=COLORS['sidebar_bg'],
+            fg=COLORS['text_secondary'],
+            anchor="w",
+            cursor="hand2"
+        )
         self.sidebar_acct_type.pack(fill="x")
         self.sidebar_acct_type.bind("<Button-1>", lambda e: self.toggle_profile_menu())
 
-        tk.Frame(self.sidebar, bg=COLORS.get('separator', '#454545'), height=1).pack(fill="x", padx=10, pady=(0, 20)) # Separator
+        self.sidebar_chevron = tk.Label(
+            self.profile_frame,
+            text="▾",
+            font=(FONT_FAMILY, 9),
+            bg=COLORS['sidebar_bg'],
+            fg=COLORS.get('text_muted', '#6B7280'),
+            cursor="hand2"
+        )
+        self.sidebar_chevron.pack(side="right", padx=(4, 4))
+        self.sidebar_chevron.bind("<Button-1>", lambda e: self.toggle_profile_menu())
+
+        self._attach_sidebar_hover(self.profile_frame)
+
+        tk.Frame(self.sidebar, bg=COLORS.get('separator', '#454545'), height=1).pack(fill="x", padx=12, pady=(0, 16)) # Separator
 
         # --- Sidebar Menu Items ---
         self.sidebar_items = []
         self.nav_buttons = {}
 
-        if neo_mode:
-            # Unified Navigation for Neo Mode
-            self.sidebar_nav_frame = tk.Frame(self.sidebar, bg=COLORS['sidebar_bg'])
-            self.sidebar_nav_frame.pack(fill="both", expand=True)
+        self.sidebar_nav_frame = tk.Frame(self.sidebar, bg=COLORS['sidebar_bg'])
+        self.sidebar_nav_frame.pack(fill="both", expand=True)
 
-            def _neo_nav(parent, text, tab_name, icon_name=None, action=None):
-                frame = tk.Frame(parent, bg=COLORS['sidebar_bg'], cursor="hand2", padx=15, pady=8)
-                frame.pack(fill="x")
-                self.sidebar_items.append(frame)
+        def _make_category_header(parent, title):
+            lbl = tk.Label(
+                parent,
+                text=title,
+                font=(FONT_FAMILY, 8, "bold"),
+                fg=COLORS.get('text_muted', '#6B7280'),
+                bg=COLORS['sidebar_bg']
+            )
+            lbl.pack(anchor="w", padx=16, pady=(12, 4))
+            lbl._is_category_header = True  # type: ignore[attr-defined]
+            return lbl
 
-                if icon_name:
-                    icon_path = f"icons/{icon_name}" if not icon_name.startswith("icons/") else icon_name
-                    img = getattr(self, "get_icon_image", lambda x, y: None)(icon_path, (20, 20))
-                    if img:
-                        lbl_img = tk.Label(frame, image=img, bg=COLORS['sidebar_bg'], cursor="hand2")
-                        lbl_img.image = img # type: ignore
-                        lbl_img.pack(side="left", padx=(0, 10))
-                    else:
-                        tk.Label(frame, text="*", font=("Segoe UI", 12), bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'], cursor="hand2").pack(side="left", padx=(0, 10))
-                
-                lbl = tk.Label(frame, text=text, font=("Segoe UI", 10, "bold"), bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'], cursor="hand2")
-                lbl.pack(side="left")
+        def _neo_nav(parent, text, tab_name, icon_name=None, action=None):
+            frame = tk.Frame(parent, bg=COLORS['sidebar_bg'], cursor="hand2", padx=8, pady=6)
+            frame.pack(fill="x", padx=6, pady=1)
+            self.sidebar_items.append(frame)
 
-                def on_click(e):
-                    if action:
-                        action()
-                        self.set_active_sidebar(frame)
-                        return
+            # Left active accent indicator pill (hidden by default)
+            accent_col = COLORS.get('accent_color', '#2ECC71')
+            bar = tk.Frame(frame, bg=accent_col, width=3)
+            frame._active_bar = bar  # type: ignore[attr-defined]
+
+            if icon_name:
+                icon_path = f"icons/{icon_name}" if not icon_name.startswith("icons/") else icon_name
+                img = getattr(self, "get_icon_image", lambda x, y: None)(icon_path, (20, 20))
+                if img:
+                    lbl_img = tk.Label(frame, image=img, bg=COLORS['sidebar_bg'], cursor="hand2")
+                    lbl_img.image = img # type: ignore
+                    lbl_img.pack(side="left", padx=(6, 8))
+                    frame._lbl_icon = lbl_img  # type: ignore[attr-defined]
+                else:
+                    lbl_sym = tk.Label(frame, text="•", font=(FONT_FAMILY, 11), bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'], cursor="hand2")
+                    lbl_sym.pack(side="left", padx=(6, 8))
+                    frame._lbl_icon = lbl_sym  # type: ignore[attr-defined]
+            else:
+                lbl_spacer = tk.Label(frame, text="", width=2, bg=COLORS['sidebar_bg'])
+                lbl_spacer.pack(side="left")
+                frame._lbl_icon = lbl_spacer  # type: ignore[attr-defined]
+
+            lbl = tk.Label(
+                frame,
+                text=text,
+                font=(FONT_FAMILY, 9, "bold"),
+                bg=COLORS['sidebar_bg'],
+                fg=COLORS['text_secondary'],
+                cursor="hand2"
+            )
+            lbl.pack(side="left")
+            frame._lbl_text = lbl  # type: ignore[attr-defined]
+
+            def on_click(e):
+                if action:
+                    action()
                     self.set_active_sidebar(frame)
-                    self.show_tab(tab_name)
+                    return
+                self.set_active_sidebar(frame)
+                self.show_tab(tab_name)
 
-                frame.bind("<Button-1>", on_click)
-                lbl.bind("<Button-1>", on_click)
-                for c in frame.winfo_children():
-                    c.bind("<Button-1>", on_click)
+            frame.bind("<Button-1>", on_click)
+            lbl.bind("<Button-1>", on_click)
+            for c in frame.winfo_children():
+                c.bind("<Button-1>", on_click)
 
-                self._attach_sidebar_hover(frame)
+            self._attach_sidebar_hover(frame)
 
-                if tab_name == "Play":
-                    self.minecraft_btn_frame = frame # type: ignore
-                    frame.is_active = True # type: ignore
-                    lbl.config(fg="white")
+            if tab_name == "Play":
+                self.minecraft_btn_frame = frame  # type: ignore
+                frame.is_active = True  # type: ignore
+                lbl.config(fg=COLORS['text_primary'])
+                bar.pack(side="left", fill="y", padx=(0, 6), before=getattr(frame, "_lbl_icon", None))
 
-            def build_main_sidebar():
-                for widget in self.sidebar_nav_frame.winfo_children():
-                    widget.destroy()
-                self.sidebar_items = [item for item in getattr(self, 'sidebar_items', []) if item.winfo_exists() and item.master != self.sidebar_nav_frame]
-                
-                tk.Label(self.sidebar_nav_frame, text="GAMES", font=("Segoe UI", 8, "bold"), fg="#505050", bg=COLORS['sidebar_bg']).pack(anchor="w", padx=15, pady=(0,5))
-                _neo_nav(self.sidebar_nav_frame, "Minecraft Java", "Play", "grass_block_side.png")
-                _neo_nav(self.sidebar_nav_frame, "Installations", "Installations", "crafting_table_front.png")
-                _neo_nav(self.sidebar_nav_frame, "Modpacks", "Modpacks", "shulker_box.png")
+        def build_main_sidebar():
+            for widget in self.sidebar_nav_frame.winfo_children():
+                widget.destroy()
+            self.sidebar_items = [item for item in getattr(self, 'sidebar_items', []) if item.winfo_exists() and item.master != self.sidebar_nav_frame]
+            
+            _make_category_header(self.sidebar_nav_frame, "GAMES")
+            _neo_nav(self.sidebar_nav_frame, "Minecraft Java", "Play", "grass_block_side.png")
+            _neo_nav(self.sidebar_nav_frame, "Installations", "Installations", "crafting_table_front.png")
+            _neo_nav(self.sidebar_nav_frame, "Modpacks", "Modpacks", "shulker_box.png")
 
-                tk.Label(self.sidebar_nav_frame, text="DISCOVER", font=("Segoe UI", 8, "bold"), fg="#505050", bg=COLORS['sidebar_bg']).pack(anchor="w", padx=15, pady=(15,5))
-                _neo_nav(self.sidebar_nav_frame, "Modrinth", "Modrinth", "crafting_table_top.png", action=build_modrinth_sidebar)
-                _neo_nav(self.sidebar_nav_frame, "Addons", "Addons", "beacon.png")
-                _neo_nav(self.sidebar_nav_frame, "Locker", "Locker", "enchanting_table_side.png")
+            _make_category_header(self.sidebar_nav_frame, "DISCOVER")
+            _neo_nav(self.sidebar_nav_frame, "Modrinth", "Modrinth", "crafting_table_top.png", action=build_modrinth_sidebar)
+            _neo_nav(self.sidebar_nav_frame, "Addons", "Addons", "beacon.png")
+            _neo_nav(self.sidebar_nav_frame, "Locker", "Locker", "enchanting_table_side.png")
 
-            def build_modrinth_sidebar():
-                for widget in self.sidebar_nav_frame.winfo_children():
-                    widget.destroy()
-                self.sidebar_items = [item for item in getattr(self, 'sidebar_items', []) if item.winfo_exists() and item.master != self.sidebar_nav_frame]
-                
-                _neo_nav(self.sidebar_nav_frame, "← Back", "Back", None, action=build_main_sidebar)
-                
-                tk.Label(self.sidebar_nav_frame, text="MODRINTH NETWORK", font=("Segoe UI", 8, "bold"), fg="#505050", bg=COLORS['sidebar_bg']).pack(anchor="w", padx=15, pady=(10,5))
-                
-                def nav_modrinth(mode):
-                    def _action():
-                        self.show_tab("Mods")
-                        if hasattr(self, 'switch_modrinth_mode'):
-                            self.switch_modrinth_mode(mode)
-                    return _action
+        def build_modrinth_sidebar():
+            for widget in self.sidebar_nav_frame.winfo_children():
+                widget.destroy()
+            self.sidebar_items = [item for item in getattr(self, 'sidebar_items', []) if item.winfo_exists() and item.master != self.sidebar_nav_frame]
+            
+            _neo_nav(self.sidebar_nav_frame, "← Back", "Back", None, action=build_main_sidebar)
+            
+            _make_category_header(self.sidebar_nav_frame, "MODRINTH NETWORK")
+            
+            def nav_modrinth(mode):
+                def _action():
+                    self.show_tab("Mods")
+                    if hasattr(self, 'switch_modrinth_mode'):
+                        self.switch_modrinth_mode(mode)
+                return _action
 
-                _neo_nav(self.sidebar_nav_frame, "Mods", "Mods", "comparator_on.png", action=nav_modrinth("mod"))
-                _neo_nav(self.sidebar_nav_frame, "Resource Packs", "Resource Packs", "painting.png", action=nav_modrinth("resourcepack"))
-                _neo_nav(self.sidebar_nav_frame, "Modpacks", "Modpacks", "shulker_box.png", action=nav_modrinth("modpack"))
-                _neo_nav(self.sidebar_nav_frame, "Shaders", "Shaders", "glowstone.png", action=nav_modrinth("shader"))
+            _neo_nav(self.sidebar_nav_frame, "Mods", "Mods", "comparator_on.png", action=nav_modrinth("mod"))
+            _neo_nav(self.sidebar_nav_frame, "Resource Packs", "Resource Packs", "painting.png", action=nav_modrinth("resourcepack"))
+            _neo_nav(self.sidebar_nav_frame, "Modpacks", "Modpacks", "shulker_box.png", action=nav_modrinth("modpack"))
+            _neo_nav(self.sidebar_nav_frame, "Shaders", "Shaders", "glowstone.png", action=nav_modrinth("shader"))
 
-            build_main_sidebar()
+        self.build_main_sidebar = build_main_sidebar
+        self.build_modrinth_sidebar = build_modrinth_sidebar
+        build_main_sidebar()
 
-        else:
-            # Classic Navigation
-            # Minecraft: Java Edition (Highlighted)
-            java_btn_frame = tk.Frame(self.sidebar, bg=COLORS.get('hover_bg', '#3A3B3C'), cursor="hand2", padx=10, pady=10) # Lighter grey highlight
         # Settings Link (Gear) - Packed to bottom first to be at the very bottom
         self._create_sidebar_link("Settings", lambda: self.open_global_settings(), is_action=True, pack_side="bottom", icon="⚙")
 
@@ -2369,21 +2426,11 @@ class MinecraftLauncher(
         # 2. Main Content Area
         self.content_area = tk.Frame(root_parent, bg=COLORS['main_bg'])
         self.content_area.pack(side="right", fill="both", expand=True)
-        
-        # 3. Top Navigation Bar (Only for Classic)
-        if not neo_mode:
-            self.nav_bar = tk.Frame(self.content_area, bg=COLORS['tab_bar_bg'], height=60)
-            self.nav_bar.pack(fill="x", side="top")
-            self.nav_bar.pack_propagate(False)
-            
-            self.create_nav_btn("Play", lambda: self.show_tab("Play"))
-            self.create_nav_btn("Installations", lambda: self.show_tab("Installations"))
-            self.create_nav_btn("Modpacks", lambda: self.show_tab("Modpacks"))
-            self.create_nav_btn("Locker", lambda: self.show_tab("Locker"))
-        else:
-            self.nav_bar = None # Clear it
 
-        # 4. Tab Container
+        # Permanent Neo style: top nav_bar is completely omitted
+        self.nav_bar = None
+
+        # 3. Tab Container
         self.tab_container = tk.Frame(self.content_area, bg=COLORS['main_bg'])
         self.tab_container.pack(fill="both", expand=True)
         
@@ -2392,15 +2439,13 @@ class MinecraftLauncher(
         self.create_play_tab()
         self.create_locker_tab()
         self.create_installations_tab()
-        # Modrinth Tabs Lazy Loading
-        # self.create_mods_tab()
         self.create_modpacks_tab()
         self.create_settings_tab()
         self.create_addons_tab()
         
         # Trigger play selection
-        if neo_mode and hasattr(self, 'minecraft_btn_frame'):
-             self.set_active_sidebar(self.minecraft_btn_frame) # type: ignore
+        if hasattr(self, 'minecraft_btn_frame'):
+            self.set_active_sidebar(self.minecraft_btn_frame)
         self.show_tab("Play")
 
     def apply_theme(self, theme_key: str, custom_accent: Optional[str] = None):
@@ -2423,10 +2468,7 @@ class MinecraftLauncher(
                 self.root.config(bg=new_tokens['main_bg'])
             if hasattr(self, 'content_area') and self.content_area.winfo_exists():
                 self.content_area.config(bg=new_tokens['main_bg'])
-            if hasattr(self, 'sidebar') and self.sidebar.winfo_exists():
-                self.sidebar.config(bg=new_tokens['sidebar_bg'])
-            if hasattr(self, 'sidebar_nav_frame') and self.sidebar_nav_frame.winfo_exists():
-                self.sidebar_nav_frame.config(bg=new_tokens['sidebar_bg'])
+            self.refresh_sidebar_theme()
         except Exception:
             pass
 
@@ -3638,36 +3680,41 @@ class MinecraftLauncher(
                  command=dialog.destroy).pack(side="right", padx=5)
 
     def set_active_sidebar(self, active_frame):
-        hover_col = COLORS.get('hover_bg', '#3A3B3C')
+        hover_col = COLORS.get('hover_bg', '#3A3F4D')
         sidebar_col = COLORS['sidebar_bg']
+        accent_col = COLORS.get('accent_color', '#2ECC71')
 
         for frame in getattr(self, 'sidebar_items', []):
-            if frame == active_frame:
-                if getattr(self, 'animator', None) and self.animator.is_enabled:
-                    self.animator.animate_color(frame, "bg", frame.cget("bg"), hover_col, duration_ms=90)
+            if not getattr(frame, 'winfo_exists', lambda: False)():
+                continue
+            is_target = (frame == active_frame)
+            frame.is_active = is_target
+
+            # Manage active accent indicator bar
+            bar = getattr(frame, "_active_bar", None)
+            if bar and bar.winfo_exists():
+                bar.config(bg=accent_col)
+                if is_target:
+                    bar.pack(side="left", fill="y", padx=(0, 6), before=getattr(frame, "_lbl_icon", None))
                 else:
-                    frame.config(bg=hover_col)
-                frame.is_active = True
-                for child in frame.winfo_children():
-                    if isinstance(child, tk.Label):
-                        if not getattr(child, "_keep_sidebar_bg", False):
-                            child.config(bg=hover_col, fg=COLORS['text_primary'])
+                    bar.pack_forget()
+
+            target_bg = hover_col if is_target else sidebar_col
+            if getattr(self, 'animator', None) and self.animator.is_enabled:
+                self.animator.animate_color(frame, "bg", frame.cget("bg"), target_bg, duration_ms=90)
             else:
-                if getattr(frame, "is_active", False):
-                    if getattr(self, 'animator', None) and self.animator.is_enabled:
-                        self.animator.animate_color(frame, "bg", frame.cget("bg"), sidebar_col, duration_ms=90)
-                    else:
-                        frame.config(bg=sidebar_col)
-                else:
-                    frame.config(bg=sidebar_col)
-                frame.is_active = False
-                for child in frame.winfo_children():
-                    if isinstance(child, tk.Label):
-                        if not getattr(child, "_keep_sidebar_bg", False):
-                            child.config(bg=sidebar_col, fg=COLORS['text_secondary'])
+                frame.config(bg=target_bg)
+
+            for child in frame.winfo_children():
+                if getattr(child, '_is_category_header', False):
+                    continue
+                if isinstance(child, tk.Label):
+                    if not getattr(child, "_keep_sidebar_bg", False):
+                        fg_col = COLORS['text_primary'] if is_target else COLORS['text_secondary']
+                        child.config(bg=target_bg, fg=fg_col)
 
     def _attach_sidebar_hover(self, frame):
-        hover_col = COLORS.get('hover_bg', '#3A3B3C')
+        hover_col = COLORS.get('hover_bg', '#3A3F4D')
         sidebar_col = COLORS['sidebar_bg']
 
         def on_enter(e):
@@ -3676,6 +3723,8 @@ class MinecraftLauncher(
             else:
                 frame.config(bg=hover_col)
             for child in frame.winfo_children():
+                if getattr(child, '_is_category_header', False):
+                    continue
                 if isinstance(child, tk.Label):
                     if not getattr(child, "_keep_sidebar_bg", False):
                         child.config(bg=hover_col, fg=COLORS['text_primary'])
@@ -3688,12 +3737,49 @@ class MinecraftLauncher(
             else:
                 frame.config(bg=sidebar_col)
             for child in frame.winfo_children():
+                if getattr(child, '_is_category_header', False):
+                    continue
                 if isinstance(child, tk.Label):
                     if not getattr(child, "_keep_sidebar_bg", False):
                         child.config(bg=sidebar_col, fg=COLORS['text_secondary'])
             
         frame.bind("<Enter>", on_enter)
         frame.bind("<Leave>", on_leave)
+
+    def refresh_sidebar_theme(self):
+        """Synchronize all sidebar components, active bars, and section headers with active theme tokens."""
+        sidebar_bg = COLORS['sidebar_bg']
+        hover_bg = COLORS.get('hover_bg', '#3A3F4D')
+        accent_col = COLORS.get('accent_color', '#2ECC71')
+        muted_col = COLORS.get('text_muted', '#6B7280')
+
+        if hasattr(self, 'sidebar') and self.sidebar.winfo_exists():
+            self.sidebar.config(bg=sidebar_bg)
+        if hasattr(self, 'sidebar_nav_frame') and self.sidebar_nav_frame.winfo_exists():
+            self.sidebar_nav_frame.config(bg=sidebar_bg)
+        if hasattr(self, 'profile_frame') and self.profile_frame.winfo_exists():
+            self.profile_frame.config(bg=sidebar_bg)
+            for child in self.profile_frame.winfo_children():
+                if isinstance(child, tk.Label):
+                    child.config(bg=sidebar_bg)
+
+        for frame in getattr(self, 'sidebar_items', []):
+            if not getattr(frame, 'winfo_exists', lambda: False)():
+                continue
+            is_active = getattr(frame, 'is_active', False)
+            target_bg = hover_bg if is_active else sidebar_bg
+            frame.config(bg=target_bg)
+
+            bar = getattr(frame, '_active_bar', None)
+            if bar and bar.winfo_exists():
+                bar.config(bg=accent_col)
+
+            for child in frame.winfo_children():
+                if getattr(child, '_is_category_header', False):
+                    child.config(bg=sidebar_bg, fg=muted_col)
+                elif isinstance(child, tk.Label):
+                    if not getattr(child, '_keep_sidebar_bg', False):
+                        child.config(bg=target_bg, fg=COLORS['text_primary'] if is_active else COLORS['text_secondary'])
 
     def _create_sidebar_link(self, text, url_or_command, indicator_text=None, indicator_color=None, is_action=False, pack_side="top", icon=None):
         frame = tk.Frame(self.sidebar, bg=COLORS['sidebar_bg'], cursor="hand2", padx=15, pady=8)
@@ -3711,17 +3797,17 @@ class MinecraftLauncher(
                  bg_color = "#E74C3C" if indicator_text == "Mods" else "#2D8F36"
              
              indicator_label = tk.Label(frame, text=indicator_text, bg=bg_color, fg="white", 
-                     font=("Segoe UI", 8, "bold"), width=4, cursor="hand2")
+                     font=(FONT_FAMILY, 8, "bold"), width=4, cursor="hand2")
              indicator_label._keep_sidebar_bg = True  # type: ignore[attr-defined]
              indicator_label.pack(side="left", padx=(0,10))
         
         # Icon
         if icon:
              # Use a larger font for the symbol
-             tk.Label(frame, text=icon, font=("Segoe UI", 12), bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'], 
+             tk.Label(frame, text=icon, font=(FONT_FAMILY, 12), bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'], 
                       cursor="hand2").pack(side="left", padx=(0, 10))
 
-        lbl = tk.Label(frame, text=text, font=("Segoe UI", 9), bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'], cursor="hand2")
+        lbl = tk.Label(frame, text=text, font=(FONT_FAMILY, 9), bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary'], cursor="hand2")
         lbl.pack(side="left")
         
         def handle_click(e):
@@ -3884,79 +3970,20 @@ class MinecraftLauncher(
 
     def _make_btn(self, parent, text, style="secondary", command=None, font_size=9,
                   bold=False, icon=False, width=None, pack_opts=None):
-        """Create a consistently styled button.
-        
-        Styles:
-            primary   — Accent/green background, white text
-            secondary — Dark gray background, white text
-            danger    — Red background, white text
-            text      — Transparent background, muted text, no padding
-            icon      — Compact square for icon-only buttons (📁, ..., ⋮)
-        """
-        weight = "bold" if bold else ""
-        cfg = {
-            "primary":   {"bg": COLORS.get('play_btn_green', '#2D8F36'), "fg": "white",
-                          "hover": COLORS.get('play_btn_green', '#2D8F36'), "active_fg": "white"},
-            "secondary": {"bg": "#404040", "fg": "#E0E0E0",
-                          "hover": "#525252", "active_fg": "white"},
-            "danger":    {"bg": "#C0392B", "fg": "white",
-                          "hover": "#E74C3C", "active_fg": "white"},
-            "text":      {"bg": COLORS.get('main_bg', '#1E1E1E'), "fg": "#909090",
-                          "hover": COLORS.get('main_bg', '#1E1E1E'), "active_fg": "white"},
-            "icon":      {"bg": "#404040", "fg": "#C0C0C0",
-                          "hover": "#525252", "active_fg": "white"},
-        }.get(style, {"bg": "#404040", "fg": "white", "hover": "#525252", "active_fg": "white"})
-
-        btn = tk.Button(parent, text=text, font=("Segoe UI", font_size, weight),
-                       bg=cfg["bg"], fg=cfg["fg"],
-                       activebackground=cfg["hover"], activeforeground=cfg["active_fg"],
-                       relief="flat", bd=0, cursor="hand2", command=command) # type: ignore
-
-        if os.name != "nt":
-            btn.config(
-                highlightthickness=0,
-                takefocus=0,
-                highlightbackground=cfg["bg"],
-                highlightcolor=cfg["bg"],
-                disabledforeground=cfg["fg"],
-            )
-
-        if style == "icon":
-            btn.config(padx=6, pady=4)
-        elif style == "text":
-            btn.config(padx=2, pady=2)
-        else:
-            btn.config(padx=14, pady=6)
-
-        if width is not None:
-            btn.config(width=width)
-
-        # Hover effects
-        def on_enter(e):
-            btn.config(bg=cfg["hover"])
-        def on_leave(e):
-            btn.config(bg=cfg["bg"])
-        btn.bind("<Enter>", on_enter)
-        btn.bind("<Leave>", on_leave)
-
-        if os.name != "nt":
-            def prime_linux_button():
-                try:
-                    if not btn.winfo_exists():
-                        return
-                    btn.config(
-                        bg=cfg["bg"],
-                        fg=cfg["fg"],
-                        activebackground=cfg["hover"],
-                        activeforeground=cfg["active_fg"],
-                    )
-                    btn.update_idletasks()
-                except Exception:
-                    pass
-
-            btn.after_idle(prime_linux_button)
-            btn.after(40, prime_linux_button)
-
+        """Create a consistently styled button adhering to design tokens and micro-animations."""
+        btn_style = "icon" if icon else style
+        btn = make_button(
+            parent,
+            text,
+            style=btn_style,
+            command=command,
+            font_size=font_size,
+            bold=bold,
+            width=width,
+            animator=getattr(self, 'animator', None)
+        )
+        if pack_opts:
+            btn.pack(**pack_opts)
         return btn
 
     def _animate_menu_open(self, menu, target_h, direction="down", pos_x=None, pos_y=None, pos_w=None):
@@ -4051,21 +4078,20 @@ class MinecraftLauncher(
             self.installation_menu = None
 
     def create_nav_btn(self, text, command):
-        def wrapped_command():
-            # Automatically set Minecraft as active sidebar when top nav is clicked
-            if hasattr(self, 'minecraft_btn_frame'):
-                self.set_active_sidebar(self.minecraft_btn_frame) # type: ignore
-            command()
-
-        btn = tk.Button(self.nav_bar, text=text.upper(), font=("Segoe UI", 11, "bold"),
-                       bg=COLORS['tab_bar_bg'], fg=COLORS['text_secondary'],
-                       activebackground=COLORS['tab_bar_bg'], activeforeground=COLORS['text_primary'],
-                       relief="flat", bd=0, cursor="hand2", command=wrapped_command)
-        btn.pack(side="left", padx=30, pady=15)
-        # Hover
-        btn.bind("<Enter>", lambda e, b=btn: b.config(fg=COLORS['text_primary']))
-        btn.bind("<Leave>", lambda e, b=btn: b.config(fg=COLORS['text_secondary']) if b.cget('bg') == COLORS['tab_bar_bg'] else None)
-        self.nav_buttons[text] = btn
+        """Deprecated legacy top nav button constructor; retained as a safe proxy."""
+        if hasattr(self, 'nav_bar') and self.nav_bar and self.nav_bar.winfo_exists():
+            def wrapped_command():
+                if hasattr(self, 'minecraft_btn_frame'):
+                    self.set_active_sidebar(self.minecraft_btn_frame)
+                command()
+            btn = tk.Button(self.nav_bar, text=text.upper(), font=(FONT_FAMILY, 11, "bold"),
+                           bg=COLORS['tab_bar_bg'], fg=COLORS['text_secondary'],
+                           activebackground=COLORS['tab_bar_bg'], activeforeground=COLORS['text_primary'],
+                           relief="flat", bd=0, cursor="hand2", command=wrapped_command)
+            btn.pack(side="left", padx=30, pady=15)
+            self.nav_buttons[text] = btn
+            return btn
+        return None
 
     def show_tab(self, tab_name):
         # Close any open dropdown menus

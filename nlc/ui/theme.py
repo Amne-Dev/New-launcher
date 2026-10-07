@@ -204,10 +204,9 @@ FONTS = {
 METRICS = {
     'window_default_width': 1080,
     'window_default_height': 720,
-    'sidebar_width_neo': 240,
-    'sidebar_width_classic': 200,
+    'sidebar_width': 240,
+    'sidebar_width_neo': 240,  # alias for backward compatibility
     'bottom_bar_height': 80,
-    'nav_bar_height': 60,
     'card_padding_x': 16,
     'card_padding_y': 12,
     'btn_padding_x': 16,

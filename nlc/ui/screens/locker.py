@@ -57,7 +57,7 @@ class LockerScreenMixin:
         # Update buttons
         for name, btn in self.locker_btns.items():
             if name == v:
-                btn.config(bg=COLORS['success_green'], fg="white")
+                btn.config(bg=COLORS.get('accent_color', COLORS['play_btn_green']), fg=COLORS.get('accent_text', 'white'))
             else:
                 btn.config(bg=COLORS['input_bg'], fg=COLORS['text_primary'])
         
@@ -89,7 +89,7 @@ class LockerScreenMixin:
         self.preview_card = tk.Frame(preview_area, bg=COLORS['card_bg'], padx=40, pady=40)
         self.preview_card.place(relx=0.5, rely=0.5, anchor="center") # Centered perfectly
         
-        tk.Label(self.preview_card, text="CURRENT SKIN", font=("Segoe UI", 12, "bold"), 
+        tk.Label(self.preview_card, text="CURRENT SKIN", font=(FONT_FAMILY, 12, "bold"), 
                  bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(pady=(0, 20))
 
         # Canvas for the Skin
@@ -97,7 +97,7 @@ class LockerScreenMixin:
         self.preview_canvas.pack()
         
         self.skin_indicator = tk.Label(self.preview_card, text="", 
-                                      font=("Segoe UI", 10), bg=COLORS['card_bg'], fg=COLORS['text_secondary'])
+                                      font=(FONT_FAMILY, 10), bg=COLORS['card_bg'], fg=COLORS['text_secondary'])
         self.skin_indicator.pack(pady=10)
 
         # --- RIGHT: CONTROLS AREA ---
@@ -119,7 +119,7 @@ class LockerScreenMixin:
         m_frame = tk.Frame(config_frame, bg=COLORS['card_bg'])
         m_frame.grid(row=0, column=0, sticky="w")
         
-        tk.Label(m_frame, text="MODEL TYPE", font=("Segoe UI", 10, "bold"), bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(anchor="w", pady=(0, 5))
+        tk.Label(m_frame, text="MODEL TYPE", font=(FONT_FAMILY, 10, "bold"), bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(anchor="w", pady=(0, 5))
         
         if self.profiles:
              p = self.profiles[self.current_profile_index]
@@ -144,23 +144,23 @@ class LockerScreenMixin:
         i_frame = tk.Frame(config_frame, bg=COLORS['card_bg'])
         i_frame.grid(row=0, column=1, sticky="w", padx=(20, 0))
         
-        tk.Label(i_frame, text="OPTIONS", font=("Segoe UI", 10, "bold"), bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(anchor="w", pady=(0, 5))
+        tk.Label(i_frame, text="OPTIONS", font=(FONT_FAMILY, 10, "bold"), bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(anchor="w", pady=(0, 5))
         
         self.auto_download_var = tk.BooleanVar(value=self.auto_download_mod)
         cb = tk.Checkbutton(i_frame, text="Skin Injection", variable=self.auto_download_var,
                       bg=COLORS['card_bg'], fg=COLORS['text_primary'],
                       selectcolor=COLORS['card_bg'], activebackground=COLORS['card_bg'],
-                      font=("Segoe UI", 10),
+                      font=(FONT_FAMILY, 10),
                       command=lambda: self._set_auto_download(self.auto_download_var.get()))
         cb.pack(anchor="w")
         # Tooltip or subtitle
-        tk.Label(i_frame, text="(Offline Mode)", font=("Segoe UI", 8), fg=COLORS['text_secondary'], bg=COLORS['card_bg']).pack(anchor="w", padx=20)
+        tk.Label(i_frame, text="(Offline Mode)", font=(FONT_FAMILY, 8), fg=COLORS['text_secondary'], bg=COLORS['card_bg']).pack(anchor="w", padx=20)
 
         # 2. Actions Card
         act_frame = tk.Frame(controls_area, bg=COLORS['card_bg'], padx=20, pady=20)
         act_frame.pack(fill="x", pady=(0, 20))
         
-        tk.Label(act_frame, text="ACTIONS", font=("Segoe UI", 10, "bold"), bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(anchor="w", pady=(0, 10))
+        tk.Label(act_frame, text="ACTIONS", font=(FONT_FAMILY, 10, "bold"), bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(anchor="w", pady=(0, 10))
 
         # Using a grid for buttons to make them uniform
         btn_grid = tk.Frame(act_frame, bg=COLORS['card_bg'])
@@ -180,7 +180,7 @@ class LockerScreenMixin:
         hist_frame = tk.Frame(controls_area, bg=COLORS['card_bg'], padx=20, pady=20)
         hist_frame.pack(fill="both", expand=True) # Fills the rest of the height
         
-        tk.Label(hist_frame, text="RECENT SKINS", font=("Segoe UI", 10, "bold"), 
+        tk.Label(hist_frame, text="RECENT SKINS", font=(FONT_FAMILY, 10, "bold"), 
                             bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(anchor="w", pady=(0, 10))
 
         self.history_canvas = tk.Canvas(hist_frame, bg=COLORS['card_bg'], highlightthickness=0)
@@ -240,7 +240,7 @@ class LockerScreenMixin:
         # Header
         header = tk.Frame(parent, bg=COLORS['main_bg'], padx=40, pady=20)
         header.pack(fill="x")
-        tk.Label(header, text="Select a background", font=("Segoe UI", 12, "bold"), bg=COLORS['main_bg'], fg="white").pack(anchor="w")
+        tk.Label(header, text="Select a background", font=(FONT_FAMILY, 12, "bold"), bg=COLORS['main_bg'], fg="white").pack(anchor="w")
 
         # Scrollable Area
         container = tk.Frame(parent, bg=COLORS['main_bg'])
@@ -340,7 +340,7 @@ class LockerScreenMixin:
                         is_selected = True
                         
                 if is_selected:
-                     tk.Label(p_frame, text="SELECTED", bg=COLORS['success_green'], fg="white", font=("Segoe UI", 8, "bold")).pack(fill="x")
+                     tk.Label(p_frame, text="SELECTED", bg=COLORS.get('accent_color', COLORS['success_green']), fg=COLORS.get('accent_text', 'white'), font=(FONT_FAMILY, 8, "bold")).pack(fill="x")
                 
                 tk.Label(p_frame, text=name[:20], bg=COLORS['card_bg'], fg="white").pack()
                 
@@ -506,8 +506,8 @@ class LockerScreenMixin:
              info_frame = tk.Frame(row, bg=COLORS['card_bg'])
              info_frame.pack(side="left", fill="x", expand=True)
              
-             tk.Label(info_frame, text=name, bg=COLORS['card_bg'], fg=COLORS['text_primary'], font=("Segoe UI", 9), anchor="w").pack(fill="x")
-             tk.Label(info_frame, text=model.title(), bg=COLORS['card_bg'], fg=COLORS['text_secondary'], font=("Segoe UI", 7), anchor="w").pack(fill="x")
+             tk.Label(info_frame, text=name, bg=COLORS['card_bg'], fg=COLORS['text_primary'], font=(FONT_FAMILY, 9), anchor="w").pack(fill="x")
+             tk.Label(info_frame, text=model.title(), bg=COLORS['card_bg'], fg=COLORS['text_secondary'], font=(FONT_FAMILY, 7), anchor="w").pack(fill="x")
              
              def _apply(p=path, m=model):
                  self.apply_history_skin(p, m)
