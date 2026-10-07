@@ -37,13 +37,17 @@ class InstallationsScreenMixin:
         # 1. Top Bar (Search, Sort, Filters, New)
         top_bar = tk.Frame(frame, bg=COLORS['main_bg'], pady=20, padx=40)
         top_bar.pack(fill="x")
+        self.inst_top_bar = top_bar
         
         # Search
         search_frame = tk.Frame(top_bar, bg=COLORS['input_bg'], padx=10, pady=5)
         search_frame.pack(side="left")
-        tk.Label(search_frame, text="🔍", bg=COLORS['input_bg'], fg=COLORS['text_secondary']).pack(side="left")
+        self.inst_search_frame = search_frame
+        self.inst_search_icon = tk.Label(search_frame, text="🔍", bg=COLORS['input_bg'], fg=COLORS['text_secondary'])
+        self.inst_search_icon.pack(side="left")
         search_entry = tk.Entry(search_frame, bg=COLORS['input_bg'], fg=COLORS['text_primary'], relief="flat", font=("Segoe UI", 10))
         search_entry.pack(side="left", padx=5)
+        self.inst_search_entry = search_entry
         
         # Sort (Placeholder)
         # tk.Label(top_bar, text="Sort by: Latest played", font=("Segoe UI", 9), bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(side="left", padx=20)
@@ -51,6 +55,7 @@ class InstallationsScreenMixin:
         # Filters (Checkboxes)
         filter_frame = tk.Frame(top_bar, bg=COLORS['main_bg'])
         filter_frame.pack(side="left", padx=40)
+        self.inst_filter_frame = filter_frame
         
         self.show_releases = tk.BooleanVar(value=True)
         self.show_snapshots = tk.BooleanVar(value=False)
@@ -59,12 +64,14 @@ class InstallationsScreenMixin:
         def on_filter_change():
             self.refresh_installations_list()
 
+        self.inst_filter_cbs = []
         def create_filter(text, var):
              cb = tk.Checkbutton(filter_frame, text=text, variable=var, 
                                 bg=COLORS['main_bg'], fg=COLORS['text_primary'], 
                                 selectcolor=COLORS['main_bg'], activebackground=COLORS['main_bg'],
                                 command=on_filter_change)
              cb.pack(side="left", padx=10)
+             self.inst_filter_cbs.append(cb)
              return cb
              
         create_filter("Releases", self.show_releases)
@@ -79,9 +86,12 @@ class InstallationsScreenMixin:
         # 2. Profile List (Scrollable)
         list_container = tk.Frame(frame, bg=COLORS['main_bg'])
         list_container.pack(fill="both", expand=True, padx=40)
+        self.inst_list_container = list_container
         
         canvas = tk.Canvas(list_container, bg=COLORS['main_bg'], highlightthickness=0)
         scrollbar = ttk.Scrollbar(list_container, orient="vertical", command=canvas.yview, style="Launcher.Vertical.TScrollbar")
+        self.inst_canvas = canvas
+        self.inst_scrollbar = scrollbar
         
         self.inst_list_frame = tk.Frame(canvas, bg=COLORS['main_bg'])
         
@@ -122,6 +132,54 @@ class InstallationsScreenMixin:
         self.inst_list_frame.bind("<Configure>", update_scroll_state)
         
         self.refresh_installations_list(lambda: [self._bind_smooth_scroll(canvas, self.inst_list_frame), update_scroll_state()])
+
+    def refresh_installations_screen_theme(self):
+        """Update top bar, search entry, filter checkboxes, and container backgrounds with active theme."""
+        main_bg = COLORS['main_bg']
+        input_bg = COLORS.get('input_bg', '#1E222B')
+        text_primary = COLORS['text_primary']
+        text_secondary = COLORS.get('text_secondary', '#A0AAB0')
+
+        if hasattr(self, 'tabs') and "Installations" in self.tabs:
+            tab = self.tabs["Installations"]
+            if tab and tab.winfo_exists():
+                tab.config(bg=main_bg)
+
+        if hasattr(self, 'inst_top_bar') and self.inst_top_bar.winfo_exists():
+            self.inst_top_bar.config(bg=main_bg)
+
+        if hasattr(self, 'inst_search_frame') and self.inst_search_frame.winfo_exists():
+            self.inst_search_frame.config(bg=input_bg)
+
+        if hasattr(self, 'inst_search_icon') and self.inst_search_icon.winfo_exists():
+            self.inst_search_icon.config(bg=input_bg, fg=text_secondary)
+
+        if hasattr(self, 'inst_search_entry') and self.inst_search_entry.winfo_exists():
+            self.inst_search_entry.config(bg=input_bg, fg=text_primary)
+
+        if hasattr(self, 'inst_filter_frame') and self.inst_filter_frame.winfo_exists():
+            self.inst_filter_frame.config(bg=main_bg)
+
+        if hasattr(self, 'inst_filter_cbs'):
+            for cb in self.inst_filter_cbs:
+                if cb and cb.winfo_exists():
+                    cb.config(
+                        bg=main_bg,
+                        fg=text_primary,
+                        selectcolor=main_bg,
+                        activebackground=main_bg,
+                        activeforeground=text_primary
+                    )
+
+        if hasattr(self, 'inst_list_container') and self.inst_list_container.winfo_exists():
+            self.inst_list_container.config(bg=main_bg)
+
+        if hasattr(self, 'inst_canvas') and self.inst_canvas.winfo_exists():
+            self.inst_canvas.config(bg=main_bg)
+
+        if hasattr(self, 'inst_list_frame') and self.inst_list_frame.winfo_exists():
+            self.inst_list_frame.config(bg=main_bg)
+            self.refresh_installations_list()
 
     def refresh_installations_list(self, callback=None):
         if not hasattr(self, 'inst_list_frame'): return # Safety check

@@ -2523,65 +2523,118 @@ class MinecraftLauncher(
         style = ttk.Style()
         style.configure("Launcher.Horizontal.TProgressbar", background=c)
 
-        # Update active window and frame chrome
+        # Update active window and frame chrome with independent error boundaries
         try:
-            if hasattr(self, 'root') and self.root.winfo_exists():
+            if hasattr(self, 'root') and self.root and self.root.winfo_exists():
                 self.root.config(bg=new_tokens['main_bg'])
+        except Exception as e:
+            logger.debug("Failed updating root bg: %s", e)
+
+        try:
             if hasattr(self, 'window_shell') and self.window_shell and self.window_shell.winfo_exists():
                 self.window_shell.config(bg=new_tokens.get('sidebar_bg', '#141414'))
+        except Exception as e:
+            logger.debug("Failed updating window_shell bg: %s", e)
+
+        try:
             if hasattr(self, 'window_titlebar') and self.window_titlebar and self.window_titlebar.winfo_exists():
                 self.window_titlebar.config(bg=new_tokens.get('tab_bar_bg', '#252526'))
-            if hasattr(self, 'content_area') and self.content_area.winfo_exists():
+        except Exception as e:
+            logger.debug("Failed updating window_titlebar bg: %s", e)
+
+        try:
+            if hasattr(self, 'window_content') and self.window_content and self.window_content.winfo_exists() and self.window_content != getattr(self, 'root', None):
+                self.window_content.config(bg=new_tokens['main_bg'])
+        except Exception as e:
+            logger.debug("Failed updating window_content bg: %s", e)
+
+        try:
+            if hasattr(self, 'content_area') and self.content_area and self.content_area.winfo_exists():
                 self.content_area.config(bg=new_tokens['main_bg'])
-            if hasattr(self, 'tab_container') and self.tab_container.winfo_exists():
+        except Exception as e:
+            logger.debug("Failed updating content_area bg: %s", e)
+
+        try:
+            if hasattr(self, 'tab_container') and self.tab_container and self.tab_container.winfo_exists():
                 self.tab_container.config(bg=new_tokens['main_bg'])
-            for tab_frame in getattr(self, 'tabs', {}).values():
+        except Exception as e:
+            logger.debug("Failed updating tab_container bg: %s", e)
+
+        for tab_name, tab_frame in getattr(self, 'tabs', {}).items():
+            try:
                 if tab_frame and tab_frame.winfo_exists():
                     tab_frame.config(bg=new_tokens['main_bg'])
+            except Exception as e:
+                logger.debug("Failed updating tab_frame %s bg: %s", tab_name, e)
+
+        # Synchronize sidebar navigation & profile chrome
+        try:
             self.refresh_sidebar_theme()
+        except Exception as e:
+            logger.error("Failed refreshing sidebar theme: %s", e)
+
+        # Synchronize Play screen
+        try:
             if hasattr(self, 'refresh_play_screen_theme'):
                 self.refresh_play_screen_theme()
+        except Exception as e:
+            logger.error("Failed refreshing play screen theme: %s", e)
+
+        # Synchronize Installations screen
+        try:
+            if hasattr(self, 'refresh_installations_screen_theme'):
+                self.refresh_installations_screen_theme()
+            elif hasattr(self, 'refresh_installations_list'):
+                self.refresh_installations_list()
+        except Exception as e:
+            logger.error("Failed refreshing installations screen theme: %s", e)
+
+        # Synchronize Settings screen
+        try:
             if hasattr(self, 'refresh_settings_screen_theme'):
                 self.refresh_settings_screen_theme()
-        except Exception:
-            pass
+            elif "Settings" in getattr(self, 'tabs', {}) and hasattr(self, 'switch_settings_category'):
+                cur_cat = getattr(self, 'current_settings_category', 'Appearance')
+                self.switch_settings_category(cur_cat)
+        except Exception as e:
+            logger.error("Failed refreshing settings screen theme: %s", e)
 
-        # 1. Play Button
-        if hasattr(self, 'play_container'):
-            self.play_container.config(bg=c)
-        if hasattr(self, 'launch_btn'):
-            self.launch_btn.config(bg=c, activebackground=new_tokens.get('play_btn_hover', c), fg=new_tokens.get('play_btn_text', 'white'))
-        if hasattr(self, 'launch_opts_btn'):
-            self.launch_opts_btn.config(bg=c, activebackground=new_tokens.get('play_btn_hover', c), fg=new_tokens.get('play_btn_text', 'white'))
+        # 1. Play Button chrome fallback
+        try:
+            if hasattr(self, 'play_container') and self.play_container.winfo_exists():
+                self.play_container.config(bg=c)
+            if hasattr(self, 'launch_btn') and self.launch_btn.winfo_exists():
+                self.launch_btn.config(bg=c, activebackground=new_tokens.get('play_btn_hover', c), fg=new_tokens.get('play_btn_text', 'white'))
+            if hasattr(self, 'launch_opts_btn') and self.launch_opts_btn.winfo_exists():
+                self.launch_opts_btn.config(bg=c, activebackground=new_tokens.get('play_btn_hover', c), fg=new_tokens.get('play_btn_text', 'white'))
+        except Exception as e:
+            logger.debug("Failed updating play buttons: %s", e)
 
-        # 2. Installations Tab
-        if hasattr(self, 'new_inst_btn'):
-            self.new_inst_btn.config(bg=c)
-        if hasattr(self, 'inst_list_frame'):
-            self.refresh_installations_list()
+        # 2. Installations Tab button fallback
+        try:
+            if hasattr(self, 'new_inst_btn') and self.new_inst_btn.winfo_exists():
+                self.new_inst_btn.config(bg=c)
+        except Exception as e:
+            logger.debug("Failed updating new_inst_btn: %s", e)
 
         # 3. Locker Tab
-        if hasattr(self, 'locker_btns'):
-            self.refresh_locker_view()
+        try:
+            if hasattr(self, 'locker_btns'):
+                self.refresh_locker_view()
+        except Exception as e:
+            logger.debug("Failed updating locker view: %s", e)
 
-        # 4. Settings Tab (refresh current category in-place so user stays in Appearance view)
-        if "Settings" in self.tabs:
-            is_active = (getattr(self, 'current_tab', None) == "Settings")
-            if is_active and hasattr(self, 'switch_settings_category'):
-                try:
-                    cur_cat = getattr(self, 'current_settings_category', 'Appearance')
-                    self.switch_settings_category(cur_cat)
-                except Exception:
-                    pass
-
-        # 5. Global live refresh for all buttons across the entire application
+        # 4. Global live refresh for all buttons across the entire application
         try:
             refresh_all_buttons()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Failed refreshing all buttons: %s", e)
 
         if save:
-            self.save_config(sync_ui=True, immediate=True)
+            try:
+                self.save_config(sync_ui=True, immediate=True)
+            except Exception as e:
+                logger.error("Failed saving config in apply_theme: %s", e)
 
     def apply_accent_color(self, name_or_hex: str):
         _named_accents = {

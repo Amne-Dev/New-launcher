@@ -180,8 +180,29 @@ class SettingsScreenMixin:
     def switch_settings_category(self, category_name: str):
         """Switch active category in the right content pane."""
         self.current_settings_category = category_name
+        sidebar_bg = COLORS['sidebar_bg']
+        main_bg = COLORS['main_bg']
+        accent_col = COLORS.get('accent_color', '#2ECC71')
+        text_primary = COLORS['text_primary']
+
         if hasattr(self, 'header_breadcrumb_lbl') and self.header_breadcrumb_lbl.winfo_exists():
-            self.header_breadcrumb_lbl.config(text=f"  /  {category_name.upper()}")
+            self.header_breadcrumb_lbl.config(
+                text=f"  /  {category_name.upper()}",
+                bg=sidebar_bg,
+                fg=accent_col
+            )
+        if hasattr(self, 'settings_title_lbl') and self.settings_title_lbl.winfo_exists():
+            self.settings_title_lbl.config(bg=sidebar_bg, fg=text_primary)
+        if hasattr(self, 'settings_header_frame') and self.settings_header_frame.winfo_exists():
+            self.settings_header_frame.config(bg=sidebar_bg)
+        if hasattr(self, 'settings_title_box') and self.settings_title_box.winfo_exists():
+            self.settings_title_box.config(bg=sidebar_bg)
+        if hasattr(self, 'settings_content_wrapper') and self.settings_content_wrapper.winfo_exists():
+            self.settings_content_wrapper.config(bg=main_bg)
+        if hasattr(self, 'settings_canvas') and self.settings_canvas.winfo_exists():
+            self.settings_canvas.config(bg=main_bg)
+        if hasattr(self, 'settings_scroll_frame') and self.settings_scroll_frame.winfo_exists():
+            self.settings_scroll_frame.config(bg=main_bg)
 
         # Update dynamic sidebar highlight if sidebar buttons exist
         sidebar_items = getattr(self, 'settings_nav_items', {})
@@ -315,7 +336,7 @@ class SettingsScreenMixin:
             t_sub.pack(anchor="w", pady=(4, 0))
 
             def _make_theme_click(k=t_key):
-                return lambda e: [getattr(self, "apply_theme", lambda k: None)(k), self.switch_settings_category("Appearance")]
+                return lambda e: getattr(self, "apply_theme", lambda *a, **kw: None)(k, custom_accent=None)
 
             for w in [t_card, t_hdr, t_dot, t_name, t_sub]:
                 w.bind("<Button-1>", _make_theme_click(t_key))

@@ -101,3 +101,81 @@ def test_sidebar_account_and_header_live_theming(tk_root):
     app.sidebar.destroy()
     THEME_MANAGER.apply("dark_slate")
 
+
+def test_comprehensive_live_theming_across_screens(tk_root):
+    if not tk_root:
+        pytest.skip("Tkinter not available")
+
+    from nlc.ui.app import MinecraftLauncher
+    from nlc.ui.animation import AnimationManager
+    from nlc.storage.config import get_default_config
+
+    app = MinecraftLauncher.__new__(MinecraftLauncher)
+    app.root = tk_root
+    app.animator = AnimationManager(tk_root, enabled_provider=lambda: False)
+    app.sidebar_items = []
+    app.config = get_default_config()
+    app.config_vars = {}
+    app.status_var = tk.StringVar()
+    app.save_config = lambda **kw: None
+    app.tabs = {}
+    app.installations = []
+    app.user_dir = "/fake/mc"
+    app.config_dir = "/fake/config"
+    app.config_file = "/fake/config/config.json"
+    app.rpc_connected = False
+    app.rpc_enabled = True
+
+    # Windows and shell hierarchy
+    app.window_shell = tk.Frame(tk_root, bg=COLORS['sidebar_bg'])
+    app.window_titlebar = tk.Frame(app.window_shell, bg=COLORS['tab_bar_bg'])
+    app.window_content = tk.Frame(app.window_shell, bg=COLORS['main_bg'])
+    app.content_area = tk.Frame(app.window_content, bg=COLORS['main_bg'])
+    app.tab_container = tk.Frame(app.content_area, bg=COLORS['main_bg'])
+
+    # Construct installations and settings tabs
+    app.create_installations_tab()
+    app.create_settings_tab()
+
+    # 1. Switch to Dracula
+    app.apply_theme("dracula", save=False)
+    assert app.root.cget("bg") == THEMES['dracula']['main_bg']
+    assert app.window_shell.cget("bg") == THEMES['dracula']['sidebar_bg']
+    assert app.window_titlebar.cget("bg") == THEMES['dracula']['tab_bar_bg']
+    assert app.window_content.cget("bg") == THEMES['dracula']['main_bg']
+    assert app.settings_header_frame.cget("bg") == THEMES['dracula']['sidebar_bg']
+    assert app.settings_title_box.cget("bg") == THEMES['dracula']['sidebar_bg']
+    assert app.settings_title_lbl.cget("bg") == THEMES['dracula']['sidebar_bg']
+    assert app.header_breadcrumb_lbl.cget("bg") == THEMES['dracula']['sidebar_bg']
+    assert app.header_breadcrumb_lbl.cget("fg") == THEMES['dracula']['default_accent']
+    assert app.settings_canvas.cget("bg") == THEMES['dracula']['main_bg']
+    assert app.inst_top_bar.cget("bg") == THEMES['dracula']['main_bg']
+    assert app.inst_search_frame.cget("bg") == THEMES['dracula']['input_bg']
+
+    # 2. Switch to Nord Frost
+    app.apply_theme("nord", save=False)
+    assert app.root.cget("bg") == THEMES['nord']['main_bg']
+    assert app.window_shell.cget("bg") == THEMES['nord']['sidebar_bg']
+    assert app.window_titlebar.cget("bg") == THEMES['nord']['tab_bar_bg']
+    assert app.settings_header_frame.cget("bg") == THEMES['nord']['sidebar_bg']
+    assert app.header_breadcrumb_lbl.cget("bg") == THEMES['nord']['sidebar_bg']
+    assert app.header_breadcrumb_lbl.cget("fg") == THEMES['nord']['default_accent']
+    assert app.inst_top_bar.cget("bg") == THEMES['nord']['main_bg']
+    assert app.inst_search_frame.cget("bg") == THEMES['nord']['input_bg']
+
+    # 3. Switch Category to Appearance and verify breadcrumb stays themed
+    app.switch_settings_category("Appearance")
+    assert app.header_breadcrumb_lbl.cget("text") == "  /  APPEARANCE"
+    assert app.header_breadcrumb_lbl.cget("fg") == THEMES['nord']['default_accent']
+
+    # 4. Switch to Emerald
+    app.apply_theme("emerald", save=False)
+    assert app.settings_header_frame.cget("bg") == THEMES['emerald']['sidebar_bg']
+    assert app.header_breadcrumb_lbl.cget("fg") == THEMES['emerald']['default_accent']
+    assert app.settings_canvas.cget("bg") == THEMES['emerald']['main_bg']
+
+    # Cleanup
+    app.window_shell.destroy()
+    THEME_MANAGER.apply("dark_slate")
+
+
