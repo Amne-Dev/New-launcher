@@ -9,6 +9,7 @@ import tkinter as tk
 from tkinter import ttk
 
 from nlc.ui.theme import COLORS, FONT_FAMILY
+from nlc.ui.components.context_menu import NeoContextMenu, attach_context_menu
 
 logger = logging.getLogger(__name__)
 
@@ -180,19 +181,13 @@ class DownloadQueueMixin:
             "cancel_event": threading.Event()
         }
         
-        # Context Menu for Cancellation
-        menu = tk.Menu(frame, tearoff=0, bg=card_bg, fg="white")
-        menu.add_command(label="Cancel", command=lambda: self.cancel_download(task_id))
-        
-        def show_menu(e):
-            menu.post(e.x_root, e.y_root)
-            
-        # Bind to everything in the card
-        frame.bind("<Button-3>", show_menu)
-        top.bind("<Button-3>", show_menu)
-        detail_frame.bind("<Button-3>", show_menu)
-        detail_lbl.bind("<Button-3>", show_menu)
-        
+        # Modern Context Menu for Cancellation
+        def build_download_menu() -> NeoContextMenu:
+            m = NeoContextMenu(frame, min_width=140)
+            m.add_item("Cancel Download", lambda: self.cancel_download(task_id), icon="✕", is_danger=True)
+            return m
+
+        attach_context_menu(frame, build_download_menu, include_children=True)
         return task_id
 
     def cancel_download(self, task_id):
