@@ -119,10 +119,10 @@ class LockerScreenMixin:
         for w in self.locker_nav_frame.winfo_children():
             w.destroy()
 
-        views = [("Skins", "👕 Skins")]
+        views = [("Skins", "Skins")]
         if self.has_owned_capes():
-            views.append(("Capes", "🧣 Capes"))
-        views.append(("Wallpapers", "🖼 Wallpapers"))
+            views.append(("Capes", "Capes"))
+        views.append(("Wallpapers", "Wallpapers"))
 
         self.locker_btns = {}
         for view_name, label_text in views:
@@ -262,7 +262,7 @@ class LockerScreenMixin:
             cape_name = "CAPE"
             for c in getattr(self, 'account_capes', []):
                 if c.get("local_path") == self.current_cape_path:
-                    cape_name = f"🧣 {c.get('alias', 'CAPE')}".upper()
+                    cape_name = c.get('alias', 'CAPE').upper()
                     break
             self.stage_cape_badge = tk.Label(
                 top_bar,
@@ -1435,7 +1435,7 @@ class LockerScreenMixin:
         # Unequip action on right
         b_unequip = tk.Button(
             c_header,
-            text="🚫 Unequip Cape",
+            text="Unequip Cape",
             font=(FONT_FAMILY, 8, "bold"),
             relief="flat",
             bd=0,
