@@ -52,6 +52,7 @@ from nlc.storage.config import (
 )
 from nlc.core.versions import format_version_display, normalize_version_text
 from nlc.core.launch import safe_extract_zip, patch_minecraft_launcher_launch_helpers
+from nlc.core.instances import sync_instance_assets
 from nlc.core.discord_rpc import DiscordRPCManager
 from nlc.net.skin_server import LocalSkinServer
 from nlc.net.ms_auth import MicrosoftDeviceAuth, MSA_CLIENT_ID, MSA_REDIRECT_URI
@@ -920,6 +921,12 @@ class MinecraftLauncher(
         # Download Queue State
         self.download_tasks = {} # id -> {ui_elements, data}
         self.addons_config: dict[str, Any] = {} # Addons configuration
+        self.instances_config = {
+            "share_resourcepacks": True,
+            "share_shaderpacks": True,
+            "share_worlds": False,
+            "share_configs": False,
+        }
         self.download_queue_visible = False
 
         self.last_version = ""
@@ -5073,6 +5080,7 @@ class MinecraftLauncher(
                             inst.setdefault("java_executable", "")
                             inst.setdefault("resolution_width", None)
                             inst.setdefault("resolution_height", None)
+                            inst.setdefault("game_directory", "")
                         print(f"Loaded {len(self.installations)} installations")
                     
                     idx = data.get("current_profile_index", 0)
@@ -5114,6 +5122,17 @@ class MinecraftLauncher(
                     if "addons" in data:
                         self.addons_config.update(data["addons"])
                     self._ensure_addons_config_defaults()
+
+                    # Instances & Asset Sharing
+                    instances_cfg = data.get("instances", {})
+                    if not isinstance(instances_cfg, dict):
+                        instances_cfg = {}
+                    self.instances_config = {
+                        "share_resourcepacks": bool(instances_cfg.get("share_resourcepacks", True)),
+                        "share_shaderpacks": bool(instances_cfg.get("share_shaderpacks", True)),
+                        "share_worlds": bool(instances_cfg.get("share_worlds", False)),
+                        "share_configs": bool(instances_cfg.get("share_configs", False)),
+                    }
 
                     # Load RPC
                     self.rpc_enabled = data.get("rpc_enabled", True)
@@ -5281,7 +5300,13 @@ class MinecraftLauncher(
             "minimize_to_tray": minimize_to_tray_val,
             "show_console": show_console_val,
             "current_wallpaper": getattr(self, 'current_wallpaper', None),
-            "addons": getattr(self, "addons_config", {})
+            "addons": getattr(self, "addons_config", {}),
+            "instances": getattr(self, "instances_config", {
+                "share_resourcepacks": True,
+                "share_shaderpacks": True,
+                "share_worlds": False,
+                "share_configs": False,
+            })
         }
 
     def _write_config_payload(self, config):
@@ -5974,9 +5999,6 @@ class MinecraftLauncher(
         ).start()
 
     def launch_logic(self, version, username, loader, force_update=False, inst_id=None, custom_java_executable="", resolution_width=None, resolution_height=None, server_address=None, server_port=None):
-        mods_backup_path = None
-        modpack_stage_path = None
-        modpack_sync_active = False
         # Callback wrapper to update overlay
         def update_status(t):
             self.log(f"Status: {t}")
@@ -6207,52 +6229,25 @@ class MinecraftLauncher(
                 # For offline local server, token can be anything usually, but validation might fail if not careful.
                 # Authlib Injector usually disables signature checks.
 
-            # --- MODPACK SYNC ---
-            # The game still launches from the shared Minecraft directory, so
-            # make a fresh, transactional copy of the linked pack's mods just
-            # before building its command.  This deliberately also applies an
-            # empty/missing pack mods folder: removing mods from a modpack must
-            # not accidentally launch the global mods from a previous profile.
+            # --- INSTANCE & MODPACK ISOLATION ---
+            target_game_dir = self.minecraft_dir
             if inst_id:
-                pack = next((p for p in self.modpacks if p.get('linked_installation_id') == inst_id), None)
+                pack = next((p for p in getattr(self, 'modpacks', []) if p.get('linked_installation_id') == inst_id), None)
                 if pack:
                     pack_name = str(pack.get('name') or 'modpack')
-                    update_status(f"Updating {pack_name}…")
-                    self.log(f"Updating linked modpack before launch: {pack_name}")
-
-                    mods_dir = os.path.abspath(os.path.join(self.minecraft_dir, "mods"))
-                    pack_root = os.path.abspath(self.get_modpack_dir(pack['id']))
-                    pack_mods_dir = os.path.abspath(os.path.join(pack_root, "mods"))
-                    if os.path.commonpath((pack_root, pack_mods_dir)) != pack_root:
-                        raise ValueError("The linked modpack has an unsafe mods path.")
-                    if os.path.exists(pack_mods_dir) and not os.path.isdir(pack_mods_dir):
-                        raise ValueError("The linked modpack's mods path is not a folder.")
-
-                    os.makedirs(self.minecraft_dir, exist_ok=True)
-                    sync_token = uuid.uuid4().hex
-                    modpack_stage_path = os.path.join(self.minecraft_dir, f".nlc_modpack_stage_{sync_token}")
-                    if os.path.isdir(pack_mods_dir):
-                        shutil.copytree(pack_mods_dir, modpack_stage_path)
-                    else:
-                        os.makedirs(modpack_stage_path)
-
-                    if os.path.lexists(mods_dir):
-                        mods_backup_path = os.path.join(self.minecraft_dir, f"mods_backup_{sync_token}")
-                        os.rename(mods_dir, mods_backup_path)
-                    try:
-                        os.rename(modpack_stage_path, mods_dir)
-                        modpack_stage_path = None
-                        modpack_sync_active = True
-                    except Exception:
-                        # Do not leave the launcher using a partial pack if the
-                        # final rename fails (for example, due to an antivirus
-                        # lock).  Restore the original state before reporting
-                        # the launch failure.
-                        if mods_backup_path and os.path.lexists(mods_backup_path):
-                            os.rename(mods_backup_path, mods_dir)
-                            mods_backup_path = None
-                        raise
-                    self.log("Linked modpack is up to date for this launch.")
+                    update_status(f"Preparing {pack_name}…")
+                    self.log(f"Preparing isolated instance for linked modpack: {pack_name}")
+                    pack_dir = os.path.abspath(self.get_modpack_dir(pack['id']))
+                    os.makedirs(pack_dir, exist_ok=True)
+                    sync_instance_assets(pack_dir, self.minecraft_dir, getattr(self, 'instances_config', {}))
+                    target_game_dir = pack_dir
+                else:
+                    inst_obj = next((i for i in self.installations if i.get('id') == inst_id), None)
+                    if inst_obj and inst_obj.get('game_directory'):
+                        custom_dir = os.path.abspath(os.path.expanduser(inst_obj['game_directory']))
+                        os.makedirs(custom_dir, exist_ok=True)
+                        sync_instance_assets(custom_dir, self.minecraft_dir, getattr(self, 'instances_config', {}))
+                        target_game_dir = custom_dir
 
             options = {
                 "username": username, 
@@ -6260,7 +6255,7 @@ class MinecraftLauncher(
                 "token": launch_token,
                 "jvmArguments": jvm_args,
                 "launcherName": "MinecraftLauncher",
-                "gameDirectory": self.minecraft_dir
+                "gameDirectory": target_game_dir
             }
 
             if normalized_java_executable:
@@ -6276,7 +6271,7 @@ class MinecraftLauncher(
                 if server_port:
                     options["port"] = str(server_port)
             
-            self.log(f"Generating command for: {launch_id}")
+            self.log(f"Generating command for: {launch_id} (gameDirectory: {target_game_dir})")
             command = minecraft_launcher_lib.command.get_minecraft_command(launch_id, self.minecraft_dir, options) # type: ignore
             
             self.root.after(0, self.root.withdraw)
@@ -6296,7 +6291,7 @@ class MinecraftLauncher(
 
             process = subprocess.Popen(
                 command, 
-                cwd=self.minecraft_dir,
+                cwd=target_game_dir,
                 stdout=subprocess.PIPE, 
                 stderr=subprocess.STDOUT, 
                 text=True, 
@@ -6342,30 +6337,6 @@ class MinecraftLauncher(
             self.root.after(0, lambda: custom_showerror("Launch Error", err_msg))
             self.root.after(0, lambda: self.update_rpc("Idle", "In Launcher"))
         finally:
-            # If the final swap failed after the original folder was moved,
-            # this fallback also repairs it before the launcher returns to an
-            # idle state.
-            if modpack_sync_active or (mods_backup_path and os.path.lexists(mods_backup_path)):
-                try:
-                    current_mods = os.path.join(self.minecraft_dir, "mods")
-                    if os.path.isdir(current_mods):
-                        shutil.rmtree(current_mods)
-                    elif os.path.lexists(current_mods):
-                        os.remove(current_mods)
-                    if mods_backup_path and os.path.lexists(mods_backup_path):
-                        os.rename(mods_backup_path, current_mods)
-                        self.log("Restored original mods folder.")
-                    else:
-                        self.log("Removed temporary modpack mods folder.")
-                except Exception as e:
-                    self.log(f"Error restoring mods: {e}")
-
-            if modpack_stage_path and os.path.isdir(modpack_stage_path):
-                try:
-                    shutil.rmtree(modpack_stage_path)
-                except OSError as e:
-                    self.log(f"Error cleaning modpack staging folder: {e}")
-
             if local_skin_server:
                 self.log("Stopping local skin server...")
                 try: local_skin_server.stop()
