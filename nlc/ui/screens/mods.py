@@ -24,9 +24,10 @@ from PIL import Image, ImageTk
 import requests
 import minecraft_launcher_lib
 
-from nlc.storage.paths import resource_path
+from nlc.storage.paths import resource_path, open_path_in_system
 from nlc.ui.theme import COLORS, FONT_FAMILY
 from nlc.ui.components.dialogs import custom_showinfo, custom_showerror, custom_askyesno
+from nlc.ui.components.context_menu import NeoContextMenu, attach_context_menu, attach_entry_context_menu
 from nlc.net.http import get_http_session
 from nlc.net.downloader import _atomic_download
 from nlc.core.launch import safe_extract_zip as _safe_extract_zip
@@ -121,6 +122,7 @@ class ModsScreenMixin:
                         bg=COLORS['input_bg'], fg=COLORS['text_primary'], relief="flat", insertbackground="white")
         entry.pack(side="left", fill="x", expand=True)
         self.mods_search_entry = entry
+        attach_entry_context_menu(entry)
 
         # Filters
         self.mod_loader_filter = tk.StringVar(value="fabric") # Default
@@ -549,17 +551,20 @@ class ModsScreenMixin:
         btn_frame.pack(side="right")
 
         project_type = mod.get('project_type', 'mod')
+        action_btn = None
 
         # INSTALL BUTTON (If pack selected or Modpack Browse)
         if project_type == 'modpack':
              btn = self._make_btn(btn_frame, "Download", style="primary", font_size=9, bold=True)
              btn.pack(side="right", padx=5)
              btn.config(command=lambda m=mod, b=btn: self._install_mr_modpack(m, b))
+             action_btn = btn
              
         elif project_type in ['resourcepack', 'shader']:
              btn = self._make_btn(btn_frame, "Install", style="primary", font_size=9, bold=True)
              btn.pack(side="right", padx=5)
              btn.config(command=lambda m=mod, b=btn: self._install_global_resource(m, b))
+             action_btn = btn
 
         else:
             active_pack_name = self.active_modpack_var.get()
@@ -580,6 +585,7 @@ class ModsScreenMixin:
                     btn = self._make_btn(btn_frame, "Install", style="primary", font_size=9, bold=True)
                     btn.pack(side="right", padx=5)
                     btn.config(command=lambda b=btn, m=mod, p=active_pack_name: self._install_mod_to_pack(m, p, b))
+                    action_btn = btn
 
         self._make_btn(btn_frame, "Web", style="secondary", font_size=9,
                       command=lambda u=f"https://modrinth.com/{mod.get('project_type', 'mod')}/{mod['slug']}": webbrowser.open(u)).pack(side="right", padx=5)
@@ -616,6 +622,30 @@ class ModsScreenMixin:
 
         card.bind("<Enter>", on_card_enter)
         card.bind("<Leave>", on_card_leave)
+
+        def show_mod_card_menu(event):
+            m = NeoContextMenu(self.root)
+            m.add_item("ℹ View Details", lambda: self.show_project_details(mod))
+            m.add_item("🌐 Open on Modrinth", lambda: webbrowser.open(f"https://modrinth.com/{mod.get('project_type', 'mod')}/{mod.get('slug', '')}"))
+            
+            p_type = mod.get('project_type', 'mod')
+            active_p_name = self.active_modpack_var.get()
+            if p_type == 'modpack' and action_btn:
+                m.add_separator()
+                m.add_item("📥 Download Modpack", lambda: self._install_mr_modpack(mod, action_btn))
+            elif p_type in ['resourcepack', 'shader'] and action_btn:
+                m.add_separator()
+                m.add_item("📥 Install Resource", lambda: self._install_global_resource(mod, action_btn))
+            elif active_p_name != "None":
+                pack = next((p for p in self.modpacks if p['name'] == active_p_name), None)
+                if pack:
+                    m.add_separator()
+                    m.add_item(f"📁 Open Mods Folder", lambda: open_path_in_system(os.path.join(self.get_modpack_dir(pack['id']), "mods")))
+                    if action_btn:
+                        m.add_item(f"📥 Install to {pack['name']}", lambda: self._install_mod_to_pack(mod, active_p_name, action_btn))
+            m.show_at(event.x_root, event.y_root)
+
+        attach_context_menu(card, show_mod_card_menu)
 
     def _install_mod_to_pack(self, mod_data, pack_name, btn_widget):
         pack = next((p for p in self.modpacks if p['name'] == pack_name), None)
