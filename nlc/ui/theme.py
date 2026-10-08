@@ -181,8 +181,10 @@ def build_theme_tokens(theme_key: str = "dark_slate", custom_accent: Optional[st
 # Active Global Tokens (mutated in-place on theme switch for seamless legacy compatibility)
 COLORS: Dict[str, str] = build_theme_tokens("dark_slate")
 
+from nlc.ui.font_loader import get_minecraft_font_family
+
 # --- Typography Tokens ---
-FONT_FAMILY = "Segoe UI" if os.name == "nt" else "DejaVu Sans"
+FONT_FAMILY = get_minecraft_font_family()
 
 FONTS = {
     'hero_title': (FONT_FAMILY, 24, "bold"),
