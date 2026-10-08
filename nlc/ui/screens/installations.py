@@ -489,39 +489,30 @@ class InstallationsScreenMixin:
             except:
                 self._selector_menu = None
 
-        print("Opening installation selector menu")
-        menu = tk.Toplevel(self.root)
+        menu = tk.Frame(
+            self.root,
+            bg=COLORS['card_bg'],
+            highlightbackground=COLORS.get('border_subtle', '#33373E'),
+            highlightthickness=1
+        )
         self._selector_menu = menu
-        menu.wm_overrideredirect(True)
-        menu.config(bg=COLORS['card_bg'])
-        menu.transient(self.root)
-        menu.attributes('-topmost', True)
         
         # Border Frame
-        menu_frame = tk.Frame(menu, bg=COLORS['card_bg'], highlightbackground=COLORS.get('border_subtle', '#33373E'), highlightthickness=1)
+        menu_frame = tk.Frame(menu, bg=COLORS['card_bg'])
         menu_frame.pack(fill="both", expand=True)
 
-        w = max(self.inst_selector_frame.winfo_width(), 300) # Enforce min width for longer names
+        w = max(self.inst_selector_frame.winfo_width(), 320)
         item_h = 55
         count = len(self.installations)
-        h = min(count * item_h, 400) 
+        h = min(count * item_h + 10, 360)
         
-        x = self.inst_selector_frame.winfo_rootx()
-        target_y = self.inst_selector_frame.winfo_rooty() - h - 5
+        # Coordinates relative to self.root
+        rx = self.inst_selector_frame.winfo_rootx() - self.root.winfo_rootx()
+        ry = self.inst_selector_frame.winfo_rooty() - self.root.winfo_rooty()
+        target_y = max(10, ry - h - 6)
         
-        # Screen bounds check
-        screen_h = self.root.winfo_screenheight()
-        if target_y < 0 or target_y + h > screen_h: 
-            target_y = self.inst_selector_frame.winfo_rooty() + self.inst_selector_frame.winfo_height() + 5
-            # If still off-screen, position above
-            if target_y + h > screen_h:
-                target_y = self.inst_selector_frame.winfo_rooty() - h - 5
-            
-        menu.geometry(f"{w}x{h}+{x}+{target_y}")
-        
-        # Determine animation direction
-        _selector_direction = "up" if target_y < self.inst_selector_frame.winfo_rooty() else "down"
-        _selector_target_h = h
+        menu.place(x=rx, y=target_y, width=w, height=h)
+        menu.lift()
         
         # Scrollable area
         canvas = tk.Canvas(menu_frame, bg=COLORS['card_bg'], highlightthickness=0)
@@ -537,38 +528,42 @@ class InstallationsScreenMixin:
         canvas.configure(yscrollcommand=scrollbar.set)
         
         canvas.pack(side="left", fill="both", expand=True)
-        # Scrollbar visibility managed later
         
         # Smooth mousewheel
         self._bind_wheel_events(canvas, lambda e, c=canvas: self._smooth_scroll(c, e), f"direct_{id(canvas)}")
         
-        # Close on click outside (Lose Focus) or Escape
-        def on_focus_out(event):
-            # Check if focus moved to scrollbar or inner element
-            try:
-                focused = menu.focus_get()
-                if focused and (str(focused).startswith(str(menu)) or focused == menu):
-                    return
-            except:
-                pass
-            print("Installation menu lost focus, closing")
-            self.root.after(150, lambda: menu.destroy() if menu.winfo_exists() else None)
-        
+        _global_click_id = None
+
         def close_menu():
+            nonlocal _global_click_id
+            if _global_click_id:
+                try:
+                    self.root.unbind_all("<Button-1>", _global_click_id)
+                except Exception:
+                    pass
+                _global_click_id = None
             if menu.winfo_exists():
-                print("Closing installation menu")
+                menu.place_forget()
                 menu.destroy()
-            
-        menu.bind("<FocusOut>", on_focus_out)
+            self._selector_menu = None
+
+        def on_global_click(event):
+            if not menu or not menu.winfo_exists():
+                return
+            try:
+                x, y = event.x_root, event.y_root
+                mx = menu.winfo_rootx()
+                my = menu.winfo_rooty()
+                mw = menu.winfo_width()
+                mh = menu.winfo_height()
+                if not (mx <= x <= mx + mw and my <= y <= my + mh):
+                    close_menu()
+            except Exception:
+                close_menu()
+
+        _global_click_id = self.root.bind_all("<Button-1>", on_global_click, add="+")
         menu.bind("<Escape>", lambda e: close_menu())
-        
-        # Ensure menu is visible and focused with slide animation
-        menu.update_idletasks()
-        menu.deiconify()
-        menu.lift()
-        menu.focus_force()
-        self._animate_menu_open(menu, _selector_target_h, direction=_selector_direction,
-                                pos_x=x, pos_y=target_y, pos_w=w)
+        menu.focus_set()
 
         # Populate
         for i, inst in enumerate(self.installations):
@@ -635,8 +630,8 @@ class InstallationsScreenMixin:
                 w.bind("<Leave>", on_leave, add="+")
             
             def do_select(e, idx=i):
+                close_menu()
                 self.select_installation(idx)
-                menu.destroy()
                 
             row.bind("<Button-1>", do_select)
             for child in row.winfo_children():
