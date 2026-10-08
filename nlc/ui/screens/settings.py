@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 CATEGORIES = [
     ("General", "command_block_front.png", "Startup, window behavior, and launcher setup"),
     ("Appearance", "painting.png", "Themes, custom accent colors, and 60 FPS animations"),
+    ("Modpacks & Instances", "shulker_box.png", "Instance isolation and shared resource packs, shaders, worlds, configs"),
     ("Java & Memory", "furnace_front_on.png", "RAM allocation, JVM runtime scanner, and directory"),
     ("Downloads", "hopper_top.png", "Concurrent download limits and speed throttling"),
     ("Integrations", "jukebox_top.png", "Discord Rich Presence and streamer privacy mode"),
@@ -78,6 +79,26 @@ class SettingsScreenMixin:
         if not hasattr(self, 'username_var'):
             self.username_var = tk.StringVar(value=getattr(self, 'username', 'Steve'))
             self.username_var.trace_add("write", lambda *a: setattr(self, 'username', self.username_var.get()))
+
+        inst_cfg = getattr(self, 'instances_config', {}) if isinstance(getattr(self, 'instances_config', None), dict) else {}
+        if not hasattr(self, 'share_resourcepacks_var'):
+            self.share_resourcepacks_var = tk.BooleanVar(value=inst_cfg.get('share_resourcepacks', True))
+        if not hasattr(self, 'share_shaderpacks_var'):
+            self.share_shaderpacks_var = tk.BooleanVar(value=inst_cfg.get('share_shaderpacks', True))
+        if not hasattr(self, 'share_worlds_var'):
+            self.share_worlds_var = tk.BooleanVar(value=inst_cfg.get('share_worlds', False))
+        if not hasattr(self, 'share_configs_var'):
+            self.share_configs_var = tk.BooleanVar(value=inst_cfg.get('share_configs', False))
+
+    def _save_instances_setting(self):
+        """Persist instances configuration changes."""
+        if not hasattr(self, 'instances_config') or not isinstance(self.instances_config, dict):
+            self.instances_config = {}
+        self.instances_config["share_resourcepacks"] = self.share_resourcepacks_var.get()
+        self.instances_config["share_shaderpacks"] = self.share_shaderpacks_var.get()
+        self.instances_config["share_worlds"] = self.share_worlds_var.get()
+        self.instances_config["share_configs"] = self.share_configs_var.get()
+        self.save_config()
 
     def create_settings_tab(self):
         """Construct the modern two-pane categorized settings workspace."""
@@ -230,6 +251,8 @@ class SettingsScreenMixin:
             self._render_general_settings(main_box)
         elif category_name == "Appearance":
             self._render_appearance_settings(main_box)
+        elif category_name == "Modpacks & Instances":
+            self._render_instances_settings(main_box)
         elif category_name == "Java & Memory":
             self._render_java_settings(main_box)
         elif category_name == "Downloads":
@@ -409,6 +432,111 @@ class SettingsScreenMixin:
                     custom_showinfo("Restart Required", "Restart the launcher to apply titlebar changes.")
             t_tb = create_toggle_switch(card_tb, self.custom_titlebar_var, command=on_titlebar_toggle, animator=getattr(self, 'animator', None))
             create_setting_row(card_tb, "Custom Dark Titlebar", "Enables seamless dark custom titlebar on Windows 10/11.", t_tb)
+
+    def _render_instances_settings(self, parent: tk.Widget):
+        """Render Modpack instance isolation and asset sharing settings."""
+        # 1. Asset Sharing Card
+        card_assets = create_card(parent, padx=22, pady=18)
+        card_assets.pack(fill="x", pady=(0, 16))
+
+        tk.Label(
+            card_assets,
+            text="SHARED ASSETS & INSTANCE SYNCHRONIZATION",
+            font=(FONT_FAMILY, 11, "bold"),
+            bg=card_assets.cget("bg"),
+            fg=COLORS['text_primary']
+        ).pack(anchor="w")
+
+        tk.Label(
+            card_assets,
+            text="When launching isolated modpacks or custom installations, selected assets from your global .minecraft directory are automatically linked so you don't need to duplicate downloads.",
+            font=(FONT_FAMILY, 8),
+            bg=card_assets.cget("bg"),
+            fg=COLORS['text_secondary'],
+            wraplength=640,
+            justify="left"
+        ).pack(anchor="w", pady=(4, 12))
+
+        # Ensure vars exist
+        inst_cfg = getattr(self, 'instances_config', {}) if isinstance(getattr(self, 'instances_config', None), dict) else {}
+        if not hasattr(self, 'share_resourcepacks_var'):
+            self.share_resourcepacks_var = tk.BooleanVar(value=inst_cfg.get('share_resourcepacks', True))
+        if not hasattr(self, 'share_shaderpacks_var'):
+            self.share_shaderpacks_var = tk.BooleanVar(value=inst_cfg.get('share_shaderpacks', True))
+        if not hasattr(self, 'share_worlds_var'):
+            self.share_worlds_var = tk.BooleanVar(value=inst_cfg.get('share_worlds', False))
+        if not hasattr(self, 'share_configs_var'):
+            self.share_configs_var = tk.BooleanVar(value=inst_cfg.get('share_configs', False))
+
+        t_rp = create_toggle_switch(card_assets, self.share_resourcepacks_var, command=self._save_instances_setting, animator=getattr(self, 'animator', None))
+        create_setting_row(
+            card_assets,
+            "Share Resource Packs",
+            "Resource packs in .minecraft/resourcepacks are linked into every modpack instance.",
+            t_rp
+        )
+
+        t_sp = create_toggle_switch(card_assets, self.share_shaderpacks_var, command=self._save_instances_setting, animator=getattr(self, 'animator', None))
+        create_setting_row(
+            card_assets,
+            "Share Shader Packs",
+            "Shaderpacks in .minecraft/shaderpacks are linked into every modpack instance for Iris/OptiFine.",
+            t_sp
+        )
+
+        t_worlds = create_toggle_switch(card_assets, self.share_worlds_var, command=self._save_instances_setting, animator=getattr(self, 'animator', None))
+        create_setting_row(
+            card_assets,
+            "Share Worlds (Saves)",
+            "Singleplayer saves in .minecraft/saves are shared between instances. Caution: playing worlds across incompatible mod versions may cause corruption.",
+            t_worlds
+        )
+
+        t_cfgs = create_toggle_switch(card_assets, self.share_configs_var, command=self._save_instances_setting, animator=getattr(self, 'animator', None))
+        create_setting_row(
+            card_assets,
+            "Share Mod Configurations",
+            "Config files in .minecraft/config are shared between instances. Not recommended if different modpacks customize the same mod configs.",
+            t_cfgs
+        )
+
+        # 2. Instance Storage Locations Card
+        card_dirs = create_card(parent, padx=22, pady=18)
+        card_dirs.pack(fill="x")
+
+        tk.Label(
+            card_dirs,
+            text="INSTANCE STORAGE LOCATIONS",
+            font=(FONT_FAMILY, 11, "bold"),
+            bg=card_dirs.cget("bg"),
+            fg=COLORS['text_primary']
+        ).pack(anchor="w", pady=(0, 10))
+
+        def open_modpacks_dir():
+            mp_dir = getattr(self, 'modpacks_dir', os.path.join(getattr(self, 'config_dir', os.path.expanduser('~/.nlc')), 'modpacks'))
+            os.makedirs(mp_dir, exist_ok=True)
+            open_path_in_system(mp_dir)
+
+        def open_mc_dir():
+            mc_dir = getattr(self, 'minecraft_dir', '')
+            if mc_dir and os.path.exists(mc_dir):
+                open_path_in_system(mc_dir)
+
+        btn_mp = make_button(card_dirs, "Open Modpacks Folder", style="secondary", command=open_modpacks_dir)
+        create_setting_row(
+            card_dirs,
+            "Modpack Instances Directory",
+            "Folder where isolated modpack game files, overrides, and unique configs are stored.",
+            btn_mp
+        )
+
+        btn_mc = make_button(card_dirs, "Open .minecraft", style="secondary", command=open_mc_dir)
+        create_setting_row(
+            card_dirs,
+            "Global Minecraft Directory",
+            "Root .minecraft folder containing shared versions, assets, libraries, and global configs.",
+            btn_mc
+        )
 
     def _render_java_settings(self, parent: tk.Widget):
         """Render Memory gauge, Java runtime auto-detector, and arguments."""
