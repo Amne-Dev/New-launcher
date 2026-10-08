@@ -18,9 +18,10 @@ from tkinter import ttk, filedialog, messagebox
 import requests
 import minecraft_launcher_lib
 
-from nlc.storage.paths import resource_path
+from nlc.storage.paths import resource_path, open_path_in_system
 from nlc.ui.theme import COLORS, FONT_FAMILY
 from nlc.ui.components.dialogs import custom_showinfo, custom_showerror, custom_askyesno, _schedule_window_centering
+from nlc.ui.components.context_menu import NeoContextMenu, attach_context_menu
 from nlc.net.http import get_http_session
 from nlc.net.downloader import _atomic_download
 from nlc.core.launch import safe_extract_zip as _safe_extract_zip
@@ -229,12 +230,20 @@ class ModpacksScreenMixin:
         menu_btn = self._make_btn(btns, "⋮", style="icon", font_size=10, width=3)
         menu_btn.pack(side="left", padx=2)
 
-        menu = tk.Menu(menu_btn, tearoff=0, bg=COLORS['card_bg'], fg="white")
-        menu.add_command(label="Open Folder", command=lambda: os.startfile(self.get_modpack_dir(pack['id'])))
-        menu.add_separator()
-        menu.add_command(label="Delete Modpack", command=lambda: self.delete_modpack(pack))
+        def show_pack_menu(event=None):
+            m = NeoContextMenu(self.root)
+            m.add_item("📦 View Details / Mods", lambda: self.show_modpack_contents_dialog(pack))
+            m.add_item("🔗 Link Installation", lambda: self.show_link_modpack_dialog(pack))
+            m.add_item("📁 Open Folder", lambda: open_path_in_system(self.get_modpack_dir(pack['id'])))
+            m.add_separator()
+            m.add_item("🗑 Delete Modpack", lambda: self.delete_modpack(pack), is_danger=True)
+            if event:
+                m.show_at(event.x_root, event.y_root)
+            else:
+                m.show_below(menu_btn)
 
-        menu_btn.config(command=lambda: menu.post(menu_btn.winfo_rootx(), menu_btn.winfo_rooty() + menu_btn.winfo_height()))
+        menu_btn.config(command=lambda: show_pack_menu())
+        attach_context_menu(card, lambda e: show_pack_menu(e))
         self._bind_smooth_scroll(self.mp_canvas, card)
 
     def install_local_mods(self, pack):
@@ -533,6 +542,15 @@ class ModpacksScreenMixin:
             if size_lbl is not None:
                 info_widgets.append(size_lbl)
             bind_hover_surfaces(card, [card, left, info, actions_row], info_widgets, del_btn)
+
+            def show_mod_card_menu(event, f=filename, d=display_name):
+                m = NeoContextMenu(dialog)
+                m.add_item("📁 Open Mods Folder", lambda: open_path_in_system(mods_dir))
+                m.add_separator()
+                m.add_item("🗑 Remove Mod", lambda: delete_mod(f, d), is_danger=True)
+                m.show_at(event.x_root, event.y_root)
+
+            attach_context_menu(card, show_mod_card_menu)
             self._bind_smooth_scroll(canvas, card)
 
         def create_mod_list_row(parent, filename):
@@ -565,6 +583,15 @@ class ModpacksScreenMixin:
             del_btn.pack()
 
             bind_hover_surfaces(row, [row, left, info, actions_row], [name_lbl, meta_lbl], del_btn)
+
+            def show_mod_row_menu(event, f=filename, d=display_name):
+                m = NeoContextMenu(dialog)
+                m.add_item("📁 Open Mods Folder", lambda: open_path_in_system(mods_dir))
+                m.add_separator()
+                m.add_item("🗑 Remove Mod", lambda: delete_mod(f, d), is_danger=True)
+                m.show_at(event.x_root, event.y_root)
+
+            attach_context_menu(row, show_mod_row_menu)
             self._bind_smooth_scroll(canvas, row)
 
         def render_mods(reset_scroll=True):
