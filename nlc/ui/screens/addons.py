@@ -17,7 +17,7 @@ from tkinter import ttk, filedialog
 from PIL import Image, ImageTk
 
 from nlc.storage.paths import resource_path
-from nlc.ui.theme import COLORS, FONT_FAMILY
+from nlc.ui.theme import COLORS, FONT_FAMILY, derive_hover_color
 from nlc.ui.components.dialogs import custom_showinfo, custom_showerror, custom_askyesno
 
 def _get_streamer_hidden_name():
@@ -241,9 +241,11 @@ class AddonsScreenMixin:
         # Save Button
         save_sync_btn = self._make_btn(sync_frame, "Save & Sync", style="secondary", font_size=10,
                                        command=self._save_gh_sync_settings)
-        save_sync_btn.config(bg=COLORS['accent_blue'], activebackground="#2E86C1")
-        save_sync_btn.bind("<Enter>", lambda e: save_sync_btn.config(bg="#2E86C1"))
-        save_sync_btn.bind("<Leave>", lambda e: save_sync_btn.config(bg=COLORS['accent_blue']))
+        accent_blue = COLORS.get('accent_blue', '#3498DB')
+        hover_blue = derive_hover_color(accent_blue)
+        save_sync_btn.config(bg=accent_blue, activebackground=hover_blue)
+        save_sync_btn.bind("<Enter>", lambda e: save_sync_btn.config(bg=hover_blue))
+        save_sync_btn.bind("<Leave>", lambda e: save_sync_btn.config(bg=accent_blue))
         save_sync_btn.pack(anchor="w", pady=(20, 0))
 
         # Streamer Mode
@@ -378,7 +380,7 @@ class AddonsScreenMixin:
 How to use:
 1. Create a public or private GitHub repository.
 2. Generate a Personal Access Token (PAT) with 'repo' scope.
-3. Enter the repository name (e.g., 'MyName/Skins') and the token above.
+3. Enter the repository name (e.g., 'MyName/Skins') and token in the GitHub Skin Sync card.
 4. Enable the feature. The launcher will upload your current skin to the repo and download friends' skins automatically.
         """
         tk.Label(info_frame, text=info_text, font=("Segoe UI", 9), justify="left", bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(anchor="w")
