@@ -39,9 +39,10 @@ def test_settings_screen_categories(tk_root):
     assert "Settings" in launcher.tabs
     assert hasattr(launcher, "settings_scroll_frame")
 
-    # Test switching between all 7 categories
+    # Test switching between all categories (including Modpacks & Instances)
     expected_categories = [cat[0] for cat in CATEGORIES]
-    assert len(expected_categories) == 7
+    assert len(expected_categories) == 8
+    assert "Modpacks & Instances" in expected_categories
 
     for cat_name in expected_categories:
         launcher.switch_settings_category(cat_name)
