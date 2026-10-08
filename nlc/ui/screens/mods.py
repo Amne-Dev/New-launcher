@@ -1018,7 +1018,7 @@ class ModsScreenMixin:
 
                      downloads = file_def.get('downloads') or []
                      d_url = downloads[0] if downloads else ""
-                     f_path = str(file_def.get('path') or "").replace("\", "/").lstrip("/")
+                     f_path = str(file_def.get('path') or "").replace(chr(92), "/").lstrip("/")
                      if not f_path or not d_url:
                          completed_files += 1
                          continue
