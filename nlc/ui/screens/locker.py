@@ -14,9 +14,10 @@ from tkinter import ttk, filedialog
 from PIL import Image, ImageTk
 
 from typing import cast
-from nlc.storage.paths import resource_path
+from nlc.storage.paths import resource_path, open_path_in_system
 from nlc.ui.theme import COLORS, FONT_FAMILY
 from nlc.ui.components.dialogs import custom_showinfo, custom_showerror, custom_showwarning, custom_askyesno
+from nlc.ui.components.context_menu import NeoContextMenu, attach_context_menu
 
 logger = logging.getLogger(__name__)
 
@@ -370,6 +371,27 @@ class LockerScreenMixin:
                 
                 tk.Label(p_frame, text=name[:20], bg=COLORS['card_bg'], fg="white").pack()
                 
+                custom_wp_dir = os.path.abspath(os.path.join(self.config_dir, "wallpapers"))
+                is_custom = os.path.abspath(path).startswith(custom_wp_dir)
+
+                def show_wp_menu(event, p=path, custom=is_custom):
+                    m = NeoContextMenu(self.root)
+                    m.add_item("🖼 Set as Wallpaper", lambda: self.set_wallpaper(p))
+                    m.add_item("📁 Open Wallpapers Folder", lambda: open_path_in_system(os.path.dirname(p)))
+                    if custom:
+                        def delete_wp():
+                            if custom_askyesno("Delete Wallpaper", "Are you sure you want to delete this custom wallpaper?", parent=self.root):
+                                try:
+                                    if os.path.exists(p):
+                                        os.remove(p)
+                                    self.render_wallpapers_view(parent)
+                                except Exception as e:
+                                    custom_showerror("Error", f"Failed to delete wallpaper: {e}", parent=self.root)
+                        m.add_separator()
+                        m.add_item("🗑 Delete Wallpaper", delete_wp, is_danger=True)
+                    m.show_at(event.x_root, event.y_root)
+
+                attach_context_menu(p_frame, show_wp_menu)
                 self.wp_widgets.append(p_frame)
             except: 
                 p_frame.destroy()
@@ -543,6 +565,24 @@ class LockerScreenMixin:
                  child.bind("<Button-1>", lambda e, p=path, m=model: _apply(p, m))
                  for grand in child.winfo_children():
                       grand.bind("<Button-1>", lambda e, p=path, m=model: _apply(p, m))
+
+             def show_skin_menu(event, p=path, m_model=model, i=idx):
+                 m = NeoContextMenu(self.root)
+                 m.add_item("👕 Equip Skin", lambda: self.apply_history_skin(p, m_model))
+                 m.add_item("📁 Open Skins Folder", lambda: open_path_in_system(os.path.dirname(p)))
+                 def remove_skin():
+                     p_prof = self.profiles[self.current_profile_index]
+                     hist = p_prof.get("skin_history", [])
+                     if 0 <= i < len(hist):
+                         hist.pop(i)
+                         p_prof["skin_history"] = hist
+                         self.save_profiles()
+                         self.render_skin_history()
+                 m.add_separator()
+                 m.add_item("🗑 Remove from History", remove_skin, is_danger=True)
+                 m.show_at(event.x_root, event.y_root)
+
+             attach_context_menu(row, show_skin_menu)
 
     def apply_history_skin(self, path, model="classic"):
         if not os.path.exists(path): return
