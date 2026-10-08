@@ -35,7 +35,7 @@ class LockerScreenMixin:
         self.tabs["Locker"] = frame
 
         # Sub-tabs Header Area
-        header = tk.Frame(frame, bg=COLORS['main_bg'], padx=40, pady=20)
+        header = tk.Frame(frame, bg=COLORS['main_bg'], padx=24, pady=14)
         header.pack(fill="x")
         self.locker_header = header
 
@@ -45,7 +45,7 @@ class LockerScreenMixin:
         self.locker_title_lbl = tk.Label(
             title_box,
             text="LOCKER & CUSTOMIZATION",
-            font=(FONT_FAMILY, 14, "bold"),
+            font=(FONT_FAMILY, 12, "bold"),
             bg=COLORS['main_bg'],
             fg=COLORS['text_primary']
         )
@@ -53,20 +53,20 @@ class LockerScreenMixin:
 
         self.locker_subtitle_lbl = tk.Label(
             title_box,
-            text="Player skin showcase, wardrobe presets & wallpaper studio",
-            font=(FONT_FAMILY, 9),
+            text="Skin showcase, wardrobe presets & wallpaper studio",
+            font=(FONT_FAMILY, 8),
             bg=COLORS['main_bg'],
             fg=COLORS['text_secondary']
         )
-        self.locker_subtitle_lbl.pack(anchor="w", pady=(2, 0))
+        self.locker_subtitle_lbl.pack(anchor="w", pady=(1, 0))
 
         # Segmented Pill Nav
         self.locker_view = tk.StringVar(value="Skins")
         self.locker_nav_frame = tk.Frame(
             header,
             bg=COLORS.get('input_bg', '#1E222B'),
-            padx=4,
-            pady=4,
+            padx=3,
+            pady=3,
             highlightthickness=1,
             highlightbackground=COLORS.get('card_border', '#2A303F')
         )
@@ -74,19 +74,19 @@ class LockerScreenMixin:
         self.locker_btn_frame = self.locker_nav_frame  # Backwards compatibility
 
         self.locker_btns = {}
-        for view_name, label_text in [("Skins", "👕 Wardrobe & Skins"), ("Wallpapers", "🖼 Wallpapers Studio")]:
+        for view_name, label_text in [("Skins", "👕 Skins"), ("Wallpapers", "🖼 Wallpapers")]:
             btn = tk.Button(
                 self.locker_nav_frame,
                 text=label_text,
-                font=(FONT_FAMILY, 10, "bold"),
+                font=(FONT_FAMILY, 9, "bold"),
                 relief="flat",
                 bd=0,
-                padx=16,
-                pady=6,
+                padx=12,
+                pady=4,
                 cursor="hand2",
                 command=lambda v=view_name: self.switch_locker_view(v)
             )
-            btn.pack(side="left", padx=2)
+            btn.pack(side="left", padx=1)
             self.locker_btns[view_name] = btn
 
         # Main Content Frame
@@ -159,18 +159,18 @@ class LockerScreenMixin:
     # -------------------------------------------------------------------------
     def render_skins_view(self, parent: tk.Widget):
         container = tk.Frame(parent, bg=COLORS['main_bg'])
-        container.pack(expand=True, fill="both", padx=30, pady=(0, 20))
+        container.pack(expand=True, fill="both", padx=20, pady=(0, 16))
 
         # Two Column Layout: Left (Showcase Stage), Right (Geometry + Wardrobe Grid)
-        container.columnconfigure(0, weight=0, minsize=420)
-        container.columnconfigure(1, weight=1)
+        container.columnconfigure(0, weight=4, minsize=300)
+        container.columnconfigure(1, weight=5, minsize=320)
         container.rowconfigure(0, weight=1)
 
         # ---------------------------------------------------------------------
         # LEFT: 3D SHOWCASE STAGE ("The Pedestal")
         # ---------------------------------------------------------------------
         stage_frame = tk.Frame(container, bg=COLORS['main_bg'])
-        stage_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 20), pady=0)
+        stage_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 16), pady=0)
 
         card_bg = COLORS.get('card_bg', '#222630')
         border_col = COLORS.get('card_border', '#2A303F')
@@ -181,8 +181,8 @@ class LockerScreenMixin:
             bg=card_bg,
             highlightbackground=border_col,
             highlightthickness=1,
-            padx=20,
-            pady=16
+            padx=16,
+            pady=14
         )
         self.preview_card.pack(fill="both", expand=True)
 
@@ -222,11 +222,11 @@ class LockerScreenMixin:
         self.preview_canvas = tk.Canvas(
             self.preview_card,
             bg=card_bg,
-            width=360,
-            height=400,
+            width=300,
+            height=360,
             highlightthickness=0
         )
-        self.preview_canvas.pack(fill="both", expand=True, pady=10)
+        self.preview_canvas.pack(fill="both", expand=True, pady=6)
 
         # Status indicator
         self.skin_indicator = tk.Label(
@@ -290,17 +290,14 @@ class LockerScreenMixin:
             bg=card_bg,
             highlightbackground=border_col,
             highlightthickness=1,
-            padx=20,
-            pady=16
+            padx=16,
+            pady=14
         )
-        config_card.pack(fill="x", pady=(0, 16))
+        config_card.pack(fill="x", pady=(0, 14))
 
-        config_card.columnconfigure(0, weight=1)
-        config_card.columnconfigure(1, weight=1)
-
-        # Left Column of Config: Arm Geometry
+        # Top Section: Arm Geometry
         geom_box = tk.Frame(config_card, bg=card_bg)
-        geom_box.grid(row=0, column=0, sticky="w")
+        geom_box.pack(fill="x", pady=(0, 12))
 
         tk.Label(
             geom_box,
@@ -308,7 +305,7 @@ class LockerScreenMixin:
             font=(FONT_FAMILY, 9, "bold"),
             bg=card_bg,
             fg=COLORS['text_secondary']
-        ).pack(anchor="w", pady=(0, 8))
+        ).pack(anchor="w", pady=(0, 6))
 
         if self.profiles:
             p_prof = self.profiles[self.current_profile_index]
@@ -318,7 +315,7 @@ class LockerScreenMixin:
             self.skin_model_var = tk.StringVar(value="classic")
 
         model_chips = tk.Frame(geom_box, bg=card_bg)
-        model_chips.pack(anchor="w")
+        model_chips.pack(fill="x")
 
         self.chip_classic = tk.Button(
             model_chips,
@@ -331,7 +328,7 @@ class LockerScreenMixin:
             cursor="hand2",
             command=lambda: self._select_skin_model("classic")
         )
-        self.chip_classic.pack(side="left", padx=(0, 6))
+        self.chip_classic.pack(side="left", padx=(0, 8))
 
         self.chip_slim = tk.Button(
             model_chips,
@@ -347,9 +344,12 @@ class LockerScreenMixin:
         self.chip_slim.pack(side="left")
         self._update_model_chips()
 
-        # Right Column of Config: Multiplayer Skin Injection Toggle
+        # Divider line
+        tk.Frame(config_card, bg=border_col, height=1).pack(fill="x", pady=(0, 12))
+
+        # Bottom Section: Multiplayer Skin Injection Toggle
         inj_box = tk.Frame(config_card, bg=card_bg)
-        inj_box.grid(row=0, column=1, sticky="e")
+        inj_box.pack(fill="x")
 
         tk.Label(
             inj_box,
@@ -357,11 +357,11 @@ class LockerScreenMixin:
             font=(FONT_FAMILY, 9, "bold"),
             bg=card_bg,
             fg=COLORS['text_secondary']
-        ).pack(anchor="w", pady=(0, 8))
+        ).pack(anchor="w", pady=(0, 6))
 
         self.auto_download_var = tk.BooleanVar(value=self.auto_download_mod)
         inj_toggle_row = tk.Frame(inj_box, bg=card_bg)
-        inj_toggle_row.pack(anchor="w")
+        inj_toggle_row.pack(fill="x")
 
         self.inj_toggle_btn = tk.Button(
             inj_toggle_row,
@@ -376,7 +376,7 @@ class LockerScreenMixin:
             fg="#FFFFFF" if self.auto_download_mod else COLORS['text_secondary'],
             command=self._toggle_skin_injection
         )
-        self.inj_toggle_btn.pack(side="left", padx=(0, 8))
+        self.inj_toggle_btn.pack(side="left", padx=(0, 10))
 
         tk.Label(
             inj_toggle_row,
@@ -608,16 +608,12 @@ class LockerScreenMixin:
             ).pack()
             return
 
-        # Render 2-Column Grid of Wardrobe Cards
-        self.history_frame.columnconfigure(0, weight=1)
-        self.history_frame.columnconfigure(1, weight=1)
-
         card_bg = COLORS.get('input_bg', '#1E222B')
         border_col = COLORS.get('card_border', '#2A303F')
         accent = COLORS.get('accent_color', '#2ECC71')
         cur_skin_path = os.path.abspath(self.skin_path) if self.skin_path else ""
 
-        for card_idx, (orig_idx, path, model, name) in enumerate(filtered_items):
+        for orig_idx, path, model, name in filtered_items:
             is_equipped = cur_skin_path and os.path.abspath(path) == cur_skin_path
 
             card = tk.Frame(
@@ -625,16 +621,14 @@ class LockerScreenMixin:
                 bg=card_bg,
                 highlightthickness=1,
                 highlightbackground=accent if is_equipped else border_col,
-                padx=10,
-                pady=10,
+                padx=12,
+                pady=8,
                 cursor="hand2"
             )
-            col = card_idx % 2
-            row = card_idx // 2
-            card.grid(row=row, column=col, sticky="nsew", padx=4, pady=4)
+            card.pack(fill="x", pady=3, padx=2)
 
             # Left: Head Avatar Icon
-            head = self.get_head_from_skin(path, size=44)
+            head = self.get_head_from_skin(path, size=36)
             if head:
                 icon_lbl = tk.Label(card, image=head, bg=card_bg)
                 icon_lbl.image = head  # type: ignore
