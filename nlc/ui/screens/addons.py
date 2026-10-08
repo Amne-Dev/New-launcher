@@ -16,9 +16,10 @@ import tkinter as tk
 from tkinter import ttk, filedialog
 from PIL import Image, ImageTk
 
-from nlc.storage.paths import resource_path
+from nlc.storage.paths import resource_path, open_path_in_system
 from nlc.ui.theme import COLORS, FONT_FAMILY, derive_hover_color
 from nlc.ui.components.dialogs import custom_showinfo, custom_showerror, custom_askyesno
+from nlc.ui.components.context_menu import NeoContextMenu, attach_context_menu
 
 def _get_streamer_hidden_name():
     return "Hidden Account"
@@ -953,12 +954,7 @@ How to use:
 
     def _open_path(self, path):
         try:
-            if os.name == "nt":
-                os.startfile(path)
-            elif sys.platform == "darwin":
-                subprocess.Popen(["open", path], close_fds=True)
-            else:
-                subprocess.Popen(["xdg-open", path], close_fds=True)
+            open_path_in_system(path)
         except Exception as e:
             custom_showerror("Open Failed", f"Could not open:\n{path}\n\n{e}", parent=self.root)
 
@@ -1035,6 +1031,16 @@ How to use:
             btns.pack(fill="x", pady=(8, 0))
             self._make_btn(btns, "Open", style="secondary", font_size=8, command=lambda p=path: self._open_path(p)).pack(side="left")
             self._make_btn(btns, "Delete", style="secondary", font_size=8, command=lambda p=path: self.delete_screenshot(p)).pack(side="right")
+
+            def show_screenshot_menu(event, p=path):
+                m = NeoContextMenu(self.root)
+                m.add_item("🖼 Open Screenshot", lambda: self._open_path(p))
+                m.add_item("📁 Open Screenshots Folder", lambda: open_path_in_system(screenshots_dir))
+                m.add_separator()
+                m.add_item("🗑 Delete Screenshot", lambda: self.delete_screenshot(p), is_danger=True)
+                m.show_at(event.x_root, event.y_root)
+
+            attach_context_menu(card, show_screenshot_menu)
 
         self._refresh_addons_scroll_bindings()
 
