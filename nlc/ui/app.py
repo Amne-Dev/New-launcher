@@ -4498,6 +4498,16 @@ class MinecraftLauncher(
                     if hasattr(self, 'build_main_sidebar'):
                         self.build_main_sidebar()
 
+            # Animation lifecycle for 3D Locker Preview
+            if tab_name == "Locker":
+                if hasattr(self, 'update_locker_subtabs'):
+                    self.update_locker_subtabs()
+                if hasattr(self, 'start_preview_animation'):
+                    self.start_preview_animation()
+            else:
+                if hasattr(self, 'stop_preview_animation'):
+                    self.stop_preview_animation()
+
     # --- PLAY TAB ---
     def change_minecraft_dir(self):
         path = filedialog.askdirectory(initialdir=self.minecraft_dir)
@@ -4992,6 +5002,12 @@ class MinecraftLauncher(
         self.update_profile_btn()
         if hasattr(self, 'update_bottom_gamertag'): self.update_bottom_gamertag()
         
+        # Load account capes in background and update locker UI
+        if hasattr(self, 'load_account_capes_async'):
+            self.load_account_capes_async()
+        if hasattr(self, 'update_locker_subtabs'):
+            self.update_locker_subtabs()
+
         # Refresh skin history if on Locker tab
         if self.current_tab == "Locker" and hasattr(self, 'locker_view') and self.locker_view.get() == "Skins":
             if hasattr(self, 'render_skin_history'):
@@ -5546,6 +5562,9 @@ class MinecraftLauncher(
         pass # Deprecated
 
     def render_preview(self):
+        if hasattr(self, 'render_3d_stage_frame'):
+            self.render_3d_stage_frame()
+            return
         try:
             # Check if preview canvas exists and is visible
             if not hasattr(self, 'preview_canvas') or not self.preview_canvas.winfo_exists():
