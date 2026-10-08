@@ -15,7 +15,7 @@ import requests
 
 import minecraft_launcher_lib
 
-from nlc.ui.theme import COLORS, FONT_FAMILY
+from nlc.ui.theme import COLORS, FONT_FAMILY, derive_hover_color
 from nlc.ui.components.dialogs import custom_showinfo, custom_showerror, custom_askyesno
 from nlc.net.ms_auth import MicrosoftDeviceAuth, MSA_CLIENT_ID
 from nlc.net.elyby_auth import ElyByAuth
@@ -170,7 +170,7 @@ class AccountsScreenMixin:
 
     def create_profile_item(self, parent, idx, profile):
         is_active = (idx == self.current_profile_index)
-        bg = "#454545" if is_active else COLORS['card_bg']
+        bg = COLORS.get('hover_bg', '#3A3F4D') if is_active else COLORS['card_bg']
         
         frame = tk.Frame(parent, bg=bg, pady=8, padx=10, cursor="hand2")
         frame.pack(fill="x", pady=1)
@@ -184,11 +184,12 @@ class AccountsScreenMixin:
                 bg=bg, fg=COLORS['text_primary']).pack(side="left")
         
         # Delete Button
+        err_red = COLORS.get('error_red', '#EF4444')
         del_btn = self._make_btn(frame, "-", style="danger", font_size=12, bold=True, icon=True,
                                  command=lambda: self.delete_profile(idx))
-        del_btn.config(bg=bg, fg="#ff6b6b", activebackground=bg, activeforeground="#ff4444")
-        del_btn.bind("<Enter>", lambda e: del_btn.config(fg="#ff4444"))
-        del_btn.bind("<Leave>", lambda e: del_btn.config(fg="#ff6b6b"))
+        del_btn.config(bg=bg, fg=err_red, activebackground=bg, activeforeground=err_red)
+        del_btn.bind("<Enter>", lambda e: del_btn.config(fg="white", bg=err_red))
+        del_btn.bind("<Leave>", lambda e: del_btn.config(fg=err_red, bg=bg))
         
         # Only show delete if strictly more than 1 profile? Or allow deleting the last one (which resets to default)?
         # User said "right of every account".
@@ -261,11 +262,12 @@ class AccountsScreenMixin:
         self._make_btn(win_root, "Microsoft Account", style="primary", font_size=11,
                       width=25, command=lambda: self.show_microsoft_login(win)).pack(pady=5, ipady=4)
 
+        accent_blue = COLORS.get('accent_blue', '#3498DB')
         btn_ely = self._make_btn(win_root, "Ely.by Account", style="secondary", font_size=11,
                                  width=25, command=lambda: self.show_elyby_login(win))
-        btn_ely.config(bg="#3498DB", activebackground="#2E86C1")
-        btn_ely.bind("<Enter>", lambda e: btn_ely.config(bg="#2E86C1"))
-        btn_ely.bind("<Leave>", lambda e: btn_ely.config(bg="#3498DB"))
+        btn_ely.config(bg=accent_blue, activebackground=derive_hover_color(accent_blue))
+        btn_ely.bind("<Enter>", lambda e: btn_ely.config(bg=derive_hover_color(accent_blue)))
+        btn_ely.bind("<Leave>", lambda e: btn_ely.config(bg=accent_blue))
         btn_ely.pack(pady=5, ipady=4)
 
         self._make_btn(win_root, "Offline Account", style="secondary", font_size=11,
@@ -304,7 +306,7 @@ class AccountsScreenMixin:
         
         # URL Display
         url_lbl = tk.Label(content_root, text="", font=(FONT_FAMILY, 11, "underline"), 
-                          bg=COLORS['main_bg'], fg="#3498DB", cursor="hand2")
+                          bg=COLORS['main_bg'], fg=COLORS.get('accent_blue', '#3498DB'), cursor="hand2")
         url_lbl.pack(pady=5)
         
         # Copy Button
@@ -352,7 +354,7 @@ class AccountsScreenMixin:
              if win.winfo_exists():
                  code_display.config(text=user_code)
                  url_display.config(text=verification_uri)
-                 status.config(text=f"1. Click the link above\n2. Enter the code\n3. Login to your Microsoft Account")
+                 status.config(text="1. Open the verification link below\n2. Enter the code shown\n3. Sign in to your Microsoft Account")
                  
                  copy_btn.config(state="normal", command=lambda: self.root.clipboard_clear() or self.root.clipboard_append(user_code) or self.root.update())
              
