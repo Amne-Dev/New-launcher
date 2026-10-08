@@ -146,6 +146,16 @@ class NeoContextMenu:
         """Display context menu directly below widget (convenience alias for show_at_widget)."""
         self.show_at_widget(widget, direction="below")
 
+    def invoke(self, index: int) -> None:
+        """Programmatically invoke the menu item at index, dismissing the menu."""
+        if 0 <= index < len(self.items):
+            item = self.items[index]
+            if item.get("type") == "item" and not item.get("disabled"):
+                self.dismiss()
+                cmd = item.get("command")
+                if cmd:
+                    cmd()
+
     def _create_menu_item_row(self, container: tk.Frame, entry: Dict[str, Any]) -> None:
         card_bg = COLORS.get("card_bg", "#242830")
         hover_bg = COLORS.get("hover_bg", "#3A3F4D")
