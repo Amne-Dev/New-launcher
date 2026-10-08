@@ -4909,13 +4909,41 @@ class MinecraftLauncher(
     def get_head_from_skin(self, skin_path, size=40):
         try:
             if skin_path and os.path.exists(skin_path):
-                img = Image.open(skin_path)
-                # Head is 8x8 at 8,8
+                img = Image.open(skin_path).convert("RGBA")
+                # Base head is 8x8 at (8, 8, 16, 16)
                 head = img.crop((8, 8, 16, 16))
+                # Outer hat/helm overlay is at (40, 8, 48, 16)
+                try:
+                    hat = img.crop((40, 8, 48, 16))
+                    if hat.getbbox():
+                        head.alpha_composite(hat)
+                except Exception:
+                    pass
                 return ImageTk.PhotoImage(head.resize((size, size), RESAMPLE_NEAREST))
-        except: pass
+        except Exception:
+            pass
 
         return _build_missing_skin_head(size)
+
+    def export_current_skin(self):
+        """Export currently equipped player skin PNG to user-chosen destination."""
+        if not self.skin_path or not os.path.exists(self.skin_path):
+            custom_showwarning("No Skin", "No skin is currently equipped to export.", parent=self.root)
+            return
+        default_name = os.path.basename(self.skin_path)
+        out_file = filedialog.asksaveasfilename(
+            parent=self.root,
+            title="Export Skin PNG",
+            defaultextension=".png",
+            initialfile=default_name,
+            filetypes=[("PNG Image", "*.png")]
+        )
+        if out_file:
+            try:
+                shutil.copy2(self.skin_path, out_file)
+                custom_showinfo("Exported", f"Skin saved to:\n{out_file}", parent=self.root)
+            except Exception as e:
+                custom_showerror("Export Error", f"Failed to save skin: {e}", parent=self.root)
 
     def update_active_profile(self):
         if not self.profiles:
