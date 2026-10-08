@@ -855,140 +855,128 @@ class InstallationsScreenMixin:
                 
         # Icon Selector Modal
         def open_icon_selector(e):
+             from nlc.ui.components.modal import get_modal_manager
+             mgr = get_modal_manager(self.root)
+             if not mgr:
+                 return
+
              modal_bg = COLORS['card_bg']
              input_bg = COLORS.get('input_bg', '#2E333E')
              text_primary = COLORS['text_primary']
              text_muted = COLORS.get('text_muted', '#6B7280')
 
-             sel_win = tk.Toplevel(self.root)
-             sel_win.title("Select Icon")
-             sel_win.geometry("480x550")
-             sel_win.configure(bg=modal_bg)
-             sel_win.transient(self.root)
-             # Don't use grab_set to allow parent window interaction
-             sel_win.resizable(False, False)
-             
-             # Center on parent
-             sel_win.update_idletasks()
-             x = self.root.winfo_x() + (self.root.winfo_width()//2) - 240
-             y = self.root.winfo_y() + (self.root.winfo_height()//2) - 275
-             sel_win.geometry(f"+{x}+{y}")
-             
-             # Ensure visibility
-             sel_win.deiconify()
-             sel_win.lift()
-             sel_root = self._apply_custom_toplevel_chrome(sel_win, "Select Icon")
+             def build_content(body_frame, close_modal):
+                 # Search bar for icons
+                 search_frame = tk.Frame(body_frame, bg=input_bg, padx=8, pady=4)
+                 search_frame.pack(fill="x", padx=15, pady=(0, 8))
+                 
+                 tk.Label(search_frame, text="🔍", bg=input_bg, fg=text_muted).pack(side="left", padx=(0, 5))
+                 icon_search_var = tk.StringVar()
+                 icon_search_entry = tk.Entry(search_frame, textvariable=icon_search_var, bg=input_bg, fg=text_primary,
+                                             insertbackground=text_primary, relief="flat", font=("Segoe UI", 9))
+                 icon_search_entry.pack(side="left", fill="x", expand=True)
+                 icon_search_entry.focus_set()
 
-             tk.Label(sel_root, text="Select Icon", font=("Segoe UI", 12, "bold"), bg=modal_bg, fg=text_primary).pack(pady=(12, 6))
-             
-             # Search bar for icons
-             search_frame = tk.Frame(sel_root, bg=input_bg, padx=8, pady=4)
-             search_frame.pack(fill="x", padx=15, pady=(0, 8))
-             
-             tk.Label(search_frame, text="🔍", bg=input_bg, fg=text_muted).pack(side="left", padx=(0, 5))
-             icon_search_var = tk.StringVar()
-             icon_search_entry = tk.Entry(search_frame, textvariable=icon_search_var, bg=input_bg, fg=text_primary,
-                                         insertbackground=text_primary, relief="flat", font=("Segoe UI", 9))
-             icon_search_entry.pack(side="left", fill="x", expand=True)
+                 # Scrollable Frame for Icons
+                 container = tk.Frame(body_frame, bg=modal_bg)
+                 container.pack(expand=True, fill="both", padx=10, pady=(0, 10))
+                 
+                 canvas = tk.Canvas(container, bg=modal_bg, highlightthickness=0)
+                 scrollbar = tk.Scrollbar(container, orient="vertical", command=canvas.yview)
+                 
+                 icons_grid = tk.Frame(canvas, bg=modal_bg)
+                 
+                 icons_grid.bind(
+                     "<Configure>",
+                     lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+                 )
+                 
+                 canvas.create_window((0, 0), window=icons_grid, anchor="nw")
+                 canvas.configure(yscrollcommand=scrollbar.set)
+                 
+                 canvas.pack(side="left", fill="both", expand=True)
+                 scrollbar.pack(side="right", fill="y")
+                 
+                 self._bind_wheel_events(body_frame, lambda e, c=canvas: self._smooth_scroll(c, e), f"direct_{id(canvas)}")
+                 
+                 # Popular Minecraft Blocks
+                 popular_blocks = [
+                     "grass_block_side.png", "dirt.png", "stone.png", "cobblestone.png", "oak_planks.png", 
+                     "crafting_table_front.png", "furnace_front.png", "barrel_side.png", "tnt_side.png", "bookshelf.png",
+                     "sand.png", "gravel.png", "bedrock.png", "obsidian.png", "spruce_log.png",
+                     "diamond_ore.png", "gold_ore.png", "iron_ore.png", "coal_ore.png", "redstone_ore.png",
+                     "diamond_block.png", "gold_block.png", "iron_block.png", "emerald_block.png", "lapis_block.png",
+                     "snow.png", "ice.png", "clay.png", "pumpkin_side.png", "melon_side.png",
+                     "netherrack.png", "soul_sand.png", "glowstone.png", "end_stone.png", "red_wool.png"
+                 ]
 
-             # Scrollable Frame for Icons
-             container = tk.Frame(sel_root, bg=modal_bg)
-             container.pack(expand=True, fill="both", padx=10, pady=(0, 10))
-             
-             canvas = tk.Canvas(container, bg=modal_bg, highlightthickness=0)
-             scrollbar = tk.Scrollbar(container, orient="vertical", command=canvas.yview)
-             
-             icons_grid = tk.Frame(canvas, bg=modal_bg)
-             
-             icons_grid.bind(
-                 "<Configure>",
-                 lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-             )
-             
-             canvas.create_window((0, 0), window=icons_grid, anchor="nw")
-             canvas.configure(yscrollcommand=scrollbar.set)
-             
-             canvas.pack(side="left", fill="both", expand=True)
-             scrollbar.pack(side="right", fill="y")
-             
-             self._bind_wheel_events(sel_win, lambda e, c=canvas: self._smooth_scroll(c, e), f"direct_{id(canvas)}")
-             
-             # Popular Minecraft Blocks
-             popular_blocks = [
-                 "grass_block_side.png", "dirt.png", "stone.png", "cobblestone.png", "oak_planks.png", 
-                 "crafting_table_front.png", "furnace_front.png", "barrel_side.png", "tnt_side.png", "bookshelf.png",
-                 "sand.png", "gravel.png", "bedrock.png", "obsidian.png", "spruce_log.png",
-                 "diamond_ore.png", "gold_ore.png", "iron_ore.png", "coal_ore.png", "redstone_ore.png",
-                 "diamond_block.png", "gold_block.png", "iron_block.png", "emerald_block.png", "lapis_block.png",
-                 "snow.png", "ice.png", "clay.png", "pumpkin_side.png", "melon_side.png",
-                 "netherrack.png", "soul_sand.png", "glowstone.png", "end_stone.png", "red_wool.png"
-             ]
+                 # Discover all PNG icons in the icons directory
+                 icons_dir = resource_path("icons")
+                 all_found_icons = []
+                 if os.path.isdir(icons_dir):
+                     try:
+                         all_found_icons = sorted([f for f in os.listdir(icons_dir) if f.lower().endswith(".png")])
+                     except Exception:
+                         pass
+                 
+                 seen_blocks = set(popular_blocks)
+                 all_icon_files = list(popular_blocks) + [f for f in all_found_icons if f not in seen_blocks]
+                 
+                 slot_bg = input_bg
+                 hover_bg = COLORS.get('hover_bg', '#3A3F4D')
+                 border_col = COLORS.get('border_subtle', '#33373E')
+                 cols = 5
 
-             # Discover all PNG icons in the icons directory
-             icons_dir = resource_path("icons")
-             all_found_icons = []
-             if os.path.isdir(icons_dir):
-                 try:
-                     all_found_icons = sorted([f for f in os.listdir(icons_dir) if f.lower().endswith(".png")])
-                 except Exception:
-                     pass
-             
-             seen_blocks = set(popular_blocks)
-             all_icon_files = list(popular_blocks) + [f for f in all_found_icons if f not in seen_blocks]
-             
-             slot_bg = input_bg
-             hover_bg = COLORS.get('hover_bg', '#3A3F4D')
-             border_col = COLORS.get('border_subtle', '#33373E')
-             cols = 5
+                 def populate_icons(filter_str=""):
+                     for w in icons_grid.winfo_children():
+                         w.destroy()
 
-             def populate_icons(filter_str=""):
-                 for w in icons_grid.winfo_children():
-                     w.destroy()
+                     f_lower = filter_str.strip().lower()
+                     matches = [name for name in all_icon_files if f_lower in name.lower()] if f_lower else all_icon_files
+                     display_list = matches if f_lower else matches[:120]
 
-                 f_lower = filter_str.strip().lower()
-                 matches = [name for name in all_icon_files if f_lower in name.lower()] if f_lower else all_icon_files
-                 display_list = matches if f_lower else matches[:120]
-
-                 for i, name in enumerate(display_list):
-                     path = f"icons/{name}"
-                     slot = tk.Frame(icons_grid, bg=slot_bg, width=64, height=64, 
-                                    highlightbackground=border_col, highlightthickness=1)
-                     slot.grid(row=i//cols, column=i%cols, padx=6, pady=6)
-                     slot.pack_propagate(False)
-                     
-                     img = self.get_icon_image(path, (48, 48))
-                     lbl = tk.Label(slot, bg=slot_bg, cursor="hand2")
-                     if img:
-                         lbl.config(image=img)
-                         lbl.image = img # type: ignore
-                     else:
-                         lbl.config(text="?", fg="white")
-                     lbl.place(relx=0.5, rely=0.5, anchor="center")
-                     
-                     def set_ico(val=path):
-                         current_icon_var.set(val)
-                         update_main_icon(val)
-                         sel_win.destroy()
+                     for i, name in enumerate(display_list):
+                         path = f"icons/{name}"
+                         slot = tk.Frame(icons_grid, bg=slot_bg, width=64, height=64, 
+                                        highlightbackground=border_col, highlightthickness=1)
+                         slot.grid(row=i//cols, column=i%cols, padx=6, pady=6)
+                         slot.pack_propagate(False)
                          
-                     def on_hover(s=slot, l=lbl):
-                         s.config(bg=hover_bg)
-                         l.config(bg=hover_bg)
+                         img = self.get_icon_image(path, (48, 48))
+                         lbl = tk.Label(slot, bg=slot_bg, cursor="hand2")
+                         if img:
+                             lbl.config(image=img)
+                             lbl.image = img # type: ignore
+                         else:
+                             lbl.config(text="?", fg="white")
+                         lbl.place(relx=0.5, rely=0.5, anchor="center")
                          
-                     def on_leave(s=slot, l=lbl):
-                         s.config(bg=slot_bg)
-                         l.config(bg=slot_bg)
+                         def set_ico(val=path):
+                             current_icon_var.set(val)
+                             update_main_icon(val)
+                             close_modal()
+                             
+                         def on_hover(s=slot, l=lbl):
+                             s.config(bg=hover_bg)
+                             l.config(bg=hover_bg)
+                             
+                         def on_leave(s=slot, l=lbl):
+                             s.config(bg=slot_bg)
+                             l.config(bg=slot_bg)
 
-                     lbl.bind("<Button-1>", lambda e, val=path: set_ico(val))
-                     slot.bind("<Button-1>", lambda e, val=path: set_ico(val))
-                     lbl.bind("<Enter>", lambda e, s=slot, l=lbl: on_hover(s, l))
-                     lbl.bind("<Leave>", lambda e, s=slot, l=lbl: on_leave(s, l))
-                     slot.bind("<Enter>", lambda e, s=slot, l=lbl: on_hover(s, l))
-                     slot.bind("<Leave>", lambda e, s=slot, l=lbl: on_leave(s, l))
+                         lbl.bind("<Button-1>", lambda e, val=path: set_ico(val))
+                         slot.bind("<Button-1>", lambda e, val=path: set_ico(val))
+                         lbl.bind("<Enter>", lambda e, s=slot, l=lbl: on_hover(s, l))
+                         lbl.bind("<Leave>", lambda e, s=slot, l=lbl: on_leave(s, l))
+                         slot.bind("<Enter>", lambda e, s=slot, l=lbl: on_hover(s, l))
+                         slot.bind("<Leave>", lambda e, s=slot, l=lbl: on_leave(s, l))
 
-                 canvas.yview_moveto(0)
+                     canvas.yview_moveto(0)
 
-             populate_icons()
-             icon_search_var.trace_add("write", lambda *_: populate_icons(icon_search_var.get()))
+                 populate_icons()
+                 icon_search_var.trace_add("write", lambda *_: populate_icons(icon_search_var.get()))
+
+             mgr.show_modal("Select Icon", build_content, width=500, height=520)
         
         icon_btn.bind("<Button-1>", open_icon_selector)
 
