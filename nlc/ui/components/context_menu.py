@@ -1,11 +1,11 @@
 """
 nlc.ui.components.context_menu - Unified Neo-styled right-click context menu system
-Provides theme-synchronized, border-bounded, accessible context menus with icon and danger support.
+Provides theme-synchronized, border-bounded, accessible in-window context menus with icon and danger support.
 """
 
 import sys
 import tkinter as tk
-from typing import Callable, Optional, List, Dict, Any
+from typing import Callable, Optional, List, Dict, Any, Union
 from nlc.ui.theme import COLORS, FONT_FAMILY
 from nlc.storage.paths import open_path_in_system
 
@@ -26,16 +26,26 @@ def dismiss_active_context_menu() -> None:
 class NeoContextMenu:
     """
     Modern Neo design system context menu replacement for tk.Menu.
-    Renders with dark card backgrounds, subtle borders, Minecraft typography,
-    smart boundary detection, and hover animations.
+    Renders as an in-window overlay frame directly inside the application's root window,
+    ensuring 100% immune positioning across Wayland, Hyprland, X11, and tiling WMs.
     """
 
     def __init__(self, parent_widget: tk.Widget, min_width: int = 160):
         self.parent = parent_widget
         self.min_width = min_width
-        self.menu_win: Optional[tk.Toplevel] = None
+        self.menu_frame: Optional[tk.Frame] = None
         self.items: List[Dict[str, Any]] = []
-        self._global_bind_id: Optional[str] = None
+        self._global_click_id: Optional[str] = None
+
+    @property
+    def menu_win(self) -> Optional[tk.Widget]:
+        """Backwards-compatibility property returning the active menu frame widget."""
+        return self.menu_frame
+
+    @menu_win.setter
+    def menu_win(self, val: Optional[tk.Widget]) -> None:
+        if isinstance(val, tk.Frame) or val is None:
+            self.menu_frame = val
 
     def add_item(
         self,
@@ -64,100 +74,133 @@ class NeoContextMenu:
         return self
 
     def post(self, x_root: int, y_root: int) -> None:
-        """Render and display context menu at screen root coordinates."""
+        """Render and display context menu at screen root coordinates (converted to in-window coords)."""
         dismiss_active_context_menu()
         global _ACTIVE_CONTEXT_MENU
         _ACTIVE_CONTEXT_MENU = self
 
-        root = self.parent.winfo_toplevel()
-        menu = tk.Toplevel(root)
-        menu.withdraw()  # Crucial for Wayland/Hyprland: prevent initial mapping at (0, 0)
-        menu.transient(root)
-        try:
-            menu.attributes("-type", "popup_menu")
-        except Exception:
-            pass
-        try:
-            menu.attributes("-topmost", True)
-        except Exception:
-            pass
-        menu.overrideredirect(True)
+        top_win = self.parent.winfo_toplevel()
+        top_win.update_idletasks()
+        win_w = top_win.winfo_width()
+        win_h = top_win.winfo_height()
 
         card_bg = COLORS.get("card_bg", "#242830")
         border_col = COLORS.get("border_subtle", "#2D3139")
-        menu.config(bg=card_bg, highlightthickness=1, highlightbackground=border_col)
-        self.menu_win = menu
 
-        # Container frame
-        container = tk.Frame(menu, bg=card_bg, padx=4, pady=4)
-        container.pack(fill="both", expand=True)
+        frame = tk.Frame(
+            top_win,
+            bg=card_bg,
+            highlightthickness=1,
+            highlightbackground=border_col,
+            padx=4,
+            pady=4
+        )
+        self.menu_frame = frame
 
         for entry in self.items:
             if entry["type"] == "separator":
-                sep = tk.Frame(container, bg=COLORS.get("separator", "#282C36"), height=1)
+                sep = tk.Frame(frame, bg=COLORS.get("separator", "#282C36"), height=1)
                 sep.pack(fill="x", padx=6, pady=4)
                 continue
+            self._create_menu_item_row(frame, entry)
 
-            self._create_menu_item_row(container, entry)
+        # Measure size
+        frame.update_idletasks()
+        req_w = max(self.min_width, frame.winfo_reqwidth())
+        req_h = frame.winfo_reqheight()
 
-        # Measure size while withdrawn
-        menu.update_idletasks()
-        req_w = max(self.min_width, menu.winfo_reqwidth())
-        req_h = menu.winfo_reqheight()
+        rel_x = x_root - top_win.winfo_rootx()
+        rel_y = y_root - top_win.winfo_rooty()
 
-        screen_w = root.winfo_screenwidth()
-        screen_h = root.winfo_screenheight()
+        # Clamp within window boundaries
+        if rel_x + req_w > win_w - 8:
+            rel_x = max(8, win_w - req_w - 8)
+        if rel_y + req_h > win_h - 8:
+            rel_y = max(8, rel_y - req_h)
 
-        pos_x = x_root
-        pos_y = y_root
-
-        # Flip horizontally if overflowing right edge
-        if pos_x + req_w > screen_w - 8:
-            pos_x = max(8, pos_x - req_w)
-
-        # Flip vertically if overflowing bottom edge
-        if pos_y + req_h > screen_h - 10:
-            pos_y = max(10, pos_y - req_h)
-
-        # Set geometry while withdrawn, then deiconify directly into target position
-        menu.geometry(f"{req_w}x{req_h}+{pos_x}+{pos_y}")
-        menu.deiconify()
-        menu.lift()
+        frame.place(x=rel_x, y=rel_y, width=req_w, height=req_h)
+        frame.lift()
         try:
-            menu.focus_set()
+            frame.focus_set()
         except Exception:
             pass
 
-        # Keyboard and click-outside dismissal
-        menu.bind("<Escape>", lambda e: self.dismiss())
-        menu.bind("<FocusOut>", lambda e: self._on_focus_out())
-
+        # Global click-outside dismissal
         try:
-            self._global_bind_id = root.bind_all("<Button-1>", self._on_global_click, add="+")
+            self._global_click_id = top_win.bind_all("<Button-1>", self._on_global_click, add="+")
         except Exception:
             pass
 
     def show_at_widget(self, widget: tk.Widget, direction: str = "below") -> None:
-        """Position menu relative to a button or trigger widget."""
+        """Position menu relative to a button or trigger widget in window coordinates."""
+        dismiss_active_context_menu()
+        global _ACTIVE_CONTEXT_MENU
+        _ACTIVE_CONTEXT_MENU = self
+
+        top_win = widget.winfo_toplevel()
         widget.update_idletasks()
-        rx = widget.winfo_rootx()
-        ry = widget.winfo_rooty()
+        top_win.update_idletasks()
+
+        win_w = top_win.winfo_width()
+        win_h = top_win.winfo_height()
+
+        card_bg = COLORS.get("card_bg", "#242830")
+        border_col = COLORS.get("border_subtle", "#2D3139")
+
+        frame = tk.Frame(
+            top_win,
+            bg=card_bg,
+            highlightthickness=1,
+            highlightbackground=border_col,
+            padx=4,
+            pady=4
+        )
+        self.menu_frame = frame
+
+        for entry in self.items:
+            if entry["type"] == "separator":
+                sep = tk.Frame(frame, bg=COLORS.get("separator", "#282C36"), height=1)
+                sep.pack(fill="x", padx=6, pady=4)
+                continue
+            self._create_menu_item_row(frame, entry)
+
+        frame.update_idletasks()
+        req_w = max(self.min_width, frame.winfo_reqwidth())
+        req_h = frame.winfo_reqheight()
+
+        rx = widget.winfo_rootx() - top_win.winfo_rootx()
+        ry = widget.winfo_rooty() - top_win.winfo_rooty()
         rw = widget.winfo_width()
         rh = widget.winfo_height()
 
-        root = widget.winfo_toplevel()
-        root.update_idletasks()
-        root_right = root.winfo_rootx() + root.winfo_width()
-
-        # If trigger widget is near right edge, align menu right edge to button right edge
-        target_x = rx
-        if rx + self.min_width > root_right - 16:
-            target_x = max(root.winfo_rootx() + 8, rx + rw - self.min_width)
+        # If trigger is near right edge of the window, align right edge of menu to button
+        if rx + req_w > win_w - 20:
+            target_x = max(8, rx + rw - req_w)
+        else:
+            target_x = rx
 
         if direction == "below":
-            self.post(target_x, ry + rh + 2)
+            target_y = ry + rh + 2
+            if target_y + req_h > win_h - 8:
+                target_y = max(8, ry - req_h - 2)
         else:
-            self.post(target_x, ry - 2)
+            target_y = max(8, ry - req_h - 2)
+
+        # Final bounds clamp
+        if target_x + req_w > win_w - 8:
+            target_x = max(8, win_w - req_w - 8)
+
+        frame.place(x=target_x, y=target_y, width=req_w, height=req_h)
+        frame.lift()
+        try:
+            frame.focus_set()
+        except Exception:
+            pass
+
+        try:
+            self._global_click_id = top_win.bind_all("<Button-1>", self._on_global_click, add="+")
+        except Exception:
+            pass
 
     def show_at(self, x_root: int, y_root: int) -> None:
         """Display context menu at screen root coordinates (convenience alias for post)."""
@@ -168,10 +211,10 @@ class NeoContextMenu:
         self.show_at_widget(widget, direction="below")
 
     def focus_set(self) -> None:
-        """Delegate focus_set to the underlying Toplevel window if active."""
-        if self.menu_win and self.menu_win.winfo_exists():
+        """Delegate focus_set to the underlying menu frame if active."""
+        if self.menu_frame and self.menu_frame.winfo_exists():
             try:
-                self.menu_win.focus_set()
+                self.menu_frame.focus_set()
             except Exception:
                 pass
 
@@ -251,7 +294,6 @@ class NeoContextMenu:
                 except Exception as ex:
                     print(f"Error executing menu action: {ex}")
 
-        # Hover states
         def on_enter(e=None):
             bg = err_red if is_danger else hover_bg
             fg = "#FFFFFF" if is_danger else COLORS.get("text_primary", "#FFFFFF")
@@ -272,30 +314,15 @@ class NeoContextMenu:
         for child in row.winfo_children():
             child.bind("<Button-1>", on_action)
 
-    def _on_focus_out(self) -> None:
-        if self.menu_win and self.menu_win.winfo_exists():
-            self.menu_win.after(120, self._check_focus_close)
-
-    def _check_focus_close(self) -> None:
-        if not self.menu_win or not self.menu_win.winfo_exists():
-            return
-        try:
-            focus = self.menu_win.focus_displayof()
-            if focus and str(focus).startswith(str(self.menu_win)):
-                return
-            self.dismiss()
-        except Exception:
-            self.dismiss()
-
     def _on_global_click(self, event) -> None:
-        if not self.menu_win or not self.menu_win.winfo_exists():
+        if not self.menu_frame or not self.menu_frame.winfo_exists():
             return
         try:
             x, y = event.x_root, event.y_root
-            mx = self.menu_win.winfo_rootx()
-            my = self.menu_win.winfo_rooty()
-            mw = self.menu_win.winfo_width()
-            mh = self.menu_win.winfo_height()
+            mx = self.menu_frame.winfo_rootx()
+            my = self.menu_frame.winfo_rooty()
+            mw = self.menu_frame.winfo_width()
+            mh = self.menu_frame.winfo_height()
             if not (mx <= x <= mx + mw and my <= y <= my + mh):
                 self.dismiss()
         except Exception:
@@ -307,18 +334,19 @@ class NeoContextMenu:
         if _ACTIVE_CONTEXT_MENU is self:
             _ACTIVE_CONTEXT_MENU = None
 
-        if self.menu_win:
+        if self.menu_frame:
             try:
-                if self.menu_win.winfo_exists():
-                    self.menu_win.destroy()
+                if self.menu_frame.winfo_exists():
+                    self.menu_frame.place_forget()
+                    self.menu_frame.destroy()
             except Exception:
                 pass
-            self.menu_win = None
+            self.menu_frame = None
 
 
 def attach_context_menu(
     widget: tk.Widget,
-    menu_builder: Callable[[], NeoContextMenu],
+    menu_builder: Any,
     include_children: bool = True
 ) -> None:
     """
@@ -327,10 +355,19 @@ def attach_context_menu(
     """
     def on_right_click(event):
         try:
-            menu = menu_builder()
-            if menu and menu.items:
+            if isinstance(menu_builder, NeoContextMenu):
+                menu = menu_builder
+            elif callable(menu_builder):
+                try:
+                    menu = menu_builder(event)
+                except TypeError:
+                    menu = menu_builder()
+            else:
+                menu = None
+
+            if isinstance(menu, NeoContextMenu) and menu.items:
                 menu.post(event.x_root, event.y_root)
-                return "break"
+            return "break"
         except Exception as e:
             print(f"Error showing context menu: {e}")
 
@@ -348,31 +385,47 @@ def attach_context_menu(
     _bind_tree(widget)
 
 
-def attach_entry_context_menu(widget: tk.Widget) -> None:
-    """Attach standard Cut, Copy, Paste, Select All context menu to an Entry or Text widget."""
-    def build_menu() -> NeoContextMenu:
-        menu = NeoContextMenu(widget, min_width=130)
+def attach_entry_context_menu(entry_widget: tk.Widget) -> None:
+    """
+    Attach standard text manipulation context menu (Cut, Copy, Paste, Select All)
+    to a tk.Entry, ttk.Entry, or tk.Text/ScrolledText widget.
+    """
+    def build_entry_menu():
+        menu = NeoContextMenu(entry_widget, min_width=130)
 
-        def do_cut():
-            widget.event_generate("<<Cut>>")
+        def cut_action():
+            try:
+                entry_widget.event_generate("<<Cut>>")
+            except Exception:
+                pass
 
-        def do_copy():
-            widget.event_generate("<<Copy>>")
+        def copy_action():
+            try:
+                entry_widget.event_generate("<<Copy>>")
+            except Exception:
+                pass
 
-        def do_paste():
-            widget.event_generate("<<Paste>>")
+        def paste_action():
+            try:
+                entry_widget.event_generate("<<Paste>>")
+            except Exception:
+                pass
 
-        def do_select_all():
-            if isinstance(widget, tk.Entry):
-                widget.selection_range(0, tk.END)
-            elif isinstance(widget, tk.Text):
-                widget.tag_add(tk.SEL, "1.0", tk.END)
+        def select_all_action():
+            try:
+                if isinstance(entry_widget, (tk.Text,)):
+                    entry_widget.tag_add("sel", "1.0", "end")
+                elif hasattr(entry_widget, "select_range"):
+                    entry_widget.select_range(0, "end")
+                    entry_widget.icursor("end")
+            except Exception:
+                pass
 
-        menu.add_item("Cut", do_cut, icon="✂", accelerator="Ctrl+X")
-        menu.add_item("Copy", do_copy, icon="⧉", accelerator="Ctrl+C")
-        menu.add_item("Paste", do_paste, icon="📋", accelerator="Ctrl+V")
+        menu.add_item("Cut", cut_action, icon="✂", accelerator="Ctrl+X")
+        menu.add_item("Copy", copy_action, icon="📋", accelerator="Ctrl+C")
+        menu.add_item("Paste", paste_action, icon="📥", accelerator="Ctrl+V")
         menu.add_separator()
-        menu.add_item("Select All", do_select_all, accelerator="Ctrl+A")
+        menu.add_item("Select All", select_all_action, accelerator="Ctrl+A")
         return menu
 
-    attach_context_menu(widget, build_menu, include_children=False)
+    attach_context_menu(entry_widget, build_entry_menu, include_children=False)
