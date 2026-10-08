@@ -2342,10 +2342,6 @@ class MinecraftLauncher(
         self.sidebar_items = []
         self.nav_buttons = {}
 
-        # Docked bottom container for Settings, Notifications, GitHub, and Downloads
-        self.sidebar_bottom_frame = tk.Frame(self.sidebar, bg=COLORS['sidebar_bg'])
-        self.sidebar_bottom_frame.pack(side="bottom", fill="x")
-
         self.sidebar_nav_frame = tk.Frame(self.sidebar, bg=COLORS['sidebar_bg'])
         self.sidebar_nav_frame.pack(fill="both", expand=True)
 
@@ -2532,6 +2528,10 @@ class MinecraftLauncher(
             icon="bell_side.png",
             highlight_on_click=False
         )
+        notif_frame._is_notif_toggle = True
+        for child in notif_frame.winfo_children():
+            child._is_notif_toggle = True
+
         self.sidebar_notif_badge = tk.Label(
             notif_frame,
             text="",
@@ -2543,6 +2543,7 @@ class MinecraftLauncher(
             cursor="hand2"
         )
         self.sidebar_notif_badge._keep_sidebar_bg = True
+        self.sidebar_notif_badge._is_notif_toggle = True
         self.sidebar_notif_badge.bind("<Button-1>", lambda e: self.toggle_notification_center())
 
         # GitHub Link - Packed to bottom next to be above Notifications
@@ -4151,8 +4152,7 @@ class MinecraftLauncher(
                     child.config(bg=target_bg)
 
     def _create_sidebar_link(self, text, url_or_command, indicator_text=None, indicator_color=None, is_action=False, pack_side="top", icon=None, highlight_on_click=True):
-        parent = getattr(self, 'sidebar_bottom_frame', self.sidebar)
-        frame = tk.Frame(parent, bg=COLORS['sidebar_bg'], cursor="hand2", padx=15, pady=8)
+        frame = tk.Frame(self.sidebar, bg=COLORS['sidebar_bg'], cursor="hand2", padx=15, pady=8)
         frame.pack(fill="x", side=cast(Any, pack_side))
         
         # Register for active state tracking

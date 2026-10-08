@@ -1567,18 +1567,10 @@ class ModsScreenMixin:
         dialog_text_sec = COLORS.get('text_secondary', '#A0AAB0')
         dialog_text_pri = COLORS['text_primary']
 
-        # In-window darkened overlay frame placed over self.root
-        overlay = tk.Frame(self.root, bg="#000000")
-        overlay.place(x=0, y=0, relwidth=1, relheight=1)
-        overlay.lift()
-
-        # Dimmed backdrop scrim
-        scrim = tk.Canvas(overlay, bg="#000000", highlightthickness=0)
-        scrim.place(x=0, y=0, relwidth=1, relheight=1)
-
-        # Centered Card Frame
-        card = tk.Frame(overlay, bg=dialog_bg, highlightbackground=COLORS.get('border_subtle', '#33373E'), highlightthickness=1)
+        # Centered Card Frame directly on self.root (no full-screen opaque blackout)
+        card = tk.Frame(self.root, bg=dialog_bg, highlightbackground=COLORS.get('accent_color', '#2ECC71'), highlightthickness=2)
         card.place(relx=0.5, rely=0.5, anchor="center", relwidth=0.88, relheight=0.88)
+        card.lift()
 
         # Top Bar with Title and Close (✕)
         top_bar = tk.Frame(card, bg=dialog_bg, padx=16, pady=10)
@@ -1588,9 +1580,13 @@ class ModsScreenMixin:
         title_lbl.pack(side="left")
 
         def close_lightbox():
-            if overlay.winfo_exists():
-                overlay.place_forget()
-                overlay.destroy()
+            try:
+                card.grab_release()
+            except Exception:
+                pass
+            if card.winfo_exists():
+                card.place_forget()
+                card.destroy()
 
         close_btn = tk.Label(top_bar, text="✕", font=(FONT_FAMILY, 11, "bold"), bg=dialog_bg, fg=dialog_text_sec, cursor="hand2", padx=8)
         close_btn.pack(side="right")
@@ -1636,7 +1632,7 @@ class ModsScreenMixin:
                             ch = max(300, content_box.winfo_height() - 40)
                             full.thumbnail((cw, ch), Image.Resampling.BILINEAR)
                         def set_full():
-                            if overlay.winfo_exists() and img_lbl.winfo_exists():
+                            if card.winfo_exists() and img_lbl.winfo_exists():
                                 photo = ImageTk.PhotoImage(full)
                                 img_lbl.config(image=photo, text="")
                                 img_lbl.image = photo  # type: ignore[attr-defined]
@@ -1659,11 +1655,28 @@ class ModsScreenMixin:
         self._make_btn(btn_box, "Next ▶", style="secondary", font_size=9, command=next_img).pack(side="left", padx=4)
         self._make_btn(btn_box, "Close", style="primary", font_size=9, command=close_lightbox).pack(side="left", padx=(8, 0))
 
-        scrim.bind("<Button-1>", lambda _e: close_lightbox())
-        overlay.bind("<Escape>", lambda _e: close_lightbox())
-        overlay.bind("<Left>", lambda _e: prev_img())
-        overlay.bind("<Right>", lambda _e: next_img())
-        overlay.focus_set()
+        def on_outside_click(event):
+            if not card.winfo_exists():
+                return
+            try:
+                cx = card.winfo_rootx()
+                cy = card.winfo_rooty()
+                cw = card.winfo_width()
+                ch = card.winfo_height()
+                if not (cx <= event.x_root <= cx + cw and cy <= event.y_root <= cy + ch):
+                    close_lightbox()
+            except Exception:
+                pass
+
+        card.bind_all("<Button-1>", on_outside_click, add="+")
+        card.bind("<Escape>", lambda _e: close_lightbox())
+        card.bind("<Left>", lambda _e: prev_img())
+        card.bind("<Right>", lambda _e: next_img())
+        try:
+            card.grab_set()
+        except Exception:
+            pass
+        card.focus_set()
 
         show_current()
 

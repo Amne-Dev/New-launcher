@@ -274,16 +274,68 @@ class NotificationCenterDrawer:
             anchor="ne"
         )
         self._drawer_frame.lift()
-        if self._backdrop:
-            self._backdrop.place(relx=0, rely=0, relwidth=1, relheight=1)
-            self._backdrop.lift()
-            self._drawer_frame.lift()
+        self._bind_outside_click()
 
     def _slide_out(self):
+        self._unbind_outside_click()
         if self._drawer_frame and self._drawer_frame.winfo_exists():
             self._drawer_frame.place_forget()
         if self._backdrop and self._backdrop.winfo_exists():
             self._backdrop.place_forget()
+
+    def _bind_outside_click(self):
+        self._unbind_outside_click()
+        try:
+            self._click_bind_id = self.parent.bind("<Button-1>", self._on_parent_click, add="+")
+        except Exception:
+            self._click_bind_id = None
+        try:
+            self._esc_bind_id = self.parent.bind("<Escape>", self._on_escape, add="+")
+        except Exception:
+            self._esc_bind_id = None
+
+    def _unbind_outside_click(self):
+        if getattr(self, "_click_bind_id", None):
+            try:
+                self.parent.unbind("<Button-1>", self._click_bind_id)
+            except Exception:
+                pass
+            self._click_bind_id = None
+        if getattr(self, "_esc_bind_id", None):
+            try:
+                self.parent.unbind("<Escape>", self._esc_bind_id)
+            except Exception:
+                pass
+            self._esc_bind_id = None
+
+    def _on_escape(self, event=None):
+        if self.is_open:
+            self.close()
+
+    def _on_parent_click(self, event):
+        if not self.is_open or not self._drawer_frame or not self._drawer_frame.winfo_exists():
+            return
+        widget = getattr(event, "widget", None)
+        try:
+            w = widget
+            while w is not None:
+                if w == self._drawer_frame or getattr(w, "_is_notif_toggle", False):
+                    return
+                w = getattr(w, "master", None)
+        except Exception:
+            pass
+
+        try:
+            dx = self._drawer_frame.winfo_rootx()
+            dy = self._drawer_frame.winfo_rooty()
+            dw = self._drawer_frame.winfo_width()
+            dh = self._drawer_frame.winfo_height()
+            if dx <= event.x_root <= dx + dw and dy <= event.y_root <= dy + dh:
+                return
+        except Exception:
+            pass
+
+        self.close()
 
     def _ensure_ui(self):
         if self._drawer_frame and self._drawer_frame.winfo_exists():
@@ -293,11 +345,7 @@ class NotificationCenterDrawer:
         border_col = COLORS.get('card_border', '#2F3542')
         accent = COLORS.get('accent_color', '#2ECC71')
 
-        # Semi-transparent backdrop overlay to dismiss on click
-        self._backdrop = tk.Frame(self.parent, bg="#000000")
-        self._backdrop.bind("<Button-1>", lambda e: self.close())
-
-        # Main slide-over drawer
+        # Main slide-over drawer (no full-screen opaque blackout)
         self._drawer_frame = tk.Frame(
             self.parent,
             bg=card_bg,

@@ -88,37 +88,32 @@ class InAppModalManager:
         """
         # If another modal is active, push it onto stack
         if self._active_modal is not None:
-            prev_overlay = self._active_modal.get("overlay_frame")
-            if prev_overlay and prev_overlay.winfo_exists():
-                prev_overlay.place_forget()
+            prev_card = self._active_modal.get("card_frame")
+            if prev_card and prev_card.winfo_exists():
+                try:
+                    prev_card.grab_release()
+                except Exception:
+                    pass
+                prev_card.place_forget()
             self._modal_stack.append(self._active_modal)
 
-        # Full-window overlay scrim frame
-        overlay = tk.Frame(self.root, bg="#000000")
-        overlay.place(x=0, y=0, relwidth=1, relheight=1)
-        overlay.lift()
-
-        # Dimmed backdrop scrim (catches clicks outside)
-        scrim = tk.Canvas(overlay, bg="#000000", highlightthickness=0)
-        scrim.place(x=0, y=0, relwidth=1, relheight=1)
-
-        # Centered Modal Card
+        # Centered Modal Card (no full-screen opaque blackout)
         card_bg = COLORS.get("card_bg", "#222630")
         border_col = header_accent or COLORS.get("accent_color", "#2ECC71")
         header_bg = COLORS.get("sidebar_bg", "#181A20")
         text_primary = COLORS.get("text_primary", "#FFFFFF")
 
         card = tk.Frame(
-            overlay,
+            self.root,
             bg=card_bg,
             highlightbackground=border_col,
-            highlightthickness=1,
+            highlightthickness=2,
             padx=0,
             pady=0
         )
 
         modal_state: Dict[str, Any] = {
-            "overlay_frame": overlay,
+            "overlay_frame": card,
             "card_frame": card,
             "on_close": on_close,
             "dismissable": dismissable,
@@ -132,6 +127,23 @@ class InAppModalManager:
                 return
             modal_state["closed"] = True
             modal_state["result"] = result
+
+            try:
+                card.grab_release()
+            except Exception:
+                pass
+
+            if modal_state.get("outside_bind"):
+                try:
+                    self.root.unbind("<Button-1>", modal_state["outside_bind"])
+                except Exception:
+                    pass
+
+            if modal_state.get("configure_bind"):
+                try:
+                    self.root.unbind("<Configure>", modal_state["configure_bind"])
+                except Exception:
+                    pass
 
             try:
                 self.root.unbind_all("<Escape>", modal_state.get("esc_bind"))
@@ -148,19 +160,28 @@ class InAppModalManager:
                     logger.warning("Error in modal on_close callback: %s", ex)
 
             try:
-                if overlay.winfo_exists():
-                    overlay.place_forget()
-                    overlay.destroy()
+                if card.winfo_exists():
+                    card.place_forget()
+                    card.destroy()
             except Exception:
                 pass
 
             # Restore previous modal if one was stacked
             if self._modal_stack:
                 self._active_modal = self._modal_stack.pop()
-                prev_overlay = self._active_modal.get("overlay_frame")
-                if prev_overlay and prev_overlay.winfo_exists():
-                    prev_overlay.place(x=0, y=0, relwidth=1, relheight=1)
-                    prev_overlay.lift()
+                prev_card = self._active_modal.get("card_frame")
+                if prev_card and prev_card.winfo_exists():
+                    prev_card.place(
+                        x=self._active_modal.get("cx", 50),
+                        y=self._active_modal.get("cy", 50),
+                        width=self._active_modal.get("cw", width),
+                        height=self._active_modal.get("ch", height)
+                    )
+                    prev_card.lift()
+                    try:
+                        prev_card.grab_set()
+                    except Exception:
+                        pass
             else:
                 self._active_modal = None
 
@@ -203,8 +224,21 @@ class InAppModalManager:
             close_btn.bind("<Leave>", on_x_leave)
             close_btn.bind("<Button-1>", lambda _e: close_action(None))
 
-            # Click on scrim backdrop dismisses
-            scrim.bind("<Button-1>", lambda _e: close_action(None))
+            def on_outside_click(event):
+                if not card.winfo_exists():
+                    return
+                try:
+                    cx = card.winfo_rootx()
+                    cy = card.winfo_rooty()
+                    cw = card.winfo_width()
+                    ch = card.winfo_height()
+                    if not (cx <= event.x_root <= cx + cw and cy <= event.y_root <= cy + ch):
+                        close_action(None)
+                except Exception:
+                    pass
+
+            click_id = self.root.bind("<Button-1>", on_outside_click, add="+")
+            modal_state["outside_bind"] = click_id
 
             try:
                 esc_id = self.root.bind_all("<Escape>", lambda _e: self.handle_escape(_e), add="+")
@@ -225,7 +259,7 @@ class InAppModalManager:
 
         # Center placement with resize repositioning
         def reposition(event=None):
-            if not overlay.winfo_exists() or not card.winfo_exists():
+            if not card.winfo_exists():
                 return
             rw = max(300, self.root.winfo_width())
             rh = max(200, self.root.winfo_height())
@@ -233,11 +267,22 @@ class InAppModalManager:
             ch = min(height, rh - 40)
             cx = (rw - cw) // 2
             cy = (rh - ch) // 2
+            modal_state["cx"] = cx
+            modal_state["cy"] = cy
+            modal_state["cw"] = cw
+            modal_state["ch"] = ch
             card.place(x=cx, y=cy, width=cw, height=ch)
+            card.lift()
 
-        overlay.bind("<Configure>", reposition)
+        cfg_id = self.root.bind("<Configure>", reposition, add="+")
+        modal_state["configure_bind"] = cfg_id
         self.root.update_idletasks()
         reposition()
+
+        try:
+            card.grab_set()
+        except Exception:
+            pass
 
         try:
             card.focus_set()

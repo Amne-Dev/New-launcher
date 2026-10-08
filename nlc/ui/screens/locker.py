@@ -2012,16 +2012,16 @@ class LockerScreenMixin:
         if not path or not os.path.exists(path):
             return
 
-        overlay = tk.Frame(self.root, bg="#000000")
-        overlay.place(x=0, y=0, relwidth=1, relheight=1)
-        overlay.lift()
+        card = tk.Frame(self.root, bg="#12141A", highlightbackground=COLORS.get('accent_color', '#2ECC71'), highlightthickness=2)
+        card.place(relx=0.5, rely=0.5, anchor="center", relwidth=0.90, relheight=0.90)
+        card.lift()
 
         # Canvas with backdrop click to dismiss
-        c = tk.Canvas(overlay, bg="#000000", highlightthickness=0)
+        c = tk.Canvas(card, bg="#12141A", highlightthickness=0)
         c.pack(fill="both", expand=True)
 
         close_lbl = tk.Label(
-            overlay,
+            card,
             text="✕ Close",
             font=(FONT_FAMILY, 11, "bold"),
             bg="#222630",
@@ -2034,7 +2034,11 @@ class LockerScreenMixin:
 
         def close_preview():
             try:
-                overlay.destroy()
+                card.grab_release()
+            except Exception:
+                pass
+            try:
+                card.destroy()
             except Exception:
                 pass
 
@@ -2042,18 +2046,36 @@ class LockerScreenMixin:
         c.bind("<Button-1>", lambda _e: close_preview())
 
         try:
-            rw = max(600, self.root.winfo_width())
-            rh = max(400, self.root.winfo_height())
+            rw = max(600, int(self.root.winfo_width() * 0.90))
+            rh = max(400, int(self.root.winfo_height() * 0.90))
             im = Image.open(path)
             im.thumbnail((rw - 60, rh - 60))
             tk_photo = ImageTk.PhotoImage(im)
             c.create_image(rw // 2, rh // 2, image=tk_photo, anchor="center")
-            overlay._photo = tk_photo  # type: ignore
+            card._photo = tk_photo  # type: ignore
         except Exception as e:
             logger.debug("Lightbox preview error: %s", e)
 
-        overlay.bind("<Escape>", lambda _e: close_preview())
-        overlay.focus_set()
+        def on_outside_click(event):
+            if not card.winfo_exists():
+                return
+            try:
+                cx = card.winfo_rootx()
+                cy = card.winfo_rooty()
+                cw = card.winfo_width()
+                ch = card.winfo_height()
+                if not (cx <= event.x_root <= cx + cw and cy <= event.y_root <= cy + ch):
+                    close_preview()
+            except Exception:
+                pass
+
+        card.bind_all("<Button-1>", on_outside_click, add="+")
+        card.bind("<Escape>", lambda _e: close_preview())
+        try:
+            card.grab_set()
+        except Exception:
+            pass
+        card.focus_set()
 
     # -------------------------------------------------------------------------
     # LEGACY / APP CONTRACT METHODS
