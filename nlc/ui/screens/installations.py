@@ -22,9 +22,10 @@ try:
 except AttributeError:
     RESAMPLE_NEAREST = Image.NEAREST
 
-from nlc.storage.paths import resource_path
+from nlc.storage.paths import resource_path, open_path_in_system
 from nlc.ui.theme import COLORS, FONT_FAMILY
 from nlc.ui.components.dialogs import custom_showinfo, custom_showerror, custom_askyesno
+from nlc.ui.components.context_menu import NeoContextMenu, attach_context_menu
 
 logger = logging.getLogger(__name__)
 
@@ -391,11 +392,24 @@ class InstallationsScreenMixin:
         menu_btn.config(command=lambda b=menu_btn, i=idx: self.open_installation_menu(i, b))
         menu_btn.pack(side="left", padx=5)
 
+        # Attach right-click context menu to the whole item card and its elements
+        attach_context_menu(item, lambda i=idx, b=item: self.build_installation_context_menu(i, b), include_children=True)
+
     def open_installation_folder(self, idx):
-        try:
-            os.startfile(self.minecraft_dir)
-        except Exception:
-            pass
+        open_path_in_system(self.minecraft_dir)
+
+    def duplicate_installation(self, idx):
+        if idx < 0 or idx >= len(self.installations):
+            return
+        orig = self.installations[idx]
+        copy_inst = dict(orig)
+        copy_inst["id"] = str(uuid.uuid4())
+        copy_inst["name"] = f"{orig.get('name', 'Installation')} (Copy)"
+        copy_inst["created"] = datetime.now().strftime("%Y-%m-%d")
+        self.installations.insert(idx + 1, copy_inst)
+        self.save_config()
+        self.refresh_installations_list()
+        self.update_installation_dropdown()
 
     def update_installation_dropdown(self):
         # Update dropdown - now custom button
@@ -1377,93 +1391,51 @@ class InstallationsScreenMixin:
         """Backward-compatible alias delegating to in-page installation editor."""
         return self.show_installation_editor(edit_mode=edit_mode, index=index)
 
+    def delete_installation(self, idx: int):
+        if idx < 0 or idx >= len(self.installations):
+            return
+        if custom_askyesno("Delete Installation", "Are you sure you want to delete this installation?", parent=self.root):
+            deleted_inst = self.installations.pop(idx)
+            deleted_id = deleted_inst.get("id")
+
+            # Update current index if necessary
+            if self.current_installation_index >= len(self.installations):
+                self.current_installation_index = max(0, len(self.installations) - 1)
+
+            # Check if any modpack was linked to this installation
+            for pack in self.modpacks:
+                if pack.get("linked_installation_id") == deleted_id:
+                    pack["linked_installation_id"] = None
+
+            self.save_modpacks()
+            self.save_config()
+            self.refresh_installations_list()
+            self.update_installation_dropdown()
+            self.refresh_modpacks_list()
+
+    def build_installation_context_menu(self, idx: int, anchor_widget: Optional[tk.Widget] = None) -> NeoContextMenu:
+        parent_w = anchor_widget or getattr(self, "root", None)
+        menu = NeoContextMenu(parent_w, min_width=175)
+        menu.add_item("Play", lambda: self.launch_installation(idx), icon="▶")
+        menu.add_item("Edit Installation", lambda: self.edit_installation(idx), icon="✏")
+        menu.add_item("Open Game Folder", lambda: self.open_installation_folder(idx), icon="📁")
+        menu.add_item("Duplicate", lambda: self.duplicate_installation(idx), icon="⧉")
+        menu.add_separator()
+        menu.add_item("Delete Installation", lambda: self.delete_installation(idx), icon="🗑", is_danger=True)
+        return menu
+
     def open_installation_menu(self, idx, btn_widget):
-        # Toggle: close if already open
         if hasattr(self, 'installation_menu') and self.installation_menu:
             try:
                 if self.installation_menu.winfo_exists():
                     self.installation_menu.destroy()
-            except:
+            except Exception:
                 pass
             self.installation_menu = None
-            return
-        
-        # Create a popup menu (Edit, Delete)
-        menu = tk.Toplevel(self.root)
-        menu.wm_overrideredirect(True)
-        menu.config(bg=COLORS['card_bg'])
-        menu.transient(self.root)
-        menu.attributes('-topmost', True)
-        
-        self.installation_menu = menu
-        
-        # Position with screen bounds check
-        try:
-             x = btn_widget.winfo_rootx()
-             y = btn_widget.winfo_rooty() + btn_widget.winfo_height()
-             screen_h = self.root.winfo_screenheight()
-             # Check if menu would go off bottom of screen
-             if y + 80 > screen_h:
-                 y = btn_widget.winfo_rooty() - 80
-             menu.geometry(f"120x80+{x-80}+{y}")
-             menu.update_idletasks()
-             menu.deiconify()
-             menu.lift()
-             self._animate_menu_open(menu, 80, direction="down")
-        except:
-             menu.geometry("120x80")
-             menu.deiconify()
-             menu.lift()
-             self._animate_menu_open(menu, 80, direction="down")
-        
-        def close_menu():
-            if menu.winfo_exists():
-                menu.destroy()
-             
 
-        # Edit
-        def do_edit():
-            close_menu()
-            self.edit_installation(idx)
-            
-        hover_bg = COLORS.get('hover_bg', '#3A3F4D')
-        edit_btn = tk.Label(menu, text="Edit", font=("Segoe UI", 10), bg=COLORS['card_bg'], fg=COLORS['text_primary'], anchor="w", padx=10, pady=5)
-        edit_btn.pack(fill="x")
-        edit_btn.bind("<Button-1>", lambda e: do_edit())
-        edit_btn.bind("<Enter>", lambda e: edit_btn.config(bg=hover_bg))
-        edit_btn.bind("<Leave>", lambda e: edit_btn.config(bg=COLORS['card_bg']))
-
-        # Delete
-        def do_delete():
-            close_menu()
-            if custom_askyesno("Delete", "Are you sure you want to delete this installation?", parent=self.root):
-                deleted_inst = self.installations.pop(idx)
-                deleted_id = deleted_inst.get("id")
-                
-                # Update current index if necessary
-                if self.current_installation_index >= len(self.installations):
-                    self.current_installation_index = max(0, len(self.installations) - 1)
-                    
-                # Check if any modpack was linked to this installation
-                for pack in self.modpacks:
-                    if pack.get("linked_installation_id") == deleted_id:
-                        pack["linked_installation_id"] = None
-                
-                self.save_modpacks()
-                self.save_config()
-                self.refresh_installations_list()
-                self.update_installation_dropdown()
-                self.refresh_modpacks_list()  # Refresh to show updated link status
-            
-        del_btn = tk.Label(menu, text="Delete", font=("Segoe UI", 10), bg=COLORS['card_bg'], fg=COLORS['error_red'], anchor="w", padx=10, pady=5)
-        del_btn.pack(fill="x")
-        del_btn.bind("<Button-1>", lambda e: do_delete())
-        del_btn.bind("<Enter>", lambda e: del_btn.config(bg=hover_bg))
-        del_btn.bind("<Leave>", lambda e: del_btn.config(bg=COLORS['card_bg']))
-
-        # Close on click outside or Escape
-        menu.bind("<FocusOut>", lambda e: self.root.after(100, close_menu))
-        menu.bind("<Escape>", lambda e: close_menu())
+        menu = self.build_installation_context_menu(idx, btn_widget)
+        menu.show_at_widget(btn_widget, direction="below")
+        self.installation_menu = menu.menu_win
         menu.focus_set()
 
     def edit_installation(self, idx):
