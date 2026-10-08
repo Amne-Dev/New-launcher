@@ -212,52 +212,12 @@ class PlayScreenMixin:
         
         # Close any other open menus first
         self._close_all_menus()
-        
-        # Popup near the arrow button
-        menu = tk.Toplevel(self.root)
-        menu.overrideredirect(True)
-        menu.config(bg=COLORS['card_bg'])
-        menu.transient(self.root)
-        menu.attributes('-topmost', True)
-        self._launch_opts_menu = menu
-        
-        target_h = 40
-        try:
-             x = self.launch_opts_btn.winfo_rootx() + self.launch_opts_btn.winfo_width() - 150
-             y = self.launch_opts_btn.winfo_rooty() + self.launch_opts_btn.winfo_height() + 5
-             menu.geometry(f"150x{target_h}+{x}+{y}") 
-        except:
-             menu.geometry(f"150x{target_h}")
-        
-        def close_menu():
-            try:
-                if menu.winfo_exists():
-                    menu.destroy()
-            except:
-                pass
-            self._launch_opts_menu = None
-             
-        def do_force():
-            close_menu()
-            self.start_launch(force_update=True)
-            
-        btn = tk.Label(menu, text="Force Update & Play", font=("Segoe UI", 10), 
-                      bg=COLORS['card_bg'], fg=COLORS['text_primary'], anchor="w", padx=10, pady=8)
-        btn.pack(fill="x")
-        btn.bind("<Button-1>", lambda e: do_force())
-        btn.bind("<Enter>", lambda e: btn.config(bg=COLORS.get('hover_bg', '#3A3F4D')))
-        btn.bind("<Leave>", lambda e: btn.config(bg=COLORS['card_bg']))
 
-        # Close on click outside or Escape
-        menu.bind("<FocusOut>", lambda e: self.root.after(100, close_menu))
-        menu.bind("<Escape>", lambda e: close_menu())
-        
-        # Ensure visibility with slide animation
-        menu.update_idletasks()
-        menu.deiconify()
-        menu.lift()
-        menu.focus_set()
-        self._animate_menu_open(menu, target_h, direction="down")
+        from nlc.ui.components.context_menu import NeoContextMenu
+        menu = NeoContextMenu(self.root, min_width=180)
+        menu.add_item("⚡ Force Update & Play", lambda: self.start_launch(force_update=True))
+        menu.show_at_widget(self.launch_opts_btn, direction="below")
+        self._launch_opts_menu = menu
 
     def update_bottom_gamertag(self):
         # Update the small gamertag in the bottom right corner
