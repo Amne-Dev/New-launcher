@@ -121,8 +121,11 @@ def create_setting_row(
     row = tk.Frame(parent, bg=bg, pady=pady, padx=padx)
     row.pack(fill="x", expand=True)
 
+    ctrl_frame = tk.Frame(row, bg=bg)
+    ctrl_frame.pack(side="right", anchor="center", padx=(10, 0))
+
     text_frame = tk.Frame(row, bg=bg)
-    text_frame.pack(side="left", fill="x", expand=True, padx=(0, 15))
+    text_frame.pack(side="left", fill="x", expand=True, padx=(0, 10))
 
     lbl_title = tk.Label(
         text_frame,
@@ -147,11 +150,16 @@ def create_setting_row(
         )
         lbl_desc.pack(anchor="w", pady=(2, 0))
 
-    ctrl_frame = tk.Frame(row, bg=bg)
-    ctrl_frame.pack(side="right", anchor="center")
-
     if control_widget:
         control_widget.pack(in_=ctrl_frame, side="right")
+        try:
+            control_widget.config(bg=bg)
+        except Exception:
+            pass
+        try:
+            tk.Misc.tkraise(control_widget)
+        except Exception:
+            pass
 
     return row, ctrl_frame
 

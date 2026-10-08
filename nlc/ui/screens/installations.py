@@ -191,7 +191,13 @@ class InstallationsScreenMixin:
 
         # Update in-place editor components if open
         if getattr(self, '_in_inst_editor', False):
-            card_bg = COLORS.get('card_bg', '#2A2D32')
+            card_bg = COLORS.get('card_bg', '#242830')
+            input_bg = COLORS.get('input_bg', '#2E333E')
+            input_border = COLORS.get('border_subtle', '#2B303A')
+            border_col = COLORS.get('border_subtle', '#2B303A')
+            text_primary = COLORS.get('text_primary', 'white')
+            text_secondary = COLORS.get('text_secondary', '#A0AAB0')
+
             if hasattr(self, 'inst_editor_view') and self.inst_editor_view.winfo_exists():
                 self.inst_editor_view.config(bg=main_bg)
             if hasattr(self, 'inst_editor_header') and self.inst_editor_header.winfo_exists():
@@ -203,9 +209,47 @@ class InstallationsScreenMixin:
             if hasattr(self, 'inst_editor_form_frame') and self.inst_editor_form_frame.winfo_exists():
                 self.inst_editor_form_frame.config(bg=main_bg)
             if hasattr(self, 'inst_editor_card') and self.inst_editor_card.winfo_exists():
-                self.inst_editor_card.config(bg=card_bg)
+                self.inst_editor_card.config(bg=card_bg, highlightbackground=border_col)
+            if hasattr(self, 'inst_editor_icon_frame') and self.inst_editor_icon_frame.winfo_exists():
+                self.inst_editor_icon_frame.config(bg=card_bg)
+            if hasattr(self, 'inst_editor_icon_btn') and self.inst_editor_icon_btn.winfo_exists():
+                self.inst_editor_icon_btn.config(bg=input_bg)
+            if hasattr(self, 'inst_editor_change_lbl') and self.inst_editor_change_lbl.winfo_exists():
+                self.inst_editor_change_lbl.config(bg=card_bg, fg=text_secondary)
+            if hasattr(self, 'inst_editor_fields_frame') and self.inst_editor_fields_frame.winfo_exists():
+                self.inst_editor_fields_frame.config(bg=card_bg)
+            if hasattr(self, 'inst_editor_labels'):
+                for lbl in self.inst_editor_labels:
+                    if lbl and lbl.winfo_exists():
+                        lbl.config(bg=card_bg, fg=text_secondary)
+            if hasattr(self, 'inst_editor_entries'):
+                for ent in self.inst_editor_entries:
+                    if ent and ent.winfo_exists():
+                        ent.config(bg=input_bg, fg=text_primary, insertbackground=text_primary, highlightbackground=input_border)
+            if hasattr(self, 'disclaimer_lbl') and self.disclaimer_lbl.winfo_exists():
+                self.disclaimer_lbl.config(bg=card_bg)
+            if hasattr(self, 'modal_status_lbl') and self.modal_status_lbl.winfo_exists():
+                self.modal_status_lbl.config(bg=card_bg, fg=text_secondary)
+            if hasattr(self, 'inst_editor_filter_frame') and self.inst_editor_filter_frame.winfo_exists():
+                self.inst_editor_filter_frame.config(bg=card_bg)
+            if hasattr(self, 'inst_editor_snap_chk') and self.inst_editor_snap_chk.winfo_exists():
+                self.inst_editor_snap_chk.config(bg=card_bg, fg=text_primary, selectcolor=input_bg, activebackground=card_bg, activeforeground=text_primary)
+            if hasattr(self, 'inst_editor_more_opts_frame') and self.inst_editor_more_opts_frame.winfo_exists():
+                self.inst_editor_more_opts_frame.config(bg=card_bg)
+            if hasattr(self, 'inst_editor_opts_btn') and self.inst_editor_opts_btn.winfo_exists():
+                self.inst_editor_opts_btn.config(bg=card_bg, fg=text_primary)
+            if hasattr(self, 'inst_editor_opts_container') and self.inst_editor_opts_container.winfo_exists():
+                self.inst_editor_opts_container.config(bg=card_bg)
+            if hasattr(self, 'inst_editor_java_row') and self.inst_editor_java_row.winfo_exists():
+                self.inst_editor_java_row.config(bg=card_bg)
+            if hasattr(self, 'inst_editor_java_hint') and self.inst_editor_java_hint.winfo_exists():
+                self.inst_editor_java_hint.config(bg=card_bg, fg=text_secondary)
+            if hasattr(self, 'inst_editor_res_frame') and self.inst_editor_res_frame.winfo_exists():
+                self.inst_editor_res_frame.config(bg=card_bg)
+            if hasattr(self, 'inst_editor_res_x_lbl') and self.inst_editor_res_x_lbl.winfo_exists():
+                self.inst_editor_res_x_lbl.config(bg=card_bg, fg=text_primary)
             if hasattr(self, 'inst_editor_btn_row') and self.inst_editor_btn_row.winfo_exists():
-                self.inst_editor_btn_row.config(bg=main_bg)
+                self.inst_editor_btn_row.config(bg=card_bg)
 
     def refresh_installations_list(self, callback=None):
         if not hasattr(self, 'inst_list_frame'): return # Safety check
@@ -752,8 +796,9 @@ class InstallationsScreenMixin:
         content.pack(fill="both", expand=True)
 
         # Icon Selector
-        icon_frame = tk.Frame(content, bg="#1e1e1e")
+        icon_frame = tk.Frame(content, bg=card_bg)
         icon_frame.grid(row=0, column=0, rowspan=2, sticky="n", padx=(0, 20))
+        self.inst_editor_icon_frame = icon_frame
         
         # Default to crafting table if no icon or strictly emoji (legacy)
         initial_icon = existing_data.get("icon", "icons/crafting_table_front.png")
@@ -763,8 +808,9 @@ class InstallationsScreenMixin:
         current_icon_var = tk.StringVar(value=initial_icon)
         
         # Main Icon Display (Image based)
-        icon_btn = tk.Label(icon_frame, bg="#3A3B3C", cursor="hand2")
+        icon_btn = tk.Label(icon_frame, bg=COLORS.get('input_bg', '#2E333E'), cursor="hand2")
         icon_btn.pack()
+        self.inst_editor_icon_btn = icon_btn
         
         def update_main_icon(val):
             # Attempt to load
@@ -780,8 +826,10 @@ class InstallationsScreenMixin:
         update_main_icon(initial_icon)
 
         # Hint label
-        tk.Label(icon_frame, text="Change", font=("Segoe UI", 8, "underline"), 
-                bg="#1e1e1e", fg="#5A5B5C").pack(pady=(5,0))
+        change_lbl = tk.Label(icon_frame, text="Change", font=("Segoe UI", 8, "underline"), 
+                              bg=card_bg, fg=COLORS.get('text_secondary', '#A0AAB0'), cursor="hand2")
+        change_lbl.pack(pady=(5,0))
+        self.inst_editor_change_lbl = change_lbl
                 
         # Icon Selector Modal
         def open_icon_selector(e):
@@ -917,23 +965,29 @@ class InstallationsScreenMixin:
 
 
         # Fields Container
-        fields_frame = tk.Frame(content, bg="#1e1e1e")
+        fields_frame = tk.Frame(content, bg=card_bg)
         fields_frame.grid(row=0, column=1, sticky="nsew")
         content.columnconfigure(1, weight=1) # Fields take remaining width
+        self.inst_editor_fields_frame = fields_frame
+        self.inst_editor_labels = []
 
         # Label Helper
         def create_label(text):
-            return tk.Label(fields_frame, text=text, font=("Segoe UI", 9, "bold"), 
-                           bg="#1e1e1e", fg="#B0B0B0", anchor="w")
+            lbl = tk.Label(fields_frame, text=text, font=("Segoe UI", 9, "bold"), 
+                           bg=card_bg, fg=COLORS.get('text_secondary', '#A0AAB0'), anchor="w")
+            self.inst_editor_labels.append(lbl)
+            return lbl
 
         # Input Style Helper
-        input_bg_color = "#48494A" # Softer Gray
-        input_fg_color = "white"
+        input_bg_color = COLORS.get('input_bg', '#2E333E')
+        input_border_color = COLORS.get('border_subtle', '#33373E')
+        input_fg_color = COLORS.get('text_primary', 'white')
 
         # 1. NAME
         create_label("NAME").pack(fill="x", pady=(0,5))
         name_entry = tk.Entry(fields_frame, bg=input_bg_color, fg=input_fg_color, 
-                             insertbackground="white", relief="flat", font=("Segoe UI", 10))
+                             insertbackground=input_fg_color, relief="flat", font=("Segoe UI", 10),
+                             highlightthickness=1, highlightbackground=input_border_color)
         name_entry.pack(fill="x", ipady=8, pady=(0, 15))
 
         if edit_mode: name_entry.insert(0, existing_data.get("name", ""))
@@ -945,24 +999,24 @@ class InstallationsScreenMixin:
         loader_var = tk.StringVar()
         loader_combo = ttk.Combobox(fields_frame, textvariable=loader_var, 
                                    values=["Vanilla", "Fabric", "Forge", "Other versions (ie: BatMod, Laby Mod)"], 
-                                   state="readonly", font=("Segoe UI", 10), width=40)
+                                   state="readonly", style="Launcher.TCombobox", font=("Segoe UI", 10), width=40)
         loader_combo.pack(fill="x", ipady=5, pady=(0, 5))
         
         # Disclaimer
         self.disclaimer_lbl = tk.Label(fields_frame, text="⚠️ These versions need to be downloaded externally", 
-                                      bg="#1e1e1e", fg="#F1C40F", font=("Segoe UI", 8), anchor="w")
+                                      bg=card_bg, fg="#F1C40F", font=("Segoe UI", 8), anchor="w")
 
         # 3. VERSION
         create_label("VERSION").pack(fill="x", pady=(10,5))
         
         self.modal_version_var = tk.StringVar()
         self.modal_ver_combo = ttk.Combobox(fields_frame, textvariable=self.modal_version_var, 
-                                           state="disabled", font=("Segoe UI", 10), width=40)
+                                           state="disabled", style="Launcher.TCombobox", font=("Segoe UI", 10), width=40)
         self.modal_ver_combo.pack(fill="x", ipady=5, pady=(0, 5))
 
         # Status / Helper below version
         self.modal_status_lbl = tk.Label(fields_frame, text="Select a loader to fetch versions", 
-                                        bg="#1e1e1e", fg="#5A5B5C", font=("Segoe UI", 8), anchor="w")
+                                        bg=card_bg, fg=COLORS.get('text_secondary', '#A0AAB0'), font=("Segoe UI", 8), anchor="w")
         self.modal_status_lbl.pack(fill="x", pady=(0, 10))
 
         # Start logic if edit mode
@@ -971,21 +1025,26 @@ class InstallationsScreenMixin:
              self.modal_version_var.set(existing_data.get("version", ""))
 
         # --- Filters (Snapshots) ---
-        filter_frame = tk.Frame(fields_frame, bg="#1e1e1e")
+        filter_frame = tk.Frame(fields_frame, bg=card_bg)
         filter_frame.pack(fill="x", pady=(0, 15))
+        self.inst_editor_filter_frame = filter_frame
         self.modal_show_snapshots = tk.BooleanVar(value=False)
         snap_chk = tk.Checkbutton(filter_frame, text="Show Snapshots", variable=self.modal_show_snapshots,
-                      bg="#1e1e1e", fg="white", selectcolor="#1e1e1e", activebackground="#1e1e1e",
+                      bg=card_bg, fg=input_fg_color, selectcolor=input_bg_color, activebackground=card_bg,
+                      activeforeground=input_fg_color,
                       command=lambda: self.update_modal_versions_list())
         snap_chk.pack(side="left")
+        self.inst_editor_snap_chk = snap_chk
 
 
         # --- More Options (Collapsible) ---
-        more_opts_frame = tk.Frame(fields_frame, bg="#1e1e1e")
+        more_opts_frame = tk.Frame(fields_frame, bg=card_bg)
         more_opts_frame.pack(fill="x", pady=(5, 0))
+        self.inst_editor_more_opts_frame = more_opts_frame
         
         opts_exposed = tk.BooleanVar(value=False)
-        opts_container = tk.Frame(fields_frame, bg="#1e1e1e")
+        opts_container = tk.Frame(fields_frame, bg=card_bg)
+        self.inst_editor_opts_container = opts_container
         
         def toggle_opts():
              if opts_exposed.get():
@@ -998,15 +1057,18 @@ class InstallationsScreenMixin:
                   opts_btn.config(text="▾ MORE OPTIONS")
 
         opts_btn = tk.Label(more_opts_frame, text="▸ MORE OPTIONS", font=("Segoe UI", 9, "bold"),
-                           bg="#1e1e1e", fg="white", cursor="hand2")
+                           bg=card_bg, fg=input_fg_color, cursor="hand2")
         opts_btn.pack(side="left")
         opts_btn.bind("<Button-1>", lambda e: toggle_opts())
+        self.inst_editor_opts_btn = opts_btn
 
         # Java Executable
         create_label("JAVA EXECUTABLE").pack(in_=opts_container, fill="x", pady=(5,5))
-        java_row = tk.Frame(opts_container, bg="#1e1e1e")
+        java_row = tk.Frame(opts_container, bg=card_bg)
         java_row.pack(fill="x")
-        java_entry = tk.Entry(java_row, bg=input_bg_color, fg=input_fg_color, relief="flat", font=("Segoe UI", 10))
+        self.inst_editor_java_row = java_row
+        java_entry = tk.Entry(java_row, bg=input_bg_color, fg=input_fg_color, relief="flat", font=("Segoe UI", 10),
+                              insertbackground=input_fg_color, highlightthickness=1, highlightbackground=input_border_color)
         java_entry.pack(side="left", fill="x", expand=True, ipady=6)
         existing_java = str(existing_data.get("java_executable", "") or "")
         if existing_java:
@@ -1038,31 +1100,40 @@ class InstallationsScreenMixin:
             command=browse_java_executable,
         ).pack(side="left", padx=(8, 0))
 
-        tk.Label(
+        java_hint = tk.Label(
             opts_container,
             text="Leave blank to use the bundled/runtime Java.",
-            bg="#1e1e1e",
-            fg="#7A7A7A",
+            bg=card_bg,
+            fg=COLORS.get('text_secondary', '#A0AAB0'),
             font=("Segoe UI", 8),
             anchor="w",
-        ).pack(fill="x", pady=(4, 0))
+        )
+        java_hint.pack(fill="x", pady=(4, 0))
+        self.inst_editor_java_hint = java_hint
 
         # Resolution
         create_label("RESOLUTION").pack(in_=opts_container, fill="x", pady=(15,5))
-        res_frame = tk.Frame(opts_container, bg="#1e1e1e")
+        res_frame = tk.Frame(opts_container, bg=card_bg)
         res_frame.pack(fill="x")
+        self.inst_editor_res_frame = res_frame
         
-        res_w = tk.Entry(res_frame, bg=input_bg_color, fg=input_fg_color, width=10, relief="flat", font=("Segoe UI", 10))
+        res_w = tk.Entry(res_frame, bg=input_bg_color, fg=input_fg_color, width=10, relief="flat", font=("Segoe UI", 10),
+                         insertbackground=input_fg_color, highlightthickness=1, highlightbackground=input_border_color)
         res_w.pack(side="left", ipady=6)
         existing_res_w = existing_data.get("resolution_width")
         res_w.insert(0, str(existing_res_w) if existing_res_w else "Auto")
         
-        tk.Label(res_frame, text=" x ", bg="#1e1e1e", fg="white").pack(side="left")
+        res_x_lbl = tk.Label(res_frame, text=" x ", bg=card_bg, fg=input_fg_color)
+        res_x_lbl.pack(side="left")
+        self.inst_editor_res_x_lbl = res_x_lbl
         
-        res_h = tk.Entry(res_frame, bg=input_bg_color, fg=input_fg_color, width=10, relief="flat", font=("Segoe UI", 10))
+        res_h = tk.Entry(res_frame, bg=input_bg_color, fg=input_fg_color, width=10, relief="flat", font=("Segoe UI", 10),
+                         insertbackground=input_fg_color, highlightthickness=1, highlightbackground=input_border_color)
         res_h.pack(side="left", ipady=6)
         existing_res_h = existing_data.get("resolution_height")
         res_h.insert(0, str(existing_res_h) if existing_res_h else "Auto")
+
+        self.inst_editor_entries = [name_entry, java_entry, res_w, res_h]
 
         if existing_java or existing_res_w or existing_res_h:
             toggle_opts()

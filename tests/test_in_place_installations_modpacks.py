@@ -42,6 +42,12 @@ def test_installations_in_place_editor(tk_root, tmp_path, monkeypatch):
     toplevel_count_after = len([w for w in tk_root.winfo_children() if isinstance(w, tk.Toplevel)])
     assert toplevel_count_after == toplevel_count_before
 
+    # Verify fields frame and input entries use active theme tokens (not hardcoded #1e1e1e)
+    from nlc.ui.theme import COLORS
+    assert app.inst_editor_fields_frame.cget("bg") == COLORS['card_bg']
+    assert app.inst_editor_entries[0].cget("bg") == COLORS['input_bg']
+    assert app.inst_editor_card.cget("bg") == COLORS['card_bg']
+
     # Close editor
     app.close_installation_editor()
     assert getattr(app, "_in_inst_editor", False) is False

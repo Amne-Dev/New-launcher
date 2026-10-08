@@ -2572,6 +2572,12 @@ class MinecraftLauncher(
             logger.debug("Failed updating content_area bg: %s", e)
 
         try:
+            if hasattr(self, '_onboarding_view') and self._onboarding_view and self._onboarding_view.winfo_exists():
+                self._onboarding_view.config(bg=new_tokens['main_bg'])
+        except Exception as e:
+            logger.debug("Failed updating _onboarding_view bg: %s", e)
+
+        try:
             if hasattr(self, 'tab_container') and self.tab_container and self.tab_container.winfo_exists():
                 self.tab_container.config(bg=new_tokens['main_bg'])
         except Exception as e:
@@ -3411,37 +3417,103 @@ class MinecraftLauncher(
                     do_next).pack(fill="x")
             make_link(btn_frame, "← Back to Account", show_step_account_type).pack(anchor="w", pady=(10, 0))
 
-        # STEP 3 — Theme / Accent Color
+        # STEP 3 — Theme & Appearance
         def show_step_theme():
             clear_page()
             update_dots(2)
 
-            tk.Frame(content, bg=main_bg, height=24).pack()
-            tk.Label(content, text="Pick Your Color",
+            curr_main_bg = COLORS['main_bg']
+            curr_card_bg = COLORS['card_bg']
+            curr_border_col = COLORS.get('border_subtle', '#33373E')
+            curr_text_sec = COLORS.get('text_secondary', '#A0AAB0')
+            curr_accent = COLORS.get('accent_color', '#2ECC71')
+
+            tk.Frame(content, bg=curr_main_bg, height=12).pack()
+            tk.Label(content, text="Theme & Appearance",
                     font=("Segoe UI", 18, "bold"), fg="white",
-                    bg=main_bg).pack()
-            tk.Label(content, text="Choose an accent color for the launcher",
-                    font=("Segoe UI", 10), fg=text_secondary,
-                    bg=main_bg).pack(pady=(6, 24))
+                    bg=curr_main_bg).pack()
+            tk.Label(content, text="Choose a theme palette and accent color for the launcher",
+                    font=("Segoe UI", 10), fg=curr_text_sec,
+                    bg=curr_main_bg).pack(pady=(4, 14))
+
+            # Themes Grid Section
+            theme_container = tk.Frame(content, bg=curr_main_bg)
+            theme_container.pack(fill="x", padx=40)
+
+            tk.Label(theme_container, text="THEME PALETTES", font=("Segoe UI", 8, "bold"),
+                     fg=curr_accent, bg=curr_main_bg).pack(anchor="w", pady=(0, 6))
+
+            theme_grid = tk.Frame(theme_container, bg=curr_main_bg)
+            theme_grid.pack(fill="x")
+
+            curr_theme_key = getattr(self, "theme_id", "dark_slate")
+
+            def select_theme(t_key):
+                self.apply_theme(t_key, save=True)
+                show_step_theme()
+
+            theme_keys = list(THEMES.keys())
+            for idx, t_key in enumerate(theme_keys):
+                t_info = THEMES[t_key]
+                col = idx % 3
+                row = idx // 3
+                is_active = (t_key == curr_theme_key)
+
+                t_frame = tk.Frame(
+                    theme_grid,
+                    bg=t_info['card_bg'],
+                    cursor="hand2",
+                    padx=12,
+                    pady=9,
+                    highlightthickness=2 if is_active else 1,
+                    highlightbackground=curr_accent if is_active else curr_border_col
+                )
+                t_frame.grid(row=row, column=col, padx=5, pady=5, sticky="ew")
+                theme_grid.columnconfigure(col, weight=1)
+
+                hdr = tk.Frame(t_frame, bg=t_info['card_bg'])
+                hdr.pack(fill="x")
+
+                dot = tk.Label(hdr, text="●", font=("Segoe UI", 9), bg=t_info['card_bg'],
+                               fg=t_info.get('default_accent', '#2ECC71'))
+                dot.pack(side="left", padx=(0, 5))
+
+                name_lbl = tk.Label(hdr, text=t_info['name'], font=("Segoe UI", 9, "bold"),
+                                    bg=t_info['card_bg'], fg="white")
+                name_lbl.pack(side="left")
+
+                desc_lbl = tk.Label(t_frame, text=t_info.get('description', ''), font=("Segoe UI", 7),
+                                    bg=t_info['card_bg'], fg=curr_text_sec, wraplength=170, justify="left")
+                desc_lbl.pack(anchor="w", pady=(2, 0))
+
+                for w in (t_frame, hdr, dot, name_lbl, desc_lbl):
+                    w.bind("<Button-1>", lambda e, k=t_key: select_theme(k))
+
+            # Accent Colors Section
+            accent_container = tk.Frame(content, bg=curr_main_bg)
+            accent_container.pack(fill="x", padx=40, pady=(14, 0))
+
+            tk.Label(accent_container, text="ACCENT COLOR", font=("Segoe UI", 8, "bold"),
+                     fg=curr_accent, bg=curr_main_bg).pack(anchor="w", pady=(0, 6))
 
             colors_list = [
-                ("Green",  "#2D8F36"),
+                ("Green",  "#2ECC71"),
                 ("Blue",   "#3498DB"),
-                ("Orange", "#E67E22"),
+                ("Cyan",   "#00E5FF"),
                 ("Purple", "#9B59B6"),
+                ("Orange", "#E67E22"),
                 ("Red",    "#E74C3C"),
             ]
 
-            palette = tk.Frame(content, bg=main_bg)
-            palette.pack()
+            palette = tk.Frame(accent_container, bg=curr_main_bg)
+            palette.pack(anchor="w")
 
-            selected = [getattr(self, "accent_color_name", "Green")]
+            selected_color = [getattr(self, "accent_color_name", "Green")]
             swatch_widgets = []
+            finish_btn_ref = [None]
 
-            finish_btn = None
-
-            def select_color(name, color):
-                selected[0] = name
+            def select_color(name, color_hex):
+                selected_color[0] = name
                 self.apply_accent_color(name)
                 self.save_config(sync_ui=False)
                 for sn, sw, sl in swatch_widgets:
@@ -3449,37 +3521,42 @@ class MinecraftLauncher(
                         sw.config(highlightbackground="white", highlightthickness=2)
                         sl.config(fg="white")
                     else:
-                        sw.config(highlightbackground=border_col, highlightthickness=1)
-                        sl.config(fg=text_secondary)
-                if finish_btn:
-                    finish_btn.config(bg=color, activebackground=color)
+                        sw.config(highlightbackground=curr_border_col, highlightthickness=1)
+                        sl.config(fg=curr_text_sec)
+                if finish_btn_ref[0]:
+                    finish_btn_ref[0].config(bg=color_hex, activebackground=color_hex)
 
-            for name, color in colors_list:
-                col = tk.Frame(palette, bg=main_bg)
-                col.pack(side="left", padx=12)
+            for name, color_hex in colors_list:
+                col_box = tk.Frame(palette, bg=curr_main_bg)
+                col_box.pack(side="left", padx=(0, 12))
 
-                is_active = (name == selected[0])
-                swatch = tk.Frame(col, bg=color, width=54, height=54, cursor="hand2",
-                                 highlightbackground="white" if is_active else border_col,
-                                 highlightthickness=2 if is_active else 1)
+                is_active = (name == selected_color[0] or color_hex.lower() == curr_accent.lower())
+                swatch = tk.Frame(
+                    col_box, bg=color_hex, width=36, height=36, cursor="hand2",
+                    highlightbackground="white" if is_active else curr_border_col,
+                    highlightthickness=2 if is_active else 1
+                )
                 swatch.pack()
                 swatch.pack_propagate(False)
 
-                lbl = tk.Label(col, text=name, font=("Segoe UI", 8),
-                              bg=main_bg,
-                              fg="white" if is_active else text_secondary)
-                lbl.pack(pady=(4, 0))
+                lbl = tk.Label(col_box, text=name, font=("Segoe UI", 8),
+                               bg=curr_main_bg,
+                               fg="white" if is_active else curr_text_sec)
+                lbl.pack(pady=(2, 0))
 
                 swatch_widgets.append((name, swatch, lbl))
 
-                swatch.bind("<Button-1>", lambda e, n=name, c=color: select_color(n, c))
-                for child in swatch.winfo_children():
-                    child.bind("<Button-1>", lambda e, n=name, c=color: select_color(n, c))
+                swatch.bind("<Button-1>", lambda e, n=name, c=color_hex: select_color(n, c))
+                lbl.bind("<Button-1>", lambda e, n=name, c=color_hex: select_color(n, c))
 
-            current_accent = dict(colors_list).get(selected[0], "#2D8F36")
-            finish_btn = make_btn(content, "Finish Setup", current_accent, show_step_done)
-            finish_btn.pack(pady=(36, 0), ipadx=24)
-            make_link(content, "← Back to Preferences", show_step_preferences).pack(pady=(12, 0))
+            btn_box = tk.Frame(content, bg=curr_main_bg)
+            btn_box.pack(pady=(20, 0))
+
+            finish_btn = make_btn(btn_box, "Finish Setup", curr_accent, show_step_done)
+            finish_btn.pack(ipadx=24)
+            finish_btn_ref[0] = finish_btn
+
+            make_link(content, "← Back to Preferences", show_step_preferences).pack(pady=(8, 0))
 
         # STEP 4 — Done
         def show_step_done():

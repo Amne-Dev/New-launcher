@@ -83,3 +83,28 @@ def test_create_segmented_chips(tk_root):
     assert last_val == 8192
 
     parent.destroy()
+
+
+def test_create_setting_row_toggle_switch_visibility(tk_root):
+    if not tk_root:
+        pytest.skip("Tkinter not available")
+
+    parent = tk.Frame(tk_root, bg="#242830")
+    parent.pack(fill="x")
+    var = tk.BooleanVar(value=True)
+    toggle = ToggleSwitch(parent, variable=var)
+    row, ctrl_container = create_setting_row(
+        parent,
+        title="Enable Micro-Animations (60 FPS)",
+        description="Enables smooth transitions and micro-animations throughout the UI.",
+        control_widget=toggle
+    )
+    tk_root.update()
+
+    assert toggle.winfo_manager() == "pack"
+    assert toggle.winfo_reqwidth() == 44
+    assert toggle.winfo_reqheight() == 24
+    assert ctrl_container.winfo_manager() == "pack"
+
+    parent.destroy()
+

@@ -83,3 +83,33 @@ def test_in_app_coach_marks_and_celebration(tk_root, tmp_path, monkeypatch):
 
     # No popup Toplevels were spawned
     assert len([w for w in tk_root.winfo_children() if isinstance(w, tk.Toplevel)]) == toplevel_count_before
+
+
+def test_onboarding_theme_selection_step(tk_root, tmp_path, monkeypatch):
+    """Verify Step 3 of onboarding offers theme palettes and updates active theme in real-time."""
+    if not tk_root:
+        pytest.skip("Tkinter not available")
+
+    cfg_file = tmp_path / "launcher_config.json"
+    cfg_data = {
+        "theme_id": "dark_slate",
+        "first_run_completed": False,
+        "neo_style_enabled": True
+    }
+    cfg_file.write_text(json.dumps(cfg_data), encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    app = MinecraftLauncher(root=tk_root)
+    app.show_onboarding_wizard()
+
+    assert hasattr(app, "_onboarding_view") and app._onboarding_view.winfo_exists()
+
+    # Apply Obsidian theme live through app.apply_theme as would happen on clicking theme card
+    app.apply_theme("obsidian", save=False)
+    assert app.theme_id == "obsidian"
+
+    from nlc.ui.theme import THEMES
+    assert app._onboarding_view.cget("bg") == THEMES["obsidian"]["main_bg"]
+
+    app.close_onboarding_wizard(start_tour=False)
+
