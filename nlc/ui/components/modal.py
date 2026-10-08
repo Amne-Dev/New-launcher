@@ -62,6 +62,14 @@ class InAppModalManager:
         if self._active_modal and self._active_modal.get("close_func"):
             self._active_modal["close_func"](result)
 
+    def handle_escape(self, event: Optional[Any] = None) -> None:
+        """Dismiss the top dismissable modal if Escape is triggered."""
+        if self._active_modal and self._active_modal.get("dismissable"):
+            close_fn = self._active_modal.get("close_func")
+            if close_fn:
+                close_fn(None)
+
+
 
     def show_modal(
         self,
@@ -132,7 +140,10 @@ class InAppModalManager:
 
             if modal_state.get("on_close"):
                 try:
-                    modal_state["on_close"]()
+                    try:
+                        modal_state["on_close"](result)
+                    except TypeError:
+                        modal_state["on_close"]()
                 except Exception as ex:
                     logger.warning("Error in modal on_close callback: %s", ex)
 
@@ -195,9 +206,8 @@ class InAppModalManager:
             # Click on scrim backdrop dismisses
             scrim.bind("<Button-1>", lambda _e: close_action(None))
 
-            # Escape key dismisses
             try:
-                esc_id = self.root.bind_all("<Escape>", lambda _e: close_action(None), add="+")
+                esc_id = self.root.bind_all("<Escape>", lambda _e: self.handle_escape(_e), add="+")
                 modal_state["esc_bind"] = esc_id
             except Exception:
                 pass
@@ -288,7 +298,9 @@ class InAppModalManager:
                 btn = make_button(btn_inner, text, style=style, font_size=10, command=on_click)
                 btn.pack(side="left", padx=8)
 
-        def on_modal_closed():
+        def on_modal_closed(res=None):
+            if result_holder[0] is None and res is not None:
+                result_holder[0] = res
             done_var.set(True)
 
         self.show_modal(
