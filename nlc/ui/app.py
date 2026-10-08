@@ -62,6 +62,7 @@ from nlc.ui.components.dialogs import (
     _build_missing_skin_head
 )
 from nlc.ui.components.toasts import ToastManager, PopupManager
+from nlc.ui.components.modal import InAppModalManager, set_modal_manager, get_modal_manager
 from nlc.ui.components.skin_renderer import SkinRenderer3D
 from nlc.ui.components.downloads import DownloadManager, DownloadQueueMixin
 from nlc.ui.components.buttons import make_button, make_badge, refresh_all_buttons
@@ -788,6 +789,8 @@ class MinecraftLauncher(
             pass
         self.popup_manager = PopupManager(self.root)
         self.toast_manager = ToastManager(self.root)
+        self.modal_manager = InAppModalManager(self.root)
+        set_modal_manager(self.modal_manager)
         self.root._nlc_popup_manager = self.popup_manager  # type: ignore[attr-defined]
         _ensure_window_icon(self.root, owner=self.root)
         if os.name != 'nt':
@@ -2865,69 +2868,51 @@ class MinecraftLauncher(
 
     def show_whats_new(self, version):
         """Fetches the changelog for the current version and displays it on first launch after update."""
-        dialog = tk.Toplevel(self.root)
-        dialog.title("What's New")
-        dialog.geometry("600x480")
-        dialog.config(bg=COLORS['main_bg'])
-        try:
-            x = self.root.winfo_x() + (self.root.winfo_width() // 2) - 300
-            y = self.root.winfo_y() + (self.root.winfo_height() // 2) - 240
-            dialog.geometry(f"+{x}+{y}")
-        except: pass
-        if os.name != "nt":
-            dialog.transient(self.root)
-        
-        dialog_root = self._apply_custom_toplevel_chrome(dialog, f"What's New in v{version}")
-        
-        # Header
-        header = tk.Frame(dialog_root, bg=COLORS['sidebar_bg'], pady=15, padx=20)
-        header.pack(fill="x")
-        tk.Label(header, text="✨ Launcher Updated! ✨", font=("Segoe UI", 16, "bold"), 
-                 bg=COLORS['sidebar_bg'], fg=COLORS['accent_blue']).pack(anchor="center")
-        tk.Label(header, text=f"You are now running version {version}", font=("Segoe UI", 10), 
-                 bg=COLORS['sidebar_bg'], fg=COLORS['text_secondary']).pack(anchor="center")
-        
-        # Content
-        content_frame = tk.Frame(dialog_root, bg=COLORS['main_bg'], padx=20, pady=20)
-        content_frame.pack(fill="both", expand=True)
+        mgr = get_modal_manager(self.root)
+        if not mgr:
+            return
 
-        text_area = scrolledtext.ScrolledText(content_frame, font=("Segoe UI", 10), bg=COLORS['input_bg'], fg=COLORS['text_primary'],
-                                              relief="flat", wrap="word", state="normal")
-        text_area.pack(fill="both", expand=True)
-        text_area.insert("1.0", "Fetching release notes from GitHub...\n\n")
-        text_area.config(state="disabled")
+        def build_content(body_frame, close_modal):
+            tk.Label(body_frame, text=f"You are now running version {version}", font=("Segoe UI", 10), 
+                     bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(anchor="w", pady=(0, 10))
 
-        # Footer
-        footer = tk.Frame(dialog_root, bg=COLORS['sidebar_bg'], pady=15)
-        footer.pack(fill="x", side="bottom")
-        self._make_btn(footer, "Awesome, Let's Game!", style="primary", font_size=10, 
-                       command=dialog.destroy).pack(anchor="center")
+            text_area = scrolledtext.ScrolledText(body_frame, font=("Segoe UI", 10), bg=COLORS['input_bg'], fg=COLORS['text_primary'],
+                                                  relief="flat", wrap="word", state="normal")
+            text_area.pack(fill="both", expand=True)
+            text_area.insert("1.0", "Fetching release notes from GitHub...\n\n")
+            text_area.config(state="disabled")
 
-        def fetch_changelog():
-            try:
-                # We specifically load the changelog for this version tag.
-                url = f"https://api.github.com/repos/Amne-Dev/New-launcher/releases/tags/v{version}"
-                r = requests.get(url, timeout=5)
-                if r.status_code == 200:
-                    data = r.json()
-                    body = data.get("body", "No description provided for this release.")
-                    
-                    self.root.after(0, lambda b=body: update_text(b))
-                else:
-                    self.root.after(0, lambda: update_text(f"Could not load release notes automatically (Status {r.status_code}).\nCheck out the GitHub releases page!"))
-            except Exception as e:
-                self.root.after(0, lambda err=str(e): update_text(f"Failed to fetch release notes: {err}"))
+            actions = tk.Frame(body_frame, bg=COLORS['card_bg'], pady=10)
+            actions.pack(fill="x", side="bottom")
+            self._make_btn(actions, "Awesome, Let's Game!", style="primary", font_size=10, 
+                           command=close_modal).pack(anchor="center")
 
-        def update_text(msg):
-            try:
-                if text_area.winfo_exists():
-                    text_area.config(state="normal")
-                    text_area.delete("1.0", "end")
-                    text_area.insert("1.0", msg)
-                    text_area.config(state="disabled")
-            except: pass
+            def fetch_changelog():
+                try:
+                    url = f"https://api.github.com/repos/Amne-Dev/New-launcher/releases/tags/v{version}"
+                    r = requests.get(url, timeout=5)
+                    if r.status_code == 200:
+                        data = r.json()
+                        body = data.get("body", "No description provided for this release.")
+                        self.root.after(0, lambda b=body: update_text(b))
+                    else:
+                        self.root.after(0, lambda: update_text(f"Could not load release notes automatically (Status {r.status_code}).\nCheck out the GitHub releases page!"))
+                except Exception as e:
+                    self.root.after(0, lambda err=str(e): update_text(f"Failed to fetch release notes: {err}"))
 
-        threading.Thread(target=fetch_changelog, daemon=True).start()
+            def update_text(msg):
+                try:
+                    if text_area.winfo_exists():
+                        text_area.config(state="normal")
+                        text_area.delete("1.0", "end")
+                        text_area.insert("1.0", msg)
+                        text_area.config(state="disabled")
+                except Exception:
+                    pass
+
+            threading.Thread(target=fetch_changelog, daemon=True).start()
+
+        mgr.show_modal(f"✨ What's New in v{version} ✨", build_content, width=620, height=480)
 
     def show_onboarding_wizard(self):
         """Shows the First Run Wizard — modern in-app view without popups, with step indicators and smooth transitions."""
@@ -3857,104 +3842,92 @@ class MinecraftLauncher(
         self.show_tab(prev)
         
     def show_modrinth_enable_dialog(self):
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Enable Mod Support")
-        dialog.geometry("450x300")
-        dialog.config(bg=COLORS['main_bg'])
-        if os.name != "nt":
-            dialog.transient(self.root)
-        dialog.resizable(False, False)
-        if os.name != "nt":
-            dialog.grab_set()
-        
-        # Center on parent
-        dialog.update_idletasks()
-        x = self.root.winfo_x() + (self.root.winfo_width()//2) - 225
-        y = self.root.winfo_y() + (self.root.winfo_height()//2) - 150
-        dialog.geometry(f"+{x}+{y}")
-        
-        # Ensure visibility
-        dialog.deiconify()
-        dialog.lift()
-        dialog_root = self._apply_custom_toplevel_chrome(dialog, "Enable Mod Support")
-        
-        container = tk.Frame(dialog_root, bg=COLORS['main_bg'], padx=20, pady=20)
-        container.pack(fill="both", expand=True)
-        
-        tk.Label(container, text="Enable Mod Support?", font=("Segoe UI", 14, "bold"), 
-                 bg=COLORS['main_bg'], fg="white").pack(pady=(0, 15))
-                 
-        tk.Label(container, text="Would you like to enable mod support in the launcher?", 
-                 font=("Segoe UI", 10), bg=COLORS['main_bg'], fg="#dddddd", wraplength=350).pack(pady=(0, 10))
-        
-        # Resource Warning + Tooltip
-        warn_frame = tk.Frame(container, bg=COLORS['main_bg'])
-        warn_frame.pack(pady=(0, 10))
-        
-        tk.Label(warn_frame, text="(Uses additional resources)", font=("Segoe UI", 9, "italic"),
-                bg=COLORS['main_bg'], fg="#F1C40F").pack(side="left")
-                
-        # Info Icon
-        info_lbl = tk.Label(warn_frame, text="ⓘ", font=("Segoe UI", 10), 
-                           bg=COLORS['main_bg'], fg="#3498DB", cursor="hand2")
-        info_lbl.pack(side="left", padx=5)
-        
-        # Simple Tooltip
-        tooltip_win = None
-        def show_tip(e):
-             nonlocal tooltip_win
-             tooltip_win = tk.Toplevel(dialog)
-             tooltip_win.wm_overrideredirect(True)
-             tooltip_win.geometry(f"+{e.x_root+10}+{e.y_root+10}")
-             lbl = tk.Label(tooltip_win, text="While the impact is minimal it can still be\nnoticeable on low end PCs.",
-                           bg="#222", fg="white", font=("Segoe UI", 8), relief="solid", borderwidth=1, padx=5, pady=2)
-             lbl.pack()
-             
-        def hide_tip(e):
-             nonlocal tooltip_win
-             if tooltip_win: tooltip_win.destroy()
-             tooltip_win = None
-             
-        info_lbl.bind("<Enter>", show_tip)
-        info_lbl.bind("<Leave>", hide_tip)
-        
-        tk.Label(container, text="Note: You can disable it later in Settings > Downloads", 
-                 font=("Segoe UI", 8), bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(pady=(10, 20))
-                 
-        btn_frame = tk.Frame(container, bg=COLORS['main_bg'])
-        btn_frame.pack(fill="x")
-        
-        def enable():
-            self.enable_modrinth = True
-            self.save_config()
-            dialog.destroy()
-            
-            if messagebox.askyesno("Restart Required", "The launcher needs to restart to apply changes.\nRestart now?"):
-                 # Restart App
-                cmd = [sys.executable]
-                cwd = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.getcwd()
-                if not getattr(sys, 'frozen', False):
-                    script = sys.argv[0]
-                    if not os.path.isabs(script):
-                        script = os.path.abspath(script)
-                        cwd = os.path.dirname(script)
-                    cmd = [sys.executable, script] + sys.argv[1:]
-                
-                if os.name == 'nt':
-                     subprocess.Popen(cmd, cwd=cwd, close_fds=True, creationflags=0x00000008)
-                else:
-                     subprocess.Popen(cmd, cwd=cwd, close_fds=True)
-                self.root.quit()
-        
-        tk.Button(btn_frame, text="Yes, Enable", bg=COLORS['success_green'], fg="white", 
-                 font=("Segoe UI", 10, "bold"), relief="flat", padx=15, pady=6, bd=0,
-                 cursor="hand2", activebackground=COLORS.get('play_btn_green', '#2D8F36'), activeforeground="white",
-                 command=enable).pack(side="right", padx=5)
-                 
-        tk.Button(btn_frame, text="No", bg="#404040", fg="#E0E0E0", 
-                 font=("Segoe UI", 10), relief="flat", padx=15, pady=6, bd=0,
-                 cursor="hand2", activebackground="#525252", activeforeground="white",
-                 command=dialog.destroy).pack(side="right", padx=5)
+        mgr = get_modal_manager(self.root)
+        if not mgr:
+            return
+
+        def build_content(body_frame, close_modal):
+            tk.Label(
+                body_frame,
+                text="Enable Mod Support?",
+                font=("Segoe UI", 13, "bold"),
+                bg=COLORS['card_bg'],
+                fg=COLORS['text_primary'],
+            ).pack(anchor="w", pady=(0, 6))
+
+            tk.Label(
+                body_frame,
+                text="Would you like to enable mod support in the launcher?",
+                font=("Segoe UI", 10),
+                bg=COLORS['card_bg'],
+                fg=COLORS['text_secondary'],
+                wraplength=400,
+                justify="left",
+            ).pack(anchor="w", pady=(0, 10))
+
+            warn_frame = tk.Frame(body_frame, bg=COLORS['card_bg'])
+            warn_frame.pack(anchor="w", pady=(0, 10))
+
+            tk.Label(
+                warn_frame,
+                text="⚠️ Uses additional background resources",
+                font=("Segoe UI", 9, "italic"),
+                bg=COLORS['card_bg'],
+                fg="#F1C40F",
+            ).pack(side="left")
+
+            tk.Label(
+                body_frame,
+                text="Note: You can change this later in Settings > Downloads.",
+                font=("Segoe UI", 8),
+                bg=COLORS['card_bg'],
+                fg=COLORS['text_secondary'],
+            ).pack(anchor="w", pady=(0, 16))
+
+            def enable():
+                self.enable_modrinth = True
+                self.save_config()
+                close_modal()
+
+                def do_restart():
+                    cmd = [sys.executable]
+                    cwd = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.getcwd()
+                    if not getattr(sys, 'frozen', False):
+                        script = sys.argv[0]
+                        if not os.path.isabs(script):
+                            script = os.path.abspath(script)
+                            cwd = os.path.dirname(script)
+                        cmd = [sys.executable, script] + sys.argv[1:]
+
+                    if os.name == 'nt':
+                        subprocess.Popen(cmd, cwd=cwd, close_fds=True, creationflags=0x00000008)
+                    else:
+                        subprocess.Popen(cmd, cwd=cwd, close_fds=True)
+                    self.root.quit()
+
+                if messagebox.askyesno("Restart Required", "The launcher needs to restart to apply changes.\nRestart now?"):
+                    do_restart()
+
+            btn_frame = tk.Frame(body_frame, bg=COLORS['card_bg'])
+            btn_frame.pack(fill="x", side="bottom")
+
+            self._make_btn(
+                btn_frame,
+                "No, Keep Disabled",
+                style="secondary",
+                font_size=10,
+                command=close_modal,
+            ).pack(side="left")
+
+            self._make_btn(
+                btn_frame,
+                "Yes, Enable",
+                style="primary",
+                font_size=10,
+                command=enable,
+            ).pack(side="right")
+
+        mgr.show_modal("Enable Mod Support", build_content, width=460, height=260)
 
     def set_active_sidebar(self, active_frame):
         hover_col = COLORS.get('hover_bg', '#3A3F4D')
@@ -5452,75 +5425,61 @@ class MinecraftLauncher(
     def custom_skin_model_popup(self, parent=None):
         # Returns "classic" or "slim" or None if cancelled
         result = {"model": None}
-        
-        # Check current profile for default preference
         current_model = "classic"
         if self.profiles and 0 <= self.current_profile_index < len(self.profiles):
             current_model = self.profiles[self.current_profile_index].get("skin_model", "classic")
-            
-        dialog = tk.Toplevel(parent if parent else self.root)
-        dialog.title("Skin Model")
-        dialog.geometry("350x250")
-        dialog.config(bg=COLORS['main_bg'])
-        try: # Center it
-            x = self.root.winfo_x() + (self.root.winfo_width() // 2) - 175
-            y = self.root.winfo_y() + (self.root.winfo_height() // 2) - 125
-            dialog.geometry(f"+{x}+{y}")
-        except: pass
-        if os.name != "nt":
-            dialog.transient(self.root)
-        dialog.resizable(False, False)
-        if os.name != "nt":
-            dialog.grab_set()
-        dialog_root = self._apply_custom_toplevel_chrome(dialog, "Skin Model")
-        
-        tk.Label(dialog_root, text="Select Skin Model", font=("Segoe UI", 12, "bold"), 
-                bg=COLORS['main_bg'], fg=COLORS['text_primary']).pack(pady=15)
-        
-        tk.Label(dialog_root, text="Does your skin have 3px (Slim) or 4px (Classic) arms?", 
-                 font=("Segoe UI", 9), bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(pady=(0, 20))
-        
-        btn_frame = tk.Frame(dialog_root, bg=COLORS['main_bg'])
-        btn_frame.pack(fill="x", padx=30)
-        
-        def set_classic():
-            result['model'] = "classic" # type: ignore
-            dialog.destroy()
-            
-        def set_slim():
-            result['model'] = "slim" # type: ignore
-            dialog.destroy()
-            
-        # Helper for active style
-        active_bd = 2
-        active_relief = "solid"
-        
-        # Classic (Steve)
-        b1_bg = COLORS['success_green'] if current_model == "classic" else COLORS['card_bg']
-        b1 = self._make_btn(btn_frame, "Classic (Steve)\n4px Arms", 
-                           style="primary" if current_model == "classic" else "secondary",
-                           font_size=10, width=15, command=set_classic)
-        b1.config(bg=b1_bg, pady=10)
-        if current_model == "classic": 
-            b1.config(fg="white")
-            b1.bind("<Enter>", lambda e: b1.config(bg=COLORS.get('play_btn_green', '#2D8F36')))
-            b1.bind("<Leave>", lambda e: b1.config(bg=COLORS['success_green']))
-        b1.pack(side="left", padx=5)
-        
-        # Slim (Alex)
-        b2_bg = COLORS['success_green'] if current_model == "slim" else COLORS['card_bg']
-        b2 = self._make_btn(btn_frame, "Slim (Alex)\n3px Arms",
-                           style="primary" if current_model == "slim" else "secondary",
-                           font_size=10, width=15, command=set_slim)
-        b2.config(bg=b2_bg, pady=10)
-        if current_model == "slim":
-            b2.config(fg="white")
-            b2.bind("<Enter>", lambda e: b2.config(bg=COLORS.get('play_btn_green', '#2D8F36')))
-            b2.bind("<Leave>", lambda e: b2.config(bg=COLORS['success_green']))
-        b2.pack(side="right", padx=5)
-        
-        self.root.wait_window(dialog)
-        return result['model']
+
+        mgr = get_modal_manager(self.root)
+        if not mgr:
+            return current_model
+
+        wait_var = tk.BooleanVar(self.root, value=False)
+
+        def on_close():
+            if not wait_var.get():
+                wait_var.set(True)
+
+        def build_content(body_frame, close_modal):
+            tk.Label(
+                body_frame,
+                text="Does your skin have 3px (Slim) or 4px (Classic) arms?",
+                font=("Segoe UI", 9),
+                bg=COLORS['card_bg'],
+                fg=COLORS['text_secondary'],
+            ).pack(anchor="w", pady=(0, 16))
+
+            btn_frame = tk.Frame(body_frame, bg=COLORS['card_bg'])
+            btn_frame.pack(fill="x", pady=5)
+
+            def set_classic():
+                result["model"] = "classic"
+                close_modal()
+
+            def set_slim():
+                result["model"] = "slim"
+                close_modal()
+
+            b1 = self._make_btn(
+                btn_frame,
+                "Classic (Steve)\n4px Arms",
+                style="primary" if current_model == "classic" else "secondary",
+                font_size=10,
+                command=set_classic,
+            )
+            b1.pack(side="left", fill="both", expand=True, padx=(0, 6))
+
+            b2 = self._make_btn(
+                btn_frame,
+                "Slim (Alex)\n3px Arms",
+                style="primary" if current_model == "slim" else "secondary",
+                font_size=10,
+                command=set_slim,
+            )
+            b2.pack(side="right", fill="both", expand=True, padx=(6, 0))
+
+        mgr.show_modal("Select Skin Model", build_content, width=420, height=220, on_close=on_close)
+        self.root.wait_variable(wait_var)
+        return result["model"]
 
     def upload_ms_skin(self, path, variant, token):
         self.log(f"DEBUG: Uploading skin to Minecraft... Path: {path}, Variant: {variant}")
