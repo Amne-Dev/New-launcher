@@ -92,3 +92,42 @@ def test_modpacks_in_place_create_page(tk_root, tmp_path, monkeypatch):
     app.close_create_modpack_page()
     assert getattr(app, "_in_modpack_create_view", False) is False
     assert app.modpacks_browse_view.winfo_exists()
+
+
+def test_installation_editor_fetch_versions_no_crash(tk_root, tmp_path, monkeypatch):
+    """Verify that fetching versions in the in-place editor does not crash with NameError 'win'."""
+    from unittest.mock import patch
+    from nlc.ui.theme import COLORS
+
+    if not tk_root:
+        pytest.skip("Tkinter not available")
+
+    cfg_file = tmp_path / "launcher_config.json"
+    cfg_data = {
+        "theme_id": "dark_slate",
+        "first_run_completed": True,
+        "neo_style_enabled": True
+    }
+    cfg_file.write_text(json.dumps(cfg_data), encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    app = MinecraftLauncher(root=tk_root)
+    app.show_tab("Installations")
+    app.show_installation_editor()
+
+    assert getattr(app, "_in_inst_editor", False) is True
+    assert hasattr(app, "modal_ver_combo")
+    assert hasattr(app, "disclaimer_lbl")
+    assert app.disclaimer_lbl.cget("fg") == COLORS.get('warning_orange', '#F59E0B')
+
+    fake_versions = [{'id': '1.21.0', 'type': 'release'}]
+    with patch("minecraft_launcher_lib.utils.get_version_list", return_value=fake_versions), \
+         patch("minecraft_launcher_lib.utils.get_installed_versions", return_value=[]):
+        app.cached_loader_versions = [{'id': '1.21.0', 'type': 'release'}]
+        app.update_modal_versions_list()
+        tk_root.update()
+
+        assert "1.21.0 (Not Installed)" in app.modal_ver_combo['values']
+        assert "Found 1 versions" in app.modal_status_lbl.cget("text")
+
+    app.close_installation_editor()
