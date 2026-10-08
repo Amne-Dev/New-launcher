@@ -384,14 +384,18 @@ class ModpacksScreenMixin:
 
         def update_view_buttons():
             current = view_mode_var.get()
+            btn_active_bg = COLORS.get('accent_color', COLORS.get('play_btn_green', '#2D8F36'))
+            btn_inactive_bg = COLORS.get('input_bg', '#2E333E')
+            btn_inactive_fg = COLORS.get('text_secondary', '#A0AAB0')
+            btn_hover_bg = COLORS.get('hover_bg', '#3A3F4D')
             if current == "grid":
-                grid_btn.config(bg=COLORS.get('play_btn_green', '#2D8F36'), fg="white",
-                                activebackground=COLORS.get('play_btn_green', '#2D8F36'))
-                list_btn.config(bg="#404040", fg="#E0E0E0", activebackground="#525252")
+                grid_btn.config(bg=btn_active_bg, fg="white",
+                                activebackground=btn_active_bg)
+                list_btn.config(bg=btn_inactive_bg, fg=btn_inactive_fg, activebackground=btn_hover_bg)
             else:
-                list_btn.config(bg=COLORS.get('play_btn_green', '#2D8F36'), fg="white",
-                                activebackground=COLORS.get('play_btn_green', '#2D8F36'))
-                grid_btn.config(bg="#404040", fg="#E0E0E0", activebackground="#525252")
+                list_btn.config(bg=btn_active_bg, fg="white",
+                                activebackground=btn_active_bg)
+                grid_btn.config(bg=btn_inactive_bg, fg=btn_inactive_fg, activebackground=btn_hover_bg)
 
         def set_view_mode(mode):
             if mode not in ("grid", "list"):
@@ -464,11 +468,12 @@ class ModpacksScreenMixin:
                     custom_showerror("Error", f"Failed to delete mod: {e}", parent=dialog)
 
         def bind_hover_surfaces(card, surfaces, info_widgets, del_btn):
+            card_hover_bg = COLORS.get('card_hover', COLORS.get('hover_bg', '#3A3F4D'))
             def on_enter_card(_event):
                 for surface in surfaces:
-                    surface.config(bg="#3A3A3A")
+                    surface.config(bg=card_hover_bg)
                 for widget in info_widgets:
-                    widget.config(bg="#3A3A3A") # type: ignore[arg-type]
+                    widget.config(bg=card_hover_bg) # type: ignore[arg-type]
 
             def on_leave_card(event):
                 if del_btn.winfo_containing(event.x_root, event.y_root) == del_btn:
@@ -483,11 +488,13 @@ class ModpacksScreenMixin:
                 surface.bind("<Leave>", on_leave_card)
 
         def create_remove_button(parent, command):
+            danger_subtle = COLORS.get('input_bg', '#2E333E')
+            danger_red = COLORS.get('error_red', '#EF4444')
             del_btn = tk.Button(parent, text="Remove", font=("Segoe UI", 9, "bold"),
-                               bg="#552222", fg="#F2B5B5", relief="flat", bd=0,
+                               bg=danger_subtle, fg=danger_red, relief="flat", bd=0,
                                cursor="hand2", command=command)
-            del_btn.bind("<Enter>", lambda _e: del_btn.config(bg=COLORS['error_red'], fg="white"))
-            del_btn.bind("<Leave>", lambda _e: del_btn.config(bg="#552222", fg="#F2B5B5"))
+            del_btn.bind("<Enter>", lambda _e: del_btn.config(bg=danger_red, fg="white"))
+            del_btn.bind("<Leave>", lambda _e: del_btn.config(bg=danger_subtle, fg=danger_red))
             return del_btn
 
         def create_mod_grid_card(parent, filename, row, col):
