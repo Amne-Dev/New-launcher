@@ -162,8 +162,8 @@ class LockerScreenMixin:
         container.pack(expand=True, fill="both", padx=20, pady=(0, 16))
 
         # Two Column Layout: Left (Showcase Stage), Right (Geometry + Wardrobe Grid)
-        container.columnconfigure(0, weight=4, minsize=300)
-        container.columnconfigure(1, weight=5, minsize=320)
+        container.columnconfigure(0, weight=0, minsize=280)
+        container.columnconfigure(1, weight=1)
         container.rowconfigure(0, weight=1)
 
         # ---------------------------------------------------------------------
@@ -181,26 +181,26 @@ class LockerScreenMixin:
             bg=card_bg,
             highlightbackground=border_col,
             highlightthickness=1,
-            padx=16,
-            pady=14
+            padx=14,
+            pady=12
         )
         self.preview_card.pack(fill="both", expand=True)
 
         # Top Bar of Stage
         top_bar = tk.Frame(self.preview_card, bg=card_bg)
-        top_bar.pack(fill="x", pady=(0, 10))
+        top_bar.pack(fill="x", pady=(0, 8))
 
         # Active account tag
         p = self.profiles[self.current_profile_index] if (self.profiles and 0 <= self.current_profile_index < len(self.profiles)) else {}
         p_name = p.get("name", "Player")
         p_type = p.get("type", "offline").upper()
 
-        badge_frame = tk.Frame(top_bar, bg=COLORS.get('input_bg', '#1E222B'), padx=8, pady=4)
+        badge_frame = tk.Frame(top_bar, bg=COLORS.get('input_bg', '#1E222B'), padx=6, pady=3)
         badge_frame.pack(side="left")
         tk.Label(
             badge_frame,
             text=f"● {p_name} ({p_type})",
-            font=(FONT_FAMILY, 9, "bold"),
+            font=(FONT_FAMILY, 8, "bold"),
             bg=COLORS.get('input_bg', '#1E222B'),
             fg=accent
         ).pack(side="left")
@@ -213,8 +213,8 @@ class LockerScreenMixin:
             font=(FONT_FAMILY, 8, "bold"),
             bg=COLORS.get('input_bg', '#1E222B'),
             fg=COLORS['text_secondary'],
-            padx=8,
-            pady=4
+            padx=6,
+            pady=3
         )
         self.stage_model_badge.pack(side="right")
 
@@ -222,7 +222,7 @@ class LockerScreenMixin:
         self.preview_canvas = tk.Canvas(
             self.preview_card,
             bg=card_bg,
-            width=300,
+            width=280,
             height=360,
             highlightthickness=0
         )
@@ -232,11 +232,11 @@ class LockerScreenMixin:
         self.skin_indicator = tk.Label(
             self.preview_card,
             text="",
-            font=(FONT_FAMILY, 10),
+            font=(FONT_FAMILY, 9),
             bg=card_bg,
             fg=COLORS['text_secondary']
         )
-        self.skin_indicator.pack(pady=(4, 12))
+        self.skin_indicator.pack(pady=(4, 10))
 
         # Action Toolbar at Bottom of Stage
         toolbar = tk.Frame(self.preview_card, bg=card_bg)
@@ -246,37 +246,37 @@ class LockerScreenMixin:
             toolbar,
             "📂 Upload",
             style="primary",
-            font_size=9,
+            font_size=8,
             command=self.select_skin
         )
-        b_upload.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        b_upload.pack(side="left", fill="x", expand=True, padx=(0, 2))
 
         b_fetch = self._make_btn(
             toolbar,
-            "🔍 Steal Skin",
+            "🔍 Steal",
             style="secondary",
-            font_size=9,
+            font_size=8,
             command=self.open_player_skin_fetcher
         )
-        b_fetch.pack(side="left", fill="x", expand=True, padx=4)
+        b_fetch.pack(side="left", fill="x", expand=True, padx=2)
 
         b_export = self._make_btn(
             toolbar,
             "💾 Export",
             style="secondary",
-            font_size=9,
+            font_size=8,
             command=self.export_current_skin
         )
-        b_export.pack(side="left", fill="x", expand=True, padx=4)
+        b_export.pack(side="left", fill="x", expand=True, padx=2)
 
         b_refresh = self._make_btn(
             toolbar,
             "🔄",
             style="secondary",
-            font_size=9,
+            font_size=8,
             command=self.refresh_skin
         )
-        b_refresh.pack(side="left", padx=(4, 0))
+        b_refresh.pack(side="left", padx=(2, 0))
 
         # ---------------------------------------------------------------------
         # RIGHT: CONTROLS & WARDROBE PRESETS GRID
@@ -319,25 +319,25 @@ class LockerScreenMixin:
 
         self.chip_classic = tk.Button(
             model_chips,
-            text="Steve (Classic 4px)",
-            font=(FONT_FAMILY, 9, "bold"),
+            text="Classic (4px)",
+            font=(FONT_FAMILY, 8, "bold"),
             relief="flat",
             bd=0,
-            padx=12,
-            pady=5,
+            padx=10,
+            pady=4,
             cursor="hand2",
             command=lambda: self._select_skin_model("classic")
         )
-        self.chip_classic.pack(side="left", padx=(0, 8))
+        self.chip_classic.pack(side="left", padx=(0, 6))
 
         self.chip_slim = tk.Button(
             model_chips,
-            text="Alex (Slim 3px)",
-            font=(FONT_FAMILY, 9, "bold"),
+            text="Slim (3px)",
+            font=(FONT_FAMILY, 8, "bold"),
             relief="flat",
             bd=0,
-            padx=12,
-            pady=5,
+            padx=10,
+            pady=4,
             cursor="hand2",
             command=lambda: self._select_skin_model("slim")
         )
@@ -345,7 +345,7 @@ class LockerScreenMixin:
         self._update_model_chips()
 
         # Divider line
-        tk.Frame(config_card, bg=border_col, height=1).pack(fill="x", pady=(0, 12))
+        tk.Frame(config_card, bg=border_col, height=1).pack(fill="x", pady=(0, 10))
 
         # Bottom Section: Multiplayer Skin Injection Toggle
         inj_box = tk.Frame(config_card, bg=card_bg)
@@ -354,7 +354,7 @@ class LockerScreenMixin:
         tk.Label(
             inj_box,
             text="OFFLINE SKIN INJECTION",
-            font=(FONT_FAMILY, 9, "bold"),
+            font=(FONT_FAMILY, 8, "bold"),
             bg=card_bg,
             fg=COLORS['text_secondary']
         ).pack(anchor="w", pady=(0, 6))
@@ -366,22 +366,22 @@ class LockerScreenMixin:
         self.inj_toggle_btn = tk.Button(
             inj_toggle_row,
             text="ON" if self.auto_download_mod else "OFF",
-            font=(FONT_FAMILY, 9, "bold"),
+            font=(FONT_FAMILY, 8, "bold"),
             relief="flat",
             bd=0,
-            padx=12,
-            pady=4,
+            padx=10,
+            pady=3,
             cursor="hand2",
             bg=accent if self.auto_download_mod else COLORS.get('input_bg', '#1E222B'),
             fg="#FFFFFF" if self.auto_download_mod else COLORS['text_secondary'],
             command=self._toggle_skin_injection
         )
-        self.inj_toggle_btn.pack(side="left", padx=(0, 10))
+        self.inj_toggle_btn.pack(side="left", padx=(0, 8))
 
         tk.Label(
             inj_toggle_row,
             text="Inject skin in offline sessions",
-            font=(FONT_FAMILY, 9),
+            font=(FONT_FAMILY, 8),
             bg=card_bg,
             fg=COLORS['text_primary']
         ).pack(side="left")
@@ -392,19 +392,19 @@ class LockerScreenMixin:
             bg=card_bg,
             highlightbackground=border_col,
             highlightthickness=1,
-            padx=20,
-            pady=16
+            padx=16,
+            pady=14
         )
         wardrobe_card.pack(fill="both", expand=True)
 
         # Wardrobe Card Header & Filter Toolbar
         w_header = tk.Frame(wardrobe_card, bg=card_bg)
-        w_header.pack(fill="x", pady=(0, 12))
+        w_header.pack(fill="x", pady=(0, 10))
 
         tk.Label(
             w_header,
-            text="SAVED WARDROBE PRESETS",
-            font=(FONT_FAMILY, 10, "bold"),
+            text="WARDROBE",
+            font=(FONT_FAMILY, 9, "bold"),
             bg=card_bg,
             fg=COLORS['text_primary']
         ).pack(side="left")
@@ -415,42 +415,26 @@ class LockerScreenMixin:
             font=(FONT_FAMILY, 8, "bold"),
             bg=COLORS.get('input_bg', '#1E222B'),
             fg=COLORS['text_secondary'],
-            padx=8,
+            padx=6,
             pady=2
         )
-        self.wardrobe_count_lbl.pack(side="left", padx=(8, 0))
-
-        # Action Buttons on right of wardrobe header
-        b_open_dir = tk.Button(
-            w_header,
-            text="📂 Open Folder",
-            font=(FONT_FAMILY, 8, "bold"),
-            relief="flat",
-            bd=0,
-            bg=COLORS.get('input_bg', '#1E222B'),
-            fg=COLORS['text_primary'],
-            padx=10,
-            pady=4,
-            cursor="hand2",
-            command=lambda: open_path_in_system(self._get_skins_storage_dir())
-        )
-        b_open_dir.pack(side="right", padx=(6, 0))
+        self.wardrobe_count_lbl.pack(side="left", padx=(6, 0))
 
         b_import = self._make_btn(
             w_header,
-            "+ Import Skin",
+            "+ Add Skin",
             style="primary",
-            font_size=9,
+            font_size=8,
             command=self.select_skin
         )
         b_import.pack(side="right")
 
-        # Search Bar
+        # Search Bar + Folder Action
         search_frame = tk.Frame(
             wardrobe_card,
             bg=COLORS.get('input_bg', '#1E222B'),
-            padx=8,
-            pady=4,
+            padx=6,
+            pady=3,
             highlightthickness=1,
             highlightbackground=border_col
         )
@@ -459,15 +443,15 @@ class LockerScreenMixin:
         tk.Label(
             search_frame,
             text="🔍",
-            font=(FONT_FAMILY, 9),
+            font=(FONT_FAMILY, 8),
             bg=COLORS.get('input_bg', '#1E222B'),
             fg=COLORS['text_secondary']
-        ).pack(side="left", padx=(0, 6))
+        ).pack(side="left", padx=(0, 4))
 
         search_entry = tk.Entry(
             search_frame,
             textvariable=self.wardrobe_search_var,
-            font=(FONT_FAMILY, 9),
+            font=(FONT_FAMILY, 8),
             bg=COLORS.get('input_bg', '#1E222B'),
             fg=COLORS['text_primary'],
             insertbackground=COLORS['text_primary'],
@@ -476,6 +460,21 @@ class LockerScreenMixin:
         )
         search_entry.pack(side="left", fill="x", expand=True)
         self.wardrobe_search_var.trace_add("write", lambda *_: self.render_skin_history())
+
+        b_open_dir = tk.Button(
+            search_frame,
+            text="📁 Folder",
+            font=(FONT_FAMILY, 8, "bold"),
+            relief="flat",
+            bd=0,
+            bg=COLORS.get('card_bg', '#222630'),
+            fg=COLORS['text_secondary'],
+            padx=6,
+            pady=2,
+            cursor="hand2",
+            command=lambda: open_path_in_system(self._get_skins_storage_dir())
+        )
+        b_open_dir.pack(side="right")
 
         # Scrollable Wardrobe Grid Area
         grid_container = tk.Frame(wardrobe_card, bg=card_bg)
