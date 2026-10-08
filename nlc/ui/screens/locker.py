@@ -380,7 +380,7 @@ class LockerScreenMixin:
 
         tk.Label(
             inj_toggle_row,
-            text="Inject skin in offline sessions",
+            text="Inject in offline sessions",
             font=(FONT_FAMILY, 8),
             bg=card_bg,
             fg=COLORS['text_primary']
@@ -633,15 +633,46 @@ class LockerScreenMixin:
                 icon_lbl.image = head  # type: ignore
                 icon_lbl.pack(side="left", padx=(0, 10))
 
-            # Center: Title & Model Tag
-            info = tk.Frame(card, bg=card_bg)
-            info.pack(side="left", fill="both", expand=True)
+            # Right: Equip Status or Button (pack first so it's always anchored right)
+            right_box = tk.Frame(card, bg=card_bg)
+            right_box.pack(side="right", padx=(6, 0))
 
-            disp_name = name if len(name) <= 16 else f"{name[:13]}..."
+            if is_equipped:
+                status_lbl = tk.Label(
+                    right_box,
+                    text="✓ EQUIPPED",
+                    font=(FONT_FAMILY, 7, "bold"),
+                    bg=accent,
+                    fg="#FFFFFF",
+                    padx=6,
+                    pady=2
+                )
+                status_lbl.pack()
+            else:
+                eq_btn = tk.Button(
+                    right_box,
+                    text="Equip",
+                    font=(FONT_FAMILY, 8, "bold"),
+                    relief="flat",
+                    bd=0,
+                    bg=COLORS.get('card_bg', '#222630'),
+                    fg=COLORS['text_primary'],
+                    padx=8,
+                    pady=2,
+                    cursor="hand2",
+                    command=lambda p=path, m=model: self.apply_history_skin(p, m)
+                )
+                eq_btn.pack()
+
+            # Center: Title & Model Tag (fills remaining horizontal space)
+            info = tk.Frame(card, bg=card_bg)
+            info.pack(side="left", fill="x", expand=True)
+
+            disp_name = name if len(name) <= 14 else f"{name[:12]}..."
             name_lbl = tk.Label(
                 info,
                 text=disp_name,
-                font=(FONT_FAMILY, 9, "bold"),
+                font=(FONT_FAMILY, 8, "bold"),
                 bg=card_bg,
                 fg=COLORS['text_primary'],
                 anchor="w"
@@ -658,38 +689,7 @@ class LockerScreenMixin:
                 pady=1,
                 anchor="w"
             )
-            model_badge.pack(anchor="w", pady=(3, 0))
-
-            # Right: Equip Status or Button
-            right_box = tk.Frame(card, bg=card_bg)
-            right_box.pack(side="right")
-
-            if is_equipped:
-                status_lbl = tk.Label(
-                    right_box,
-                    text="✓ EQUIPPED",
-                    font=(FONT_FAMILY, 8, "bold"),
-                    bg=accent,
-                    fg="#FFFFFF",
-                    padx=6,
-                    pady=3
-                )
-                status_lbl.pack()
-            else:
-                eq_btn = tk.Button(
-                    right_box,
-                    text="Equip",
-                    font=(FONT_FAMILY, 8, "bold"),
-                    relief="flat",
-                    bd=0,
-                    bg=COLORS.get('card_bg', '#222630'),
-                    fg=COLORS['text_primary'],
-                    padx=8,
-                    pady=3,
-                    cursor="hand2",
-                    command=lambda p=path, m=model: self.apply_history_skin(p, m)
-                )
-                eq_btn.pack()
+            model_badge.pack(anchor="w", pady=(2, 0))
 
             # Click on card equips skin
             def _bind_equip(widget, p=path, m=model):
