@@ -396,6 +396,19 @@ class InstallationsScreenMixin:
         attach_context_menu(item, lambda i=idx, b=item: self.build_installation_context_menu(i, b), include_children=True)
 
     def open_installation_folder(self, idx):
+        if 0 <= idx < len(self.installations):
+            inst = self.installations[idx]
+            inst_id = inst.get("id")
+            pack = next((p for p in getattr(self, 'modpacks', []) if p.get('linked_installation_id') == inst_id), None)
+            if pack:
+                pdir = self.get_modpack_dir(pack['id'])
+                if os.path.exists(pdir):
+                    open_path_in_system(pdir)
+                    return
+            gdir = inst.get("game_directory")
+            if gdir and os.path.exists(gdir):
+                open_path_in_system(gdir)
+                return
         open_path_in_system(self.minecraft_dir)
 
     def duplicate_installation(self, idx):
@@ -1154,9 +1167,50 @@ class InstallationsScreenMixin:
         existing_res_h = existing_data.get("resolution_height")
         res_h.insert(0, str(existing_res_h) if existing_res_h else "Auto")
 
-        self.inst_editor_entries = [name_entry, java_entry, res_w, res_h]
+        # Game Directory
+        create_label("GAME DIRECTORY").pack(in_=opts_container, fill="x", pady=(15,5))
+        game_dir_row = tk.Frame(opts_container, bg=card_bg)
+        game_dir_row.pack(fill="x")
+        self.inst_editor_game_dir_row = game_dir_row
+        game_dir_entry = tk.Entry(game_dir_row, bg=input_bg_color, fg=input_fg_color, relief="flat", font=("Segoe UI", 10),
+                                  insertbackground=input_fg_color, highlightthickness=1, highlightbackground=input_border_color)
+        game_dir_entry.pack(side="left", fill="x", expand=True, ipady=6)
+        existing_game_dir = str(existing_data.get("game_directory", "") or "")
+        if existing_game_dir:
+            game_dir_entry.insert(0, existing_game_dir)
 
-        if existing_java or existing_res_w or existing_res_h:
+        def browse_game_dir():
+            selected = filedialog.askdirectory(
+                parent=self.root,
+                title="Select Custom Game Directory",
+                initialdir=game_dir_entry.get().strip() or self.minecraft_dir
+            )
+            if selected:
+                game_dir_entry.delete(0, tk.END)
+                game_dir_entry.insert(0, selected)
+
+        self._make_btn(
+            game_dir_row,
+            "Browse...",
+            style="secondary",
+            font_size=9,
+            command=browse_game_dir,
+        ).pack(side="left", padx=(8, 0))
+
+        game_dir_hint = tk.Label(
+            opts_container,
+            text="Leave blank to use default .minecraft (or isolated modpack folder).",
+            bg=card_bg,
+            fg=COLORS.get('text_secondary', '#A0AAB0'),
+            font=("Segoe UI", 8),
+            anchor="w",
+        )
+        game_dir_hint.pack(fill="x", pady=(4, 0))
+        self.inst_editor_game_dir_hint = game_dir_hint
+
+        self.inst_editor_entries = [name_entry, java_entry, res_w, res_h, game_dir_entry]
+
+        if existing_java or existing_res_w or existing_res_h or existing_game_dir:
             toggle_opts()
 
 
@@ -1335,6 +1389,7 @@ class InstallationsScreenMixin:
                  "java_executable": java_executable,
                  "resolution_width": int(resolution_width) if resolution_width else None,
                  "resolution_height": int(resolution_height) if resolution_height else None,
+                 "game_directory": game_dir_entry.get().strip(),
                  "last_played": existing_data.get("last_played", "Never"),
                  "created": existing_data.get("created", datetime.now().isoformat())
              }
