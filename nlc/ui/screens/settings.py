@@ -20,8 +20,10 @@ from nlc.ui.components.settings_row import (
 )
 from nlc.ui.components.buttons import make_button, make_badge
 from nlc.ui.components.cards import create_card
+from nlc.ui.components.context_menu import attach_entry_context_menu
 from nlc.core.system_info import get_total_ram_mb, detect_installed_javas, get_system_specs
 from nlc.storage.config import DEFAULT_RAM, CURRENT_VERSION
+from nlc.storage.paths import open_path_in_system
 
 logger = logging.getLogger(__name__)
 
@@ -686,12 +688,7 @@ class SettingsScreenMixin:
             log_dir = os.path.join(self.config_dir, "logs")
             os.makedirs(log_dir, exist_ok=True)
             try:
-                if os.name == 'nt':
-                    os.startfile(log_dir)
-                elif sys.platform == 'darwin':
-                    subprocess.Popen(['open', log_dir])
-                else:
-                    subprocess.Popen(['xdg-open', log_dir])
+                open_path_in_system(log_dir)
             except Exception as e:
                 custom_showerror("Error", f"Failed to open logs folder: {e}")
 
@@ -711,6 +708,7 @@ class SettingsScreenMixin:
             relief="flat"
         )
         self.log_area.pack(fill="both", expand=True)
+        attach_entry_context_menu(self.log_area)
 
         # Load existing log file content into view if available
         try:
