@@ -463,18 +463,18 @@ class LockerScreenMixin:
 
         b_open_dir = tk.Button(
             search_frame,
-            text="📁 Folder",
-            font=(FONT_FAMILY, 8, "bold"),
+            text="📁",
+            font=(FONT_FAMILY, 9),
             relief="flat",
             bd=0,
             bg=COLORS.get('card_bg', '#222630'),
             fg=COLORS['text_secondary'],
-            padx=6,
-            pady=2,
+            padx=5,
+            pady=1,
             cursor="hand2",
             command=lambda: open_path_in_system(self._get_skins_storage_dir())
         )
-        b_open_dir.pack(side="right")
+        b_open_dir.pack(side="right", padx=(4, 0))
 
         # Scrollable Wardrobe Grid Area
         grid_container = tk.Frame(wardrobe_card, bg=card_bg)
