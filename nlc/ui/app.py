@@ -2308,7 +2308,17 @@ class MinecraftLauncher(
 
         self._attach_sidebar_hover(self.profile_frame)
 
-        tk.Frame(self.sidebar, bg=COLORS.get('separator', '#454545'), height=1).pack(fill="x", padx=12, pady=(0, 16)) # Separator
+        # In-sidebar Collapsible Account Drawer
+        self.sidebar_account_drawer = tk.Frame(
+            self.sidebar,
+            bg=COLORS['card_bg'],
+            highlightthickness=1,
+            highlightbackground=COLORS.get('border_subtle', '#2D3139')
+        )
+        self.sidebar_account_drawer_open = False
+
+        self.sidebar_nav_separator = tk.Frame(self.sidebar, bg=COLORS.get('separator', '#454545'), height=1)
+        self.sidebar_nav_separator.pack(fill="x", padx=12, pady=(0, 16)) # Separator
 
         # --- Sidebar Menu Items ---
         self.sidebar_items = []
@@ -4094,6 +4104,17 @@ class MinecraftLauncher(
             if hasattr(self, 'sidebar_chevron') and self.sidebar_chevron.winfo_exists():
                 self.sidebar_chevron.config(bg=sidebar_bg, fg=muted_col)
 
+        # Synchronize account drawer and separator
+        if hasattr(self, 'sidebar_nav_separator') and self.sidebar_nav_separator.winfo_exists():
+            self.sidebar_nav_separator.config(bg=COLORS.get('separator', '#454545'))
+        if hasattr(self, 'sidebar_account_drawer') and self.sidebar_account_drawer.winfo_exists():
+            self.sidebar_account_drawer.config(
+                bg=COLORS['card_bg'],
+                highlightbackground=COLORS.get('border_subtle', '#2D3139')
+            )
+            if getattr(self, 'sidebar_account_drawer_open', False) and hasattr(self, 'render_sidebar_account_drawer'):
+                self.render_sidebar_account_drawer()
+
         # Synchronize all sidebar items and dock links
         for frame in getattr(self, 'sidebar_items', []):
             if not getattr(frame, 'winfo_exists', lambda: False)():
@@ -4398,13 +4419,22 @@ class MinecraftLauncher(
                 pass
             self._selector_menu = None
         
-        # Close profile menu
+        # Close profile menu / drawer
+        if hasattr(self, 'close_profile_drawer'):
+            self.close_profile_drawer()
+        elif getattr(self, 'sidebar_account_drawer_open', False):
+            if hasattr(self, 'sidebar_account_drawer') and self.sidebar_account_drawer.winfo_exists():
+                self.sidebar_account_drawer.pack_forget()
+            self.sidebar_account_drawer_open = False
+            if hasattr(self, 'sidebar_chevron') and self.sidebar_chevron.winfo_exists():
+                self.sidebar_chevron.config(text="▾")
         if hasattr(self, 'profile_menu') and self.profile_menu:
-            try:
-                if self.profile_menu.winfo_exists():
-                    self.profile_menu.destroy()
-            except:
-                pass
+            if isinstance(self.profile_menu, tk.Toplevel):
+                try:
+                    if self.profile_menu.winfo_exists():
+                        self.profile_menu.destroy()
+                except:
+                    pass
             self.profile_menu = None
         
         # Close launch options menu
@@ -4952,6 +4982,10 @@ class MinecraftLauncher(
         if self.current_tab == "Locker" and hasattr(self, 'locker_view') and self.locker_view.get() == "Skins":
             if hasattr(self, 'render_skin_history'):
                 self.render_skin_history()
+
+        # Refresh sidebar account drawer if open
+        if hasattr(self, 'render_sidebar_account_drawer') and getattr(self, 'sidebar_account_drawer_open', False):
+            self.render_sidebar_account_drawer()
         
     def update_profile_btn(self):
         # Update text labels
