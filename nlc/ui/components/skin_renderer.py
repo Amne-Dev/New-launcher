@@ -187,9 +187,9 @@ class Model3DRenderer:
         yaw_deg: float = 30.0,
         pitch_deg: float = 10.0,
         walk_phase: float = 0.0,
-        width: int = 300,
-        height: int = 360,
-        scale: float = 7.8
+        width: int = 360,
+        height: int = 400,
+        scale: Optional[float] = None
     ) -> Optional[Image.Image]:
         """
         Render a single 3D frame at the specified yaw, pitch, and walk cycle phase.
@@ -203,14 +203,14 @@ class Model3DRenderer:
         yaw = math.radians(yaw_deg)
         pitch = math.radians(pitch_deg)
 
-        cy, sy = math.cos(yaw), math.sin(yaw)
+        cy_rot, sy_rot = math.cos(yaw), math.sin(yaw)
         cp, sp = math.cos(pitch), math.sin(pitch)
 
         # Camera rotation matrix: Yaw (around Y) followed by Pitch (around X)
         R_yaw = np.array([
-            [cy, 0, -sy],
+            [cy_rot, 0, -sy_rot],
             [0, 1, 0],
-            [sy, 0, cy]
+            [sy_rot, 0, cy_rot]
         ])
         R_pitch = np.array([
             [1, 0, 0],
@@ -223,8 +223,14 @@ class Model3DRenderer:
         max_limb = math.radians(26)
         leg_angle = max_limb * math.sin(walk_phase)
         arm_angle = -leg_angle * 0.9
-        # Cape flutters backwards with walking stride
-        cape_pitch = math.radians(12 + 13 * abs(math.sin(walk_phase)))
+
+        # Natural cape physics:
+        # Resting position: hangs down along the back at gentle 6 deg slant
+        # Walking flutter: billows gently backwards with stride (6 deg to 12 deg)
+        # Stride roll sway: gentle +-2 deg matching hip/leg stride
+        is_moving = abs(math.sin(walk_phase)) > 0.001
+        cape_pitch = math.radians(6.0 + 6.0 * abs(math.sin(walk_phase))) if is_moving else math.radians(6.0)
+        cape_roll = math.radians(2.0 * math.sin(walk_phase)) if is_moving else 0.0
 
         faces = []
 
@@ -335,14 +341,20 @@ class Model3DRenderer:
 
         # Cape attached to upper back of torso (z=2.5, pivot y=14, z=2.0)
         if self.cape_tex:
-            add_box([0, 6, 2.5], [10, 16, 1], self.cape_tex, pivot=[0, 14, 2.0], local_pitch=-cape_pitch)
+            add_box([0, 6, 2.5], [10, 16, 1], self.cape_tex, pivot=[0, 14, 2.0], local_pitch=-cape_pitch, local_roll=cape_roll)
 
         # Sort faces back to front (largest depth avg_z first)
         faces.sort(key=lambda f: f['avg_z'], reverse=True)
 
+        # Dynamic scale & grounding alignment
+        if scale is None:
+            scale = min(width / 34.0, height / 39.0)
+        pedestal_y = int(height * 0.86)
+        cy = (pedestal_y - 2) - (cp * 10.0 * scale)
+        cx = width / 2.0
+
         # Render onto transparent RGBA Canvas
         canvas = Image.new('RGBA', (width, height), (0, 0, 0, 0))
-        cx, cy = width / 2.0, height / 2.0 - 6
 
         for f in faces:
             tex = f['tex']
@@ -443,10 +455,11 @@ class SkinRenderer3D:
         yaw_deg: float = 30.0,
         pitch_deg: float = 10.0,
         walk_phase: float = 0.0,
-        width: int = 300,
-        height: int = 360,
-        model: str = "classic"
+        width: int = 360,
+        height: int = 400,
+        model: str = "classic",
+        scale: Optional[float] = None
     ) -> Optional[Image.Image]:
         """Render a specific frame for the interactive canvas."""
         renderer = cls.get_renderer(skin_path, cape_path, model)
-        return renderer.render_frame(yaw_deg, pitch_deg, walk_phase, width, height)
+        return renderer.render_frame(yaw_deg, pitch_deg, walk_phase, width, height, scale)
