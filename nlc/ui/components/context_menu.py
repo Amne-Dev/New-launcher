@@ -138,6 +138,14 @@ class NeoContextMenu:
         else:
             self.post(rx, ry - 2)
 
+    def show_at(self, x_root: int, y_root: int) -> None:
+        """Display context menu at screen root coordinates (convenience alias for post)."""
+        self.post(x_root, y_root)
+
+    def show_below(self, widget: tk.Widget) -> None:
+        """Display context menu directly below widget (convenience alias for show_at_widget)."""
+        self.show_at_widget(widget, direction="below")
+
     def _create_menu_item_row(self, container: tk.Frame, entry: Dict[str, Any]) -> None:
         card_bg = COLORS.get("card_bg", "#242830")
         hover_bg = COLORS.get("hover_bg", "#3A3F4D")
