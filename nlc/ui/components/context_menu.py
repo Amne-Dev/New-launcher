@@ -71,9 +71,17 @@ class NeoContextMenu:
 
         root = self.parent.winfo_toplevel()
         menu = tk.Toplevel(root)
-        menu.overrideredirect(True)
+        menu.withdraw()  # Crucial for Wayland/Hyprland: prevent initial mapping at (0, 0)
         menu.transient(root)
-        menu.attributes("-topmost", True)
+        try:
+            menu.attributes("-type", "popup_menu")
+        except Exception:
+            pass
+        try:
+            menu.attributes("-topmost", True)
+        except Exception:
+            pass
+        menu.overrideredirect(True)
 
         card_bg = COLORS.get("card_bg", "#242830")
         border_col = COLORS.get("border_subtle", "#2D3139")
@@ -92,7 +100,7 @@ class NeoContextMenu:
 
             self._create_menu_item_row(container, entry)
 
-        # Measure size and position with boundary checking
+        # Measure size while withdrawn
         menu.update_idletasks()
         req_w = max(self.min_width, menu.winfo_reqwidth())
         req_h = menu.winfo_reqheight()
@@ -111,10 +119,14 @@ class NeoContextMenu:
         if pos_y + req_h > screen_h - 10:
             pos_y = max(10, pos_y - req_h)
 
+        # Set geometry while withdrawn, then deiconify directly into target position
         menu.geometry(f"{req_w}x{req_h}+{pos_x}+{pos_y}")
         menu.deiconify()
         menu.lift()
-        menu.focus_set()
+        try:
+            menu.focus_set()
+        except Exception:
+            pass
 
         # Keyboard and click-outside dismissal
         menu.bind("<Escape>", lambda e: self.dismiss())
@@ -133,10 +145,19 @@ class NeoContextMenu:
         rw = widget.winfo_width()
         rh = widget.winfo_height()
 
+        root = widget.winfo_toplevel()
+        root.update_idletasks()
+        root_right = root.winfo_rootx() + root.winfo_width()
+
+        # If trigger widget is near right edge, align menu right edge to button right edge
+        target_x = rx
+        if rx + self.min_width > root_right - 16:
+            target_x = max(root.winfo_rootx() + 8, rx + rw - self.min_width)
+
         if direction == "below":
-            self.post(rx, ry + rh + 2)
+            self.post(target_x, ry + rh + 2)
         else:
-            self.post(rx, ry - 2)
+            self.post(target_x, ry - 2)
 
     def show_at(self, x_root: int, y_root: int) -> None:
         """Display context menu at screen root coordinates (convenience alias for post)."""
@@ -145,6 +166,14 @@ class NeoContextMenu:
     def show_below(self, widget: tk.Widget) -> None:
         """Display context menu directly below widget (convenience alias for show_at_widget)."""
         self.show_at_widget(widget, direction="below")
+
+    def focus_set(self) -> None:
+        """Delegate focus_set to the underlying Toplevel window if active."""
+        if self.menu_win and self.menu_win.winfo_exists():
+            try:
+                self.menu_win.focus_set()
+            except Exception:
+                pass
 
     def invoke(self, index: int) -> None:
         """Programmatically invoke the menu item at index, dismissing the menu."""
