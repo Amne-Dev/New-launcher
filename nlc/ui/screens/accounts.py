@@ -10,6 +10,7 @@ import webbrowser
 from datetime import datetime
 import tkinter as tk
 from tkinter import ttk
+import uuid
 from typing import cast
 import requests
 
@@ -17,6 +18,7 @@ import minecraft_launcher_lib
 
 from nlc.ui.theme import COLORS, FONT_FAMILY, derive_hover_color
 from nlc.ui.components.dialogs import custom_showinfo, custom_showerror, custom_askyesno
+from nlc.ui.components.modal import get_modal_manager
 from nlc.net.ms_auth import MicrosoftDeviceAuth, MSA_CLIENT_ID
 from nlc.net.elyby_auth import ElyByAuth
 
@@ -310,46 +312,155 @@ class AccountsScreenMixin:
             except:
                 pass
         
-        win = tk.Toplevel(self.root)
-        self._register_dialog_window(win)
-        win.title("Add Account")
-        win.geometry("450x350")
-        win.config(bg=COLORS['main_bg'])
-        if os.name != "nt":
-            win.transient(self.root)
-        win.resizable(False, False)
-        if os.name != "nt":
-            win.grab_set()
-        
-        # Center on parent
-        win.update_idletasks()
-        x = self.root.winfo_x() + (self.root.winfo_width()//2) - 225
-        y = self.root.winfo_y() + (self.root.winfo_height()//2) - 175
-        win.geometry(f"+{x}+{y}")
-        
-        # Ensure visibility
-        win.deiconify()
-        win.lift()
-        win.geometry(f"+{x}+{y}")
-        win_root = self._apply_custom_toplevel_chrome(win, "Add Account")
-        self._schedule_dialog_raise()
+        mgr = get_modal_manager(self.root)
+        if not mgr:
+            return
 
-        tk.Label(win_root, text="Add a new account", font=(FONT_FAMILY, 16, "bold"),
-                bg=COLORS['main_bg'], fg=COLORS['text_primary']).pack(pady=(30, 20))
-        
-        self._make_btn(win_root, "Microsoft Account", style="primary", font_size=11,
-                      width=25, command=lambda: self.show_microsoft_login(win)).pack(pady=5, ipady=4)
+        def build_content(body_frame, close_modal):
+            view_container = tk.Frame(body_frame, bg=COLORS['card_bg'])
+            view_container.pack(fill="both", expand=True, padx=20, pady=10)
 
-        accent_blue = COLORS.get('accent_blue', '#3498DB')
-        btn_ely = self._make_btn(win_root, "Ely.by Account", style="secondary", font_size=11,
-                                 width=25, command=lambda: self.show_elyby_login(win))
-        btn_ely.config(bg=accent_blue, activebackground=derive_hover_color(accent_blue))
-        btn_ely.bind("<Enter>", lambda e: btn_ely.config(bg=derive_hover_color(accent_blue)))
-        btn_ely.bind("<Leave>", lambda e: btn_ely.config(bg=accent_blue))
-        btn_ely.pack(pady=5, ipady=4)
+            def show_selection_view():
+                for w in view_container.winfo_children():
+                    w.destroy()
 
-        self._make_btn(win_root, "Offline Account", style="secondary", font_size=11,
-                      width=25, command=lambda: self.show_offline_login(win)).pack(pady=5, ipady=4)
+                tk.Label(view_container, text="Select account provider", font=(FONT_FAMILY, 12, "bold"),
+                         bg=COLORS['card_bg'], fg=COLORS['text_primary']).pack(pady=(10, 20))
+
+                self._make_btn(view_container, "Microsoft Account", style="primary", font_size=11,
+                               width=25, command=show_ms_view).pack(pady=6, ipady=4)
+
+                accent_blue = COLORS.get('accent_blue', '#3498DB')
+                btn_ely = self._make_btn(view_container, "Ely.by Account", style="secondary", font_size=11,
+                                         width=25, command=show_ely_view)
+                btn_ely.config(bg=accent_blue, activebackground=derive_hover_color(accent_blue))
+                btn_ely.bind("<Enter>", lambda e: btn_ely.config(bg=derive_hover_color(accent_blue)))
+                btn_ely.bind("<Leave>", lambda e: btn_ely.config(bg=accent_blue))
+                btn_ely.pack(pady=6, ipady=4)
+
+                self._make_btn(view_container, "Offline Account", style="secondary", font_size=11,
+                               width=25, command=show_offline_view).pack(pady=6, ipady=4)
+
+            def show_ms_view():
+                for w in view_container.winfo_children():
+                    w.destroy()
+
+                header = tk.Frame(view_container, bg=COLORS['card_bg'])
+                header.pack(fill="x", pady=(0, 10))
+                self._make_btn(header, "← Back", style="secondary", font_size=9, command=show_selection_view).pack(side="left")
+
+                status_lbl = tk.Label(view_container, text="Initializing...", font=(FONT_FAMILY, 10),
+                                     bg=COLORS['card_bg'], fg=COLORS['text_secondary'], wraplength=450)
+                status_lbl.pack(pady=10)
+
+                code_lbl = tk.Label(view_container, text="", font=(FONT_FAMILY, 24, "bold"),
+                                   bg=COLORS['card_bg'], fg=COLORS.get('accent_color', COLORS.get('play_btn_green', '#2ECC71')))
+                code_lbl.pack(pady=10)
+
+                url_lbl = tk.Label(view_container, text="", font=(FONT_FAMILY, 11, "underline"),
+                                  bg=COLORS['card_bg'], fg=COLORS.get('accent_blue', '#3498DB'), cursor="hand2")
+                url_lbl.pack(pady=5)
+
+                copy_btn = self._make_btn(view_container, "Copy Code", style="secondary", font_size=10)
+                copy_btn.config(state="disabled")
+                copy_btn.pack(pady=10)
+
+                def open_url(e):
+                    url = url_lbl.cget("text")
+                    if url: webbrowser.open(url)
+                url_lbl.bind("<Button-1>", open_url)
+
+                threading.Thread(target=self._start_microsoft_device_flow, args=(body_frame, status_lbl, code_lbl, url_lbl, copy_btn, close_modal), daemon=True).start()
+
+            def show_ely_view():
+                for w in view_container.winfo_children():
+                    w.destroy()
+
+                header = tk.Frame(view_container, bg=COLORS['card_bg'])
+                header.pack(fill="x", pady=(0, 10))
+                self._make_btn(header, "← Back", style="secondary", font_size=9, command=show_selection_view).pack(side="left")
+
+                frame = tk.Frame(view_container, bg=COLORS['card_bg'])
+                frame.pack(fill="x", padx=20, pady=10)
+
+                tk.Label(frame, text="Username / Email", font=(FONT_FAMILY, 9), bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(anchor="w")
+                user_entry = tk.Entry(frame, font=(FONT_FAMILY, 10), bg=COLORS['input_bg'], fg=COLORS['text_primary'], relief="flat")
+                user_entry.pack(fill="x", ipady=5, pady=(5, 12))
+
+                tk.Label(frame, text="Password", font=(FONT_FAMILY, 9), bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(anchor="w")
+                pass_entry = tk.Entry(frame, font=(FONT_FAMILY, 10), bg=COLORS['input_bg'], fg=COLORS['text_primary'], relief="flat", show="*")
+                pass_entry.pack(fill="x", ipady=5, pady=(5, 16))
+
+                def do_login():
+                    u = user_entry.get().strip()
+                    p = pass_entry.get().strip()
+                    if not u or not p:
+                        custom_showerror("Error", "Please fill all fields", parent=self.root)
+                        return
+                    res = ElyByAuth.authenticate(u, p)
+                    if "error" in res:
+                        custom_showerror("Login Failed", f"Could not login to Ely.by: {res['error']}", parent=self.root)
+                    else:
+                        profile = cast(dict, res.get("selectedProfile", {}))
+                        uuid_ = profile.get("id", "")
+                        name_ = profile.get("name", u)
+                        token = res.get("accessToken", "")
+                        skin_cache_path = self.fetch_elyby_skin(name_, uuid_, profile.get("properties", []))
+                        new_profile = {
+                            "name": name_,
+                            "type": "ely.by",
+                            "skin_path": skin_cache_path,
+                            "uuid": uuid_,
+                            "token": token
+                        }
+                        self.profiles.append(new_profile)
+                        self.current_profile_index = len(self.profiles) - 1
+                        self.update_active_profile()
+                        self.add_skin_to_history(skin_cache_path)
+                        self.save_config()
+                        close_modal()
+                        custom_showinfo("Success", f"Logged in as {name_}", parent=self.root)
+
+                self._make_btn(view_container, "Login", style="primary", font_size=11, bold=True,
+                              width=25, command=do_login).pack(pady=10, ipady=4)
+
+            def show_offline_view():
+                for w in view_container.winfo_children():
+                    w.destroy()
+
+                header = tk.Frame(view_container, bg=COLORS['card_bg'])
+                header.pack(fill="x", pady=(0, 10))
+                self._make_btn(header, "← Back", style="secondary", font_size=9, command=show_selection_view).pack(side="left")
+
+                tk.Label(view_container, text="Username", bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(anchor="w", padx=30, pady=(15, 0))
+                entry = tk.Entry(view_container, font=(FONT_FAMILY, 11), bg=COLORS['input_bg'], fg=COLORS['text_primary'], relief="flat", insertbackground="white")
+                entry.pack(fill="x", padx=30, pady=(5, 20), ipady=8)
+                entry.focus_set()
+
+                def save():
+                    name = entry.get().strip()
+                    if not name:
+                        custom_showerror("Error", "Username cannot be empty", parent=self.root)
+                        return
+                    new_profile = {
+                        "name": name,
+                        "type": "offline",
+                        "skin_path": "",
+                        "uuid": str(uuid.uuid4())
+                    }
+                    self.profiles.append(new_profile)
+                    self.current_profile_index = len(self.profiles) - 1
+                    self.update_active_profile()
+                    self.save_config()
+                    close_modal()
+                    custom_showinfo("Success", f"Offline profile '{name}' added", parent=self.root)
+
+                self._make_btn(view_container, "Add Profile", style="primary", font_size=11, bold=True,
+                              width=25, command=save).pack(pady=10, ipady=4)
+
+            show_selection_view()
+
+        mgr.show_modal("Add Account", build_content, width=500, height=420)
 
     def show_microsoft_login(self, parent):
         self._register_dialog_window(parent)
@@ -404,7 +515,7 @@ class AccountsScreenMixin:
         # Start Thread
         threading.Thread(target=self._start_microsoft_device_flow, args=(parent, status_lbl, code_lbl, url_lbl, copy_btn), daemon=True).start()
     
-    def _start_microsoft_device_flow(self, win, status, code_display, url_display, copy_btn):
+    def _start_microsoft_device_flow(self, win, status, code_display, url_display, copy_btn, close_modal=None):
         # 1. Request Device Code
         self.log("Starting Microsoft Account device flow login...")
         try:
@@ -446,7 +557,7 @@ class AccountsScreenMixin:
                  if r_poll.status_code == 200:
                      # Success
                      token_data = r_poll.json()
-                     self._finalize_microsoft_login(token_data, win, status)
+                     self._finalize_microsoft_login(token_data, win, status, close_modal=close_modal)
                      break
                  
                  err = r_poll.json()
@@ -468,7 +579,7 @@ class AccountsScreenMixin:
             logging.error("Device Flow Error", exc_info=True)
             if win.winfo_exists(): status.config(text=f"Exception: {e}", fg=COLORS['error_red'])
 
-    def _finalize_microsoft_login(self, token_data, win, status):
+    def _finalize_microsoft_login(self, token_data, win, status, close_modal=None):
         self.log("Finalizing Microsoft Login...")
         try:
             if not win.winfo_exists(): return
@@ -512,7 +623,10 @@ class AccountsScreenMixin:
             # Done
             if win.winfo_exists():
                 status.config(text="Login Successful!", fg=COLORS['success_green'])
-                win.after(1000, win.destroy)
+                if callable(close_modal):
+                    self.root.after(1000, close_modal)
+                elif hasattr(win, 'destroy'):
+                    win.after(1000, win.destroy)
                 
                 def on_finish():
                     self.update_active_profile()
