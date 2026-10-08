@@ -27,6 +27,7 @@ from nlc.net.http import get_http_session
 from nlc.net.downloader import _atomic_download
 from nlc.core.launch import safe_extract_zip as _safe_extract_zip
 from nlc.core.instances import export_modpack_to_mrpack, export_modpack_to_zip
+from nlc.net.mod_icons import get_mod_icon_manager
 
 logger = logging.getLogger(__name__)
 
@@ -271,7 +272,10 @@ class ModpacksScreenMixin:
              except: pass
              
         if count > 0:
-             messagebox.showinfo("Success", f"Installed {count} mods locally.")
+            if hasattr(self, 'toast_manager') and self.toast_manager:
+                self.toast_manager.show(f"Installed {count} mods locally.", kind="success")
+            elif hasattr(self, 'notifications') and self.notifications:
+                self.notifications.add("download", "Mods Installed", f"Installed {count} mods locally.")
 
     def delete_modpack(self, pack):
         if not messagebox.askyesno("Delete Modpack", f"Are you sure you want to delete '{pack['name']}'?"):
@@ -398,19 +402,19 @@ class ModpacksScreenMixin:
         def refresh_list():
             render_mods()
         
-        self._make_btn(actions, "📁 Open Folder", style="secondary", font_size=9,
+        self._make_btn(actions, "Open Folder", style="secondary", font_size=9,
                       command=open_folder).pack(side="left", padx=5)
 
-        self._make_btn(actions, "🔄 Refresh", style="secondary", font_size=9,
+        self._make_btn(actions, "Refresh", style="secondary", font_size=9,
                       command=refresh_list).pack(side="left")
 
         def show_export_menu():
             m = NeoContextMenu(self.root)
-            m.add_item("📤 Export as .mrpack", lambda: self.export_modpack(pack, format="mrpack"))
-            m.add_item("🗜 Export as .zip", lambda: self.export_modpack(pack, format="zip"))
+            m.add_item("Export as .mrpack", lambda: self.export_modpack(pack, format="mrpack"))
+            m.add_item("Export as .zip", lambda: self.export_modpack(pack, format="zip"))
             m.show_below(export_btn)
 
-        export_btn = self._make_btn(actions, "📤 Export", style="secondary", font_size=9,
+        export_btn = self._make_btn(actions, "Export", style="secondary", font_size=9,
                                     command=show_export_menu)
         export_btn.pack(side="left", padx=5)
 
@@ -424,8 +428,8 @@ class ModpacksScreenMixin:
         search_frame = tk.Frame(header, bg=COLORS['input_bg'], padx=10, pady=8)
         search_frame.pack(fill="x", pady=(10, 0))
         
-        tk.Label(search_frame, text="🔍", bg=COLORS['input_bg'], 
-                fg=COLORS['text_secondary']).pack(side="left")
+        tk.Label(search_frame, text="Search:", font=(FONT_FAMILY, 9, "bold"), bg=COLORS['input_bg'], 
+                fg=COLORS['text_secondary']).pack(side="left", padx=(0, 6))
         
         search_var = tk.StringVar()
         search_entry = tk.Entry(search_frame, textvariable=search_var, 
@@ -512,10 +516,10 @@ class ModpacksScreenMixin:
             after_id = layout_state.get("render_after_id")
             if after_id is not None:
                 try:
-                    dialog.after_cancel(after_id)
+                    dialog_root.after_cancel(after_id)
                 except Exception:
                     pass
-            layout_state["render_after_id"] = dialog.after(70, lambda: render_mods(reset_scroll=False))
+            layout_state["render_after_id"] = dialog_root.after(70, lambda: render_mods(reset_scroll=False))
 
         canvas.bind("<Configure>", on_canvas_configure)
         content_frame.bind("<Enter>", lambda e: self._bind_smooth_scroll(canvas, scroll_frame))
@@ -523,28 +527,30 @@ class ModpacksScreenMixin:
         scroll_frame.bind("<Enter>", lambda e: self._bind_smooth_scroll(canvas, scroll_frame))
         self._bind_wheel_events(canvas, lambda e, c=canvas: self._smooth_scroll(c, e), f"modpack_contents_{id(canvas)}")
 
+        mod_icon_mgr = get_mod_icon_manager()
+
         def get_mod_display_data(filename):
-            display_name = filename[:-4] if filename.endswith('.jar') else filename
-            initial = filename[0].upper() if filename else "M"
-            colors = ["#3498DB", "#E67E22", "#9B59B6", "#2ECC71", "#E74C3C", "#F39C12"]
-            icon_color = colors[ord(initial) % len(colors)]
+            is_enabled = not filename.lower().endswith(".disabled")
+            clean_name = filename
+            if clean_name.lower().endswith(".jar.disabled"):
+                clean_name = clean_name[:-13]
+            elif clean_name.lower().endswith(".jar"):
+                clean_name = clean_name[:-4]
+
+            size_bytes = layout_state["file_metadata"].get(filename, 0)
             size_str = ""
-            try:
-                size_bytes = layout_state["file_metadata"].get(filename, 0)
-                if size_bytes < 1024:
-                    size_str = f"{size_bytes} B"
-                elif size_bytes < 1024 * 1024:
-                    size_str = f"{size_bytes / 1024:.1f} KB"
-                else:
-                    size_str = f"{size_bytes / (1024 * 1024):.1f} MB"
-            except Exception:
-                pass
-            return display_name, initial, icon_color, size_str
+            if size_bytes < 1024:
+                size_str = f"{size_bytes} B"
+            elif size_bytes < 1024 * 1024:
+                size_str = f"{size_bytes / 1024:.1f} KB"
+            else:
+                size_str = f"{size_bytes / (1024 * 1024):.1f} MB"
+            return clean_name, is_enabled, size_str
 
         def delete_mod(filename, display_name):
             if custom_askyesno("Delete Mod",
                               f"Are you sure you want to delete '{display_name}'?",
-                              parent=dialog):
+                              parent=dialog_root):
                 try:
                     os.remove(os.path.join(mods_dir, filename))
                     rem_meta = next((m for m in pack.get('mods', []) if m.get('filename') == filename), None)
@@ -553,23 +559,42 @@ class ModpacksScreenMixin:
                         self.save_modpacks()
                     render_mods(reset_scroll=False)
                 except Exception as e:
-                    custom_showerror("Error", f"Failed to delete mod: {e}", parent=dialog)
+                    custom_showerror("Error", f"Failed to delete mod: {e}", parent=dialog_root)
 
-        def bind_hover_surfaces(card, surfaces, info_widgets, del_btn):
+        def toggle_mod(filename, is_enabled, on_toggle_done=None):
+            old_path = os.path.join(mods_dir, filename)
+            if is_enabled:
+                new_filename = filename + ".disabled"
+            else:
+                new_filename = filename[:-9] if filename.endswith(".disabled") else filename
+            new_path = os.path.join(mods_dir, new_filename)
+            try:
+                os.rename(old_path, new_path)
+                if filename in layout_state["file_metadata"]:
+                    layout_state["file_metadata"][new_filename] = layout_state["file_metadata"].pop(filename)
+                if on_toggle_done:
+                    on_toggle_done(new_filename, not is_enabled)
+                else:
+                    render_mods(reset_scroll=False)
+            except Exception as e:
+                custom_showerror("Toggle Mod", f"Could not toggle mod: {e}", parent=dialog_root)
+
+        def bind_hover_surfaces(card, surfaces, info_widgets, del_btn, toggle_btn=None):
             card_hover_bg = COLORS.get('card_hover', COLORS.get('hover_bg', '#3A3F4D'))
             def on_enter_card(_event):
                 for surface in surfaces:
                     surface.config(bg=card_hover_bg)
                 for widget in info_widgets:
-                    widget.config(bg=card_hover_bg) # type: ignore[arg-type]
+                    widget.config(bg=card_hover_bg)
 
             def on_leave_card(event):
-                if del_btn.winfo_containing(event.x_root, event.y_root) == del_btn:
-                    return
+                for btn in (del_btn, toggle_btn):
+                    if btn and btn.winfo_containing(event.x_root, event.y_root) == btn:
+                        return
                 for surface in surfaces:
                     surface.config(bg=COLORS['card_bg'])
                 for widget in info_widgets:
-                    widget.config(bg=COLORS['card_bg']) # type: ignore[arg-type]
+                    widget.config(bg=COLORS['card_bg'])
 
             for surface in surfaces:
                 surface.bind("<Enter>", on_enter_card)
@@ -578,96 +603,244 @@ class ModpacksScreenMixin:
         def create_remove_button(parent, command):
             danger_subtle = COLORS.get('input_bg', '#2E333E')
             danger_red = COLORS.get('error_red', '#EF4444')
-            del_btn = tk.Button(parent, text="Remove", font=("Segoe UI", 9, "bold"),
+            del_btn = tk.Button(parent, text="Remove", font=(FONT_FAMILY, 8, "bold"),
                                bg=danger_subtle, fg=danger_red, relief="flat", bd=0,
-                               cursor="hand2", command=command)
+                               cursor="hand2", padx=8, pady=3, command=command)
             del_btn.bind("<Enter>", lambda _e: del_btn.config(bg=danger_red, fg="white"))
             del_btn.bind("<Leave>", lambda _e: del_btn.config(bg=danger_subtle, fg=danger_red))
             return del_btn
 
+        def create_toggle_switch(parent, is_enabled, command):
+            active_col = COLORS.get('play_btn_green', COLORS.get('accent_color', '#2ECC71'))
+            off_bg = COLORS.get('input_bg', '#2E333E')
+            btn = tk.Button(
+                parent,
+                text="ON" if is_enabled else "OFF",
+                font=(FONT_FAMILY, 8, "bold"),
+                bg=active_col if is_enabled else off_bg,
+                fg="#FFFFFF" if is_enabled else COLORS.get('text_secondary', '#A6ACB8'),
+                relief="flat",
+                bd=0,
+                padx=8,
+                pady=2,
+                cursor="hand2",
+                command=command
+            )
+            return btn
+
         def create_mod_grid_card(parent, filename, row, col):
-            display_name, initial, icon_color, size_str = get_mod_display_data(filename)
-            card = tk.Frame(parent, bg=COLORS['card_bg'], padx=12, pady=10, width=220, height=128)
+            clean_name, is_enabled, size_str = get_mod_display_data(filename)
+            card_state = {"filename": filename, "is_enabled": is_enabled}
+
+            card_border = COLORS.get('play_btn_green', COLORS.get('accent_color', '#2ECC71')) if is_enabled else COLORS.get('card_border', '#2A303F')
+            card = tk.Frame(parent, bg=COLORS['card_bg'], padx=12, pady=10, width=240, height=138,
+                            highlightthickness=1, highlightbackground=card_border)
             card.grid(row=row, column=col, padx=8, pady=8, sticky="nsew")
             card.grid_propagate(False)
 
-            left = tk.Frame(card, bg=COLORS['card_bg'])
-            left.pack(fill="both", expand=True)
+            top_row = tk.Frame(card, bg=COLORS['card_bg'])
+            top_row.pack(fill="x")
 
-            icon = tk.Label(left, text=initial, font=("Segoe UI", 14, "bold"),
-                           bg=icon_color, fg="white", width=2, height=1)
-            icon.pack(anchor="w")
+            # Icon on top-left (40x40)
+            placeholder_photo = mod_icon_mgr.get_placeholder_photo((40, 40))
+            icon_lbl = tk.Label(top_row, bg=COLORS['card_bg'], image=placeholder_photo, bd=0)
+            icon_lbl.image = placeholder_photo
+            icon_lbl.pack(side="left")
 
-            info = tk.Frame(left, bg=COLORS['card_bg'])
-            info.pack(fill="both", expand=True, pady=(8, 0))
+            jar_path = os.path.join(mods_dir, filename)
+            real_photo = mod_icon_mgr.get_icon_async(
+                jar_path,
+                icon_lbl,
+                lambda p, lbl=icon_lbl: (lbl.config(image=p), setattr(lbl, 'image', p)) if (lbl.winfo_exists() and p) else None,
+                size=(40, 40)
+            )
+            if real_photo:
+                icon_lbl.config(image=real_photo)
+                icon_lbl.image = real_photo
 
-            name_lbl = tk.Label(info, text=display_name, font=("Segoe UI", 11, "bold"),
-                               bg=COLORS['card_bg'], fg=COLORS['text_primary'], anchor="w",
-                               wraplength=190, justify="left")
+            # Badge & Toggle on top-right
+            status_box = tk.Frame(top_row, bg=COLORS['card_bg'])
+            status_box.pack(side="right", anchor="ne")
+
+            status_lbl = tk.Label(
+                status_box,
+                text="Active" if is_enabled else "Disabled",
+                font=(FONT_FAMILY, 8, "bold"),
+                bg=COLORS['card_bg'],
+                fg=COLORS.get('play_btn_green', '#2ECC71') if is_enabled else COLORS.get('text_secondary', '#A6ACB8')
+            )
+            status_lbl.pack(side="top", anchor="e", pady=(0, 2))
+
+            def on_toggle_click():
+                curr_f = card_state["filename"]
+                curr_en = card_state["is_enabled"]
+                def on_done(new_f, new_en):
+                    card_state["filename"] = new_f
+                    card_state["is_enabled"] = new_en
+                    active_c = COLORS.get('play_btn_green', COLORS.get('accent_color', '#2ECC71'))
+                    off_b = COLORS.get('input_bg', '#2E333E')
+                    t_btn.config(
+                        text="ON" if new_en else "OFF",
+                        bg=active_c if new_en else off_b,
+                        fg="#FFFFFF" if new_en else COLORS.get('text_secondary', '#A6ACB8')
+                    )
+                    status_lbl.config(
+                        text="Active" if new_en else "Disabled",
+                        fg=active_c if new_en else COLORS.get('text_secondary', '#A6ACB8')
+                    )
+                    card.config(highlightbackground=active_c if new_en else COLORS.get('card_border', '#2A303F'))
+                    name_lbl.config(fg=COLORS['text_primary'] if new_en else COLORS.get('text_secondary', '#A6ACB8'))
+                toggle_mod(curr_f, curr_en, on_done)
+
+            t_btn = create_toggle_switch(status_box, is_enabled, on_toggle_click)
+            t_btn.pack(side="bottom", anchor="e")
+
+            # Title and metadata in middle
+            info = tk.Frame(card, bg=COLORS['card_bg'])
+            info.pack(fill="x", pady=(8, 0))
+
+            name_lbl = tk.Label(
+                info,
+                text=clean_name,
+                font=(FONT_FAMILY, 10, "bold"),
+                bg=COLORS['card_bg'],
+                fg=COLORS['text_primary'] if is_enabled else COLORS.get('text_secondary', '#A6ACB8'),
+                anchor="w",
+                wraplength=210,
+                justify="left"
+            )
             name_lbl.pack(fill="x")
 
-            size_lbl = None
-            if size_str:
-                size_lbl = tk.Label(info, text=f"Size: {size_str}", font=("Segoe UI", 9),
-                                   bg=COLORS['card_bg'], fg=COLORS['text_secondary'], anchor="w")
-                size_lbl.pack(fill="x", pady=(4, 0))
+            meta_lbl = tk.Label(
+                info,
+                text=f"Size: {size_str}" if size_str else "",
+                font=(FONT_FAMILY, 8),
+                bg=COLORS['card_bg'],
+                fg=COLORS.get('text_secondary', '#A6ACB8'),
+                anchor="w"
+            )
+            meta_lbl.pack(fill="x", pady=(2, 0))
 
+            # Bottom actions row
             actions_row = tk.Frame(card, bg=COLORS['card_bg'])
-            actions_row.pack(fill="x", pady=(6, 0))
-            del_btn = create_remove_button(actions_row, lambda f=filename, d=display_name: delete_mod(f, d))
+            actions_row.pack(side="bottom", fill="x")
+
+            del_btn = create_remove_button(actions_row, lambda: delete_mod(card_state["filename"], clean_name))
             del_btn.pack(side="right")
 
-            info_widgets = [name_lbl]
-            if size_lbl is not None:
-                info_widgets.append(size_lbl)
-            bind_hover_surfaces(card, [card, left, info, actions_row], info_widgets, del_btn)
+            bind_hover_surfaces(card, [card, top_row, status_box, info, actions_row], [status_lbl, name_lbl, meta_lbl], del_btn, t_btn)
 
-            def show_mod_card_menu(event, f=filename, d=display_name):
+            def show_mod_card_menu(event):
                 m = NeoContextMenu(self.root)
-                m.add_item("📁 Open Mods Folder", lambda: open_path_in_system(mods_dir))
+                m.add_item("Toggle (ON/OFF)", on_toggle_click)
+                m.add_item("Open Mods Folder", lambda: open_path_in_system(mods_dir))
                 m.add_separator()
-                m.add_item("🗑 Remove Mod", lambda: delete_mod(f, d), is_danger=True)
+                m.add_item("Remove Mod", lambda: delete_mod(card_state["filename"], clean_name), is_danger=True)
                 m.show_at(event.x_root, event.y_root)
 
             attach_context_menu(card, show_mod_card_menu)
             self._bind_smooth_scroll(canvas, card)
 
         def create_mod_list_row(parent, filename):
-            display_name, initial, icon_color, size_str = get_mod_display_data(filename)
-            row = tk.Frame(parent, bg=COLORS['card_bg'], padx=14, pady=12)
-            row.pack(fill="x", padx=12, pady=6)
+            clean_name, is_enabled, size_str = get_mod_display_data(filename)
+            card_state = {"filename": filename, "is_enabled": is_enabled}
+
+            card_border = COLORS.get('play_btn_green', COLORS.get('accent_color', '#2ECC71')) if is_enabled else COLORS.get('card_border', '#2A303F')
+            row = tk.Frame(parent, bg=COLORS['card_bg'], padx=14, pady=10,
+                           highlightthickness=1, highlightbackground=card_border)
+            row.pack(fill="x", padx=12, pady=5)
 
             left = tk.Frame(row, bg=COLORS['card_bg'])
             left.pack(side="left", fill="both", expand=True)
 
-            icon = tk.Label(left, text=initial, font=("Segoe UI", 14, "bold"),
-                           bg=icon_color, fg="white", width=2, height=1)
-            icon.pack(side="left", padx=(0, 12))
+            # Icon (36x36)
+            placeholder_photo = mod_icon_mgr.get_placeholder_photo((36, 36))
+            icon_lbl = tk.Label(left, bg=COLORS['card_bg'], image=placeholder_photo, bd=0)
+            icon_lbl.image = placeholder_photo
+            icon_lbl.pack(side="left", padx=(0, 12))
+
+            jar_path = os.path.join(mods_dir, filename)
+            real_photo = mod_icon_mgr.get_icon_async(
+                jar_path,
+                icon_lbl,
+                lambda p, lbl=icon_lbl: (lbl.config(image=p), setattr(lbl, 'image', p)) if (lbl.winfo_exists() and p) else None,
+                size=(36, 36)
+            )
+            if real_photo:
+                icon_lbl.config(image=real_photo)
+                icon_lbl.image = real_photo
 
             info = tk.Frame(left, bg=COLORS['card_bg'])
             info.pack(side="left", fill="both", expand=True)
 
-            name_lbl = tk.Label(info, text=display_name, font=("Segoe UI", 11, "bold"),
-                               bg=COLORS['card_bg'], fg=COLORS['text_primary'], anchor="w")
+            name_lbl = tk.Label(
+                info,
+                text=clean_name,
+                font=(FONT_FAMILY, 10, "bold"),
+                bg=COLORS['card_bg'],
+                fg=COLORS['text_primary'] if is_enabled else COLORS.get('text_secondary', '#A6ACB8'),
+                anchor="w"
+            )
             name_lbl.pack(fill="x")
 
             meta_text = filename if not size_str else f"{filename}  •  {size_str}"
-            meta_lbl = tk.Label(info, text=meta_text, font=("Segoe UI", 9),
-                               bg=COLORS['card_bg'], fg=COLORS['text_secondary'], anchor="w")
-            meta_lbl.pack(fill="x", pady=(3, 0))
+            meta_lbl = tk.Label(
+                info,
+                text=meta_text,
+                font=(FONT_FAMILY, 8),
+                bg=COLORS['card_bg'],
+                fg=COLORS.get('text_secondary', '#A6ACB8'),
+                anchor="w"
+            )
+            meta_lbl.pack(fill="x", pady=(2, 0))
 
             actions_row = tk.Frame(row, bg=COLORS['card_bg'])
             actions_row.pack(side="right", padx=(10, 0))
-            del_btn = create_remove_button(actions_row, lambda f=filename, d=display_name: delete_mod(f, d))
-            del_btn.pack()
 
-            bind_hover_surfaces(row, [row, left, info, actions_row], [name_lbl, meta_lbl], del_btn)
+            status_lbl = tk.Label(
+                actions_row,
+                text="Active" if is_enabled else "Disabled",
+                font=(FONT_FAMILY, 8, "bold"),
+                bg=COLORS['card_bg'],
+                fg=COLORS.get('play_btn_green', '#2ECC71') if is_enabled else COLORS.get('text_secondary', '#A6ACB8')
+            )
+            status_lbl.pack(side="left", padx=(0, 10))
 
-            def show_mod_row_menu(event, f=filename, d=display_name):
+            def on_toggle_click():
+                curr_f = card_state["filename"]
+                curr_en = card_state["is_enabled"]
+                def on_done(new_f, new_en):
+                    card_state["filename"] = new_f
+                    card_state["is_enabled"] = new_en
+                    active_c = COLORS.get('play_btn_green', COLORS.get('accent_color', '#2ECC71'))
+                    off_b = COLORS.get('input_bg', '#2E333E')
+                    t_btn.config(
+                        text="ON" if new_en else "OFF",
+                        bg=active_c if new_en else off_b,
+                        fg="#FFFFFF" if new_en else COLORS.get('text_secondary', '#A6ACB8')
+                    )
+                    status_lbl.config(
+                        text="Active" if new_en else "Disabled",
+                        fg=active_c if new_en else COLORS.get('text_secondary', '#A6ACB8')
+                    )
+                    row.config(highlightbackground=active_c if new_en else COLORS.get('card_border', '#2A303F'))
+                    name_lbl.config(fg=COLORS['text_primary'] if new_en else COLORS.get('text_secondary', '#A6ACB8'))
+                toggle_mod(curr_f, curr_en, on_done)
+
+            t_btn = create_toggle_switch(actions_row, is_enabled, on_toggle_click)
+            t_btn.pack(side="left", padx=(0, 10))
+
+            del_btn = create_remove_button(actions_row, lambda: delete_mod(card_state["filename"], clean_name))
+            del_btn.pack(side="left")
+
+            bind_hover_surfaces(row, [row, left, info, actions_row], [status_lbl, name_lbl, meta_lbl], del_btn, t_btn)
+
+            def show_mod_row_menu(event):
                 m = NeoContextMenu(self.root)
-                m.add_item("📁 Open Mods Folder", lambda: open_path_in_system(mods_dir))
+                m.add_item("Toggle (ON/OFF)", on_toggle_click)
+                m.add_item("Open Mods Folder", lambda: open_path_in_system(mods_dir))
                 m.add_separator()
-                m.add_item("🗑 Remove Mod", lambda: delete_mod(f, d), is_danger=True)
+                m.add_item("Remove Mod", lambda: delete_mod(card_state["filename"], clean_name), is_danger=True)
                 m.show_at(event.x_root, event.y_root)
 
             attach_context_menu(row, show_mod_row_menu)
@@ -697,14 +870,15 @@ class ModpacksScreenMixin:
             for widget in scroll_frame.winfo_children():
                 widget.destroy()
 
-            # One scandir/stat pass per redraw keeps filtering responsive even
-            # for large modpacks.  The previous implementation re-opened each
-            # file again while building every card.
+            # Scan both .jar (enabled) and .jar.disabled (disabled) files
             file_metadata = {}
             with os.scandir(mods_dir) as entries:
                 files = []
                 for entry in entries:
-                    if not entry.is_file() or not entry.name.lower().endswith(".jar"):
+                    if not entry.is_file():
+                        continue
+                    lower = entry.name.lower()
+                    if not (lower.endswith(".jar") or lower.endswith(".jar.disabled")):
                         continue
                     try:
                         file_metadata[entry.name] = entry.stat().st_size
@@ -720,7 +894,7 @@ class ModpacksScreenMixin:
             count_label = tk.Label(
                 scroll_frame,
                 text=f"{len(files)} mod{'s' if len(files) != 1 else ''} installed",
-                font=("Segoe UI", 10),
+                font=(FONT_FAMILY, 10, "bold"),
                 bg=COLORS['main_bg'],
                 fg=COLORS['text_secondary'],
             )
@@ -730,17 +904,14 @@ class ModpacksScreenMixin:
                 empty_frame = tk.Frame(scroll_frame, bg=COLORS['main_bg'])
                 empty_frame.pack(fill="both", expand=True, pady=50)
 
-                tk.Label(empty_frame, text="📦", font=("Segoe UI", 48),
-                        bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack()
-
-                msg = "No mods found" if not search_term else "No mods match your search"
-                tk.Label(empty_frame, text=msg, font=("Segoe UI", 12),
+                msg = "No mods found in this modpack." if not search_term else "No mods match your search."
+                tk.Label(empty_frame, text=msg, font=(FONT_FAMILY, 12, "bold"),
                         bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(pady=10)
 
                 if not search_term:
-                    tk.Label(empty_frame, text="Use the + button to add mods",
-                            font=("Segoe UI", 10), bg=COLORS['main_bg'],
-                            fg=COLORS['text_secondary']).pack()
+                    tk.Label(empty_frame, text="Use 'Install Local Mods' or browse mods to add mods.",
+                            font=(FONT_FAMILY, 10), bg=COLORS['main_bg'],
+                            fg=COLORS.get('text_muted', '#6B7280')).pack()
             elif view_mode_var.get() == "list":
                 layout_state["cols"] = None
                 list_wrap = tk.Frame(scroll_frame, bg=COLORS['main_bg'])

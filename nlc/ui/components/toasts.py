@@ -12,6 +12,13 @@ from nlc.ui.components.radial_progress import RadialProgress
 logger = logging.getLogger(__name__)
 
 
+def _truncate_toast_text(text: str, max_chars: int = 34) -> str:
+    """Safely truncate long strings with ellipsis to avoid UI stretch and eye fatigue."""
+    if not text or len(text) <= max_chars:
+        return text
+    return text[:max_chars - 3].rstrip() + "..."
+
+
 class PopupManager:
     """Manages application dialogs with duplicate suppression."""
     def __init__(self, root: tk.Tk):
@@ -157,9 +164,12 @@ class ToastManager:
             highlightthickness=1,
             highlightbackground=border_col,
             padx=12,
-            pady=10
+            pady=10,
+            width=352,
+            height=68
         )
-        toast_card.pack(side="top", pady=4, fill="x", anchor="e")
+        toast_card.pack_propagate(False)
+        toast_card.pack(side="top", pady=4, anchor="e")
 
         # Radial Progress widget on the left
         radial = RadialProgress(toast_card, size=42, line_width=3, bg=card_bg)
@@ -174,7 +184,7 @@ class ToastManager:
 
         lbl_title = tk.Label(
             info,
-            text=title,
+            text=_truncate_toast_text(title, 32),
             font=(FONT_FAMILY, 9, "bold"),
             bg=card_bg,
             fg=COLORS.get("text_primary", "#FFFFFF"),
@@ -184,7 +194,7 @@ class ToastManager:
 
         lbl_detail = tk.Label(
             info,
-            text=detail,
+            text=_truncate_toast_text(detail, 36),
             font=(FONT_FAMILY, 8),
             bg=card_bg,
             fg=COLORS.get("text_secondary", "#A6ACB8"),
@@ -248,7 +258,8 @@ class ToastManager:
         self,
         task_id: str,
         progress: Optional[float] = None,
-        detail: Optional[str] = None
+        detail: Optional[str] = None,
+        title: Optional[str] = None
     ):
         """Update the radial progress percentage or status message of an active download toast."""
         entry = self._download_toasts.get(task_id)
@@ -257,8 +268,10 @@ class ToastManager:
         radial: RadialProgress = entry["radial"]
         if progress is not None:
             radial.set_progress(progress)
+        if title and entry.get("title_lbl") and entry["title_lbl"].winfo_exists():
+            entry["title_lbl"].config(text=_truncate_toast_text(title, 32))
         if detail and entry["detail_lbl"].winfo_exists():
-            entry["detail_lbl"].config(text=detail)
+            entry["detail_lbl"].config(text=_truncate_toast_text(detail, 36))
 
     def complete_download_toast(self, task_id: str, message: str = "Completed ✓"):
         """Display 100% completion with green checkmark and auto-dismiss after 2.5 seconds."""
@@ -269,7 +282,7 @@ class ToastManager:
         radial.set_success()
         if entry["detail_lbl"].winfo_exists():
             entry["detail_lbl"].config(
-                text=message,
+                text=_truncate_toast_text(message, 36),
                 fg=COLORS.get("accent_color", "#2ECC71")
             )
         card = entry["card"]
@@ -349,9 +362,12 @@ class ToastManager:
             highlightthickness=1,
             highlightbackground=accent,
             padx=14,
-            pady=12
+            pady=10,
+            width=352,
+            height=68
         )
-        toast_card.pack(side="top", pady=4, fill="x", anchor="e")
+        toast_card.pack_propagate(False)
+        toast_card.pack(side="top", pady=4, anchor="e")
 
         # Clock / Timer graphic on left
         clock_canvas = tk.Canvas(toast_card, width=44, height=44, bg=card_bg, highlightthickness=0)
@@ -451,9 +467,12 @@ class ToastManager:
             highlightthickness=1,
             highlightbackground=upd_col,
             padx=14,
-            pady=12
+            pady=10,
+            width=352,
+            height=68
         )
-        toast_card.pack(side="top", pady=4, fill="x", anchor="e")
+        toast_card.pack_propagate(False)
+        toast_card.pack(side="top", pady=4, anchor="e")
 
         # Arrow up graphic
         arrow_canvas = tk.Canvas(toast_card, width=40, height=40, bg=card_bg, highlightthickness=0)

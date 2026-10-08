@@ -1066,7 +1066,6 @@ class ModsScreenMixin:
              self.root.after(0, lambda: [
                  self.refresh_modpacks_list(),
                  self.update_active_modpack_dropdown(),
-                 messagebox.showinfo("Success", f"Installed modpack '{pack_name}' ({version_name})"),
                  btn_widget.destroy()
              ])
              
