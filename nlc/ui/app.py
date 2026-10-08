@@ -5570,29 +5570,45 @@ class MinecraftLauncher(
             # Cache key for rendered skin
             cache_key = (self.skin_path, model, h)
             
-            # Check if we already have this rendered (optimization)
+            self.preview_canvas.delete("all")
+
+            # Draw 3D Showcase Pedestal
+            pedestal_y = int(h * 0.86)
+            pw, ph = int(min(w * 0.75, 240)), 32
+            self.preview_canvas.create_oval(
+                (w - pw) // 2, pedestal_y - ph // 2,
+                (w + pw) // 2, pedestal_y + ph // 2,
+                fill=COLORS.get('input_bg', '#151821'),
+                outline=COLORS.get('card_border', '#2F3647'),
+                width=2
+            )
+            inner_pw, inner_ph = int(pw * 0.76), 22
+            self.preview_canvas.create_oval(
+                (w - inner_pw) // 2, pedestal_y - inner_ph // 2,
+                (w + inner_pw) // 2, pedestal_y + inner_ph // 2,
+                fill=COLORS.get('card_bg', '#1A1E29'),
+                outline=COLORS.get('accent_color', '#2ECC71'),
+                width=1
+            )
+
+            # Check if we already have this rendered in cache
             if hasattr(self, '_preview_cache') and cache_key in self._preview_cache:
                 self.preview_photo = self._preview_cache[cache_key]
-                self.preview_canvas.delete("all")
-                self.preview_canvas.create_image(w//2, h//2, image=self.preview_photo, anchor="center")
+                self.preview_canvas.create_image(w // 2, pedestal_y - int(h * 0.44), image=self.preview_photo, anchor="center")
                 return
-            
-            rendered = SkinRenderer3D.render(self.skin_path, model, height=int(h * 0.9))
+
+            rendered = SkinRenderer3D.render(self.skin_path, model, height=int(h * 0.82))
             if rendered:
                 self.preview_photo = ImageTk.PhotoImage(rendered)
-                
-                # Cache the rendered image
+
                 if not hasattr(self, '_preview_cache'):
                     self._preview_cache = {}
                 self._preview_cache[cache_key] = self.preview_photo
-                
-                # Limit cache size
+
                 if len(self._preview_cache) > 10:
-                    # Remove oldest (first) entry
                     self._preview_cache.pop(next(iter(self._preview_cache)))
-                
-                self.preview_canvas.delete("all")
-                self.preview_canvas.create_image(w//2, h//2, image=self.preview_photo, anchor="center")
+
+                self.preview_canvas.create_image(w // 2, pedestal_y - int(h * 0.44), image=self.preview_photo, anchor="center")
         except Exception as e:
             print(f"Preview Error: {e}")
 
