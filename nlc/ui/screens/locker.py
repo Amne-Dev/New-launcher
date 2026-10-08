@@ -41,8 +41,21 @@ class LockerScreenMixin:
         header.pack(fill="x")
         self.locker_header = header
 
+        # Segmented Pill Nav (Packed right first so it is never clipped on narrower windows)
+        self.locker_view = tk.StringVar(value="Skins")
+        self.locker_nav_frame = tk.Frame(
+            header,
+            bg=COLORS.get('input_bg', '#1E222B'),
+            padx=3,
+            pady=3,
+            highlightthickness=1,
+            highlightbackground=COLORS.get('card_border', '#2A303F')
+        )
+        self.locker_nav_frame.pack(side="right")
+        self.locker_btn_frame = self.locker_nav_frame  # Backwards compatibility
+
         title_box = tk.Frame(header, bg=COLORS['main_bg'])
-        title_box.pack(side="left")
+        title_box.pack(side="left", fill="x", expand=True)
 
         self.locker_title_lbl = tk.Label(
             title_box,
@@ -72,19 +85,6 @@ class LockerScreenMixin:
         self._is_dragging = False
         self.account_capes: List[Dict[str, Any]] = []
         self.current_cape_path: Optional[str] = None
-
-        # Segmented Pill Nav
-        self.locker_view = tk.StringVar(value="Skins")
-        self.locker_nav_frame = tk.Frame(
-            header,
-            bg=COLORS.get('input_bg', '#1E222B'),
-            padx=3,
-            pady=3,
-            highlightthickness=1,
-            highlightbackground=COLORS.get('card_border', '#2A303F')
-        )
-        self.locker_nav_frame.pack(side="right")
-        self.locker_btn_frame = self.locker_nav_frame  # Backwards compatibility
 
         self.locker_btns = {}
         self.update_locker_subtabs()
@@ -1244,33 +1244,69 @@ class LockerScreenMixin:
             return
 
         token = p.get("access_token")
+
+        # Synchronously check cached capes first for instantaneous zero-latency UI display
+        cached_capes = p.get("owned_capes", [])
+        if not cached_capes:
+            capes_dir = os.path.join(get_launcher_data_dir(), "capes")
+            if os.path.exists(capes_dir):
+                detected = []
+                for fname in sorted(os.listdir(capes_dir)):
+                    if fname.endswith(".png"):
+                        alias = fname[:-4].capitalize()
+                        c_path = os.path.join(capes_dir, fname)
+                        state = "ACTIVE" if c_path == p.get("cape_path") else "INACTIVE"
+                        detected.append({
+                            "id": f"cached-{fname[:-4]}",
+                            "state": state,
+                            "alias": alias,
+                            "local_path": c_path
+                        })
+                if detected:
+                    cached_capes = detected
+                    p["owned_capes"] = detected
+
+        if cached_capes:
+            self.account_capes = cached_capes
+            if p.get("cape_path") and os.path.exists(p.get("cape_path")):
+                self.current_cape_path = p.get("cape_path")
+            self.update_locker_subtabs()
+
         if not token:
             return
 
         def _fetch_worker():
             capes = fetch_account_capes(token)
             active_path = None
-            for c in capes:
-                alias = c.get("alias", "cape")
-                c_path = download_and_cache_cape(c.get("url", ""), alias)
-                c["local_path"] = c_path
-                if c.get("state") == "ACTIVE":
-                    active_path = c_path
+            if capes:
+                for c in capes:
+                    alias = c.get("alias", "cape")
+                    c_path = download_and_cache_cape(c.get("url", ""), alias)
+                    c["local_path"] = c_path
+                    if c.get("state") == "ACTIVE":
+                        active_path = c_path
 
             def _on_done():
-                self.account_capes = capes
-                if active_path:
-                    self.current_cape_path = active_path
-                    p["cape_path"] = active_path
-                elif p.get("cape_path") and os.path.exists(p.get("cape_path")):
-                    self.current_cape_path = p.get("cape_path")
+                if capes:
+                    self.account_capes = capes
+                    p["owned_capes"] = capes
+                    if active_path:
+                        self.current_cape_path = active_path
+                        p["cape_path"] = active_path
+                    elif p.get("cape_path") and os.path.exists(p.get("cape_path")):
+                        self.current_cape_path = p.get("cape_path")
+                    if hasattr(self, 'save_config'):
+                        self.save_config()
                 self.update_locker_subtabs()
                 self.render_3d_stage_frame()
                 if getattr(self, 'locker_view', None) and self.locker_view.get() == "Capes":
                     self.refresh_locker_view()
 
-            if hasattr(self, 'root') and self.root.winfo_exists():
-                self.root.after(0, _on_done)
+            try:
+                if hasattr(self, 'root') and self.root.winfo_exists():
+                    self.root.after(0, _on_done)
+            except Exception:
+                pass
 
         threading.Thread(target=_fetch_worker, daemon=True).start()
 
