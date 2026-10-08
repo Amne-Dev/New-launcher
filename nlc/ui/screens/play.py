@@ -245,7 +245,7 @@ class PlayScreenMixin:
                       bg=COLORS['card_bg'], fg=COLORS['text_primary'], anchor="w", padx=10, pady=8)
         btn.pack(fill="x")
         btn.bind("<Button-1>", lambda e: do_force())
-        btn.bind("<Enter>", lambda e: btn.config(bg="#454545"))
+        btn.bind("<Enter>", lambda e: btn.config(bg=COLORS.get('hover_bg', '#3A3F4D')))
         btn.bind("<Leave>", lambda e: btn.config(bg=COLORS['card_bg']))
 
         # Close on click outside or Escape
