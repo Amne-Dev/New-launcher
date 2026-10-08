@@ -114,3 +114,25 @@ def is_version_installed(version_id: str) -> bool:
     mc_dir = Path(get_minecraft_dir())
     json_path = mc_dir / "versions" / version_id / f"{version_id}.json"
     return json_path.exists()
+
+
+def open_path_in_system(path: str | Path) -> bool:
+    """Open folder or file in the OS default file manager across Linux, Windows, macOS."""
+    try:
+        p = Path(path).resolve()
+        if not p.exists():
+            return False
+        path_str = str(p)
+        if sys.platform.startswith("win"):
+            os.startfile(path_str)  # type: ignore[attr-defined]
+            return True
+        elif sys.platform.startswith("darwin"):
+            import subprocess
+            subprocess.Popen(["open", path_str])
+            return True
+        else:
+            import subprocess
+            subprocess.Popen(["xdg-open", path_str])
+            return True
+    except Exception:
+        return False
