@@ -32,6 +32,7 @@ DEFAULT_INSTALLATION = {
     "java_executable": "",
     "resolution_width": None,
     "resolution_height": None,
+    "game_directory": "",
     "last_played": "Never",
     "created": "2024-01-01"
 }
@@ -50,6 +51,12 @@ def get_default_config() -> Dict[str, Any]:
         "minimize_to_tray": False,
         "rpc_enabled": True,
         "streamer_mode": False,
+        "instances": {
+            "share_resourcepacks": True,
+            "share_shaderpacks": True,
+            "share_worlds": False,
+            "share_configs": False
+        },
         "profiles": [
             {
                 "name": DEFAULT_USERNAME,
