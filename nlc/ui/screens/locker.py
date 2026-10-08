@@ -4,6 +4,7 @@ nlc.ui.screens.locker - Modernized Locker screen (2.5D skin showcase, wardrobe p
 
 import os
 import sys
+import math
 import shutil
 import logging
 import threading

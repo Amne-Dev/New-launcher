@@ -18,7 +18,7 @@ MOJANG_CAPE_ACTIVE_URL = "https://api.minecraftservices.com/minecraft/profile/ca
 
 def get_capes_cache_dir() -> Path:
     """Return local directory where downloaded cape textures are cached."""
-    capes_dir = get_launcher_data_dir() / "capes"
+    capes_dir = Path(get_launcher_data_dir()) / "capes"
     capes_dir.mkdir(parents=True, exist_ok=True)
     return capes_dir
 
