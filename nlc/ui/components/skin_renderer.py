@@ -335,7 +335,7 @@ class Model3DRenderer:
 
         # Cape attached to upper back of torso (z=2.5, pivot y=14, z=2.0)
         if self.cape_tex:
-            add_box([0, 6, 2.5], [10, 16, 1], self.cape_tex, pivot=[0, 14, 2.0], local_pitch=cape_pitch)
+            add_box([0, 6, 2.5], [10, 16, 1], self.cape_tex, pivot=[0, 14, 2.0], local_pitch=-cape_pitch)
 
         # Sort faces back to front (largest depth avg_z first)
         faces.sort(key=lambda f: f['avg_z'], reverse=True)
