@@ -70,8 +70,8 @@ class DownloadManager:
 class DownloadQueueMixin:
     """Mixin providing download queue widgets, tasks, and progress overlay."""
     def create_download_queue_ui(self):
-        # Container - packed at bottom of sidebar (stacking upwards above previous bottom items)
-        self.queue_container = tk.Frame(self.sidebar, bg=COLORS['sidebar_bg'])
+        parent = getattr(self, 'sidebar_bottom_frame', self.sidebar)
+        self.queue_container = tk.Frame(parent, bg=COLORS['sidebar_bg'])
         # Hidden initially
         # self.queue_container.pack(side="bottom", fill="x", padx=10, pady=10)
         
