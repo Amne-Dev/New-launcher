@@ -21,6 +21,7 @@ import minecraft_launcher_lib
 from nlc.storage.paths import resource_path, open_path_in_system
 from nlc.ui.theme import COLORS, FONT_FAMILY
 from nlc.ui.components.dialogs import custom_showinfo, custom_showerror, custom_askyesno, _schedule_window_centering
+from nlc.ui.components.modal import get_modal_manager
 from nlc.ui.components.context_menu import NeoContextMenu, attach_context_menu
 from nlc.net.http import get_http_session
 from nlc.net.downloader import _atomic_download
@@ -135,6 +136,11 @@ class ModpacksScreenMixin:
                 self.mp_create_title_lbl.config(bg=main_bg, fg=text_primary)
             if hasattr(self, 'mp_create_card') and self.mp_create_card.winfo_exists():
                 self.mp_create_card.config(bg=card_bg)
+
+        # Update in-place details view if open
+        if getattr(self, '_in_modpack_details_view', False):
+            if hasattr(self, 'modpack_details_view') and self.modpack_details_view.winfo_exists():
+                self.modpack_details_view.config(bg=main_bg)
 
         if hasattr(self, 'refresh_modpacks_list'):
             self.refresh_modpacks_list()
@@ -346,25 +352,19 @@ class ModpacksScreenMixin:
         threading.Thread(target=run_export, daemon=True).start()
 
     def show_modpack_contents_dialog(self, pack):
-        dialog = tk.Toplevel(self.root)
-        dialog.title(f"Mods in {pack['name']}")
-        dialog.geometry("700x600")
-        dialog.config(bg=COLORS['main_bg'])
-        # This is a destructive-management surface; it must be modal on every
-        # supported platform so actions cannot land in the launcher behind it.
-        dialog.transient(self.root)
-        dialog.grab_set()
-        
-        # Center on parent
-        dialog.update_idletasks()
-        x = self.root.winfo_x() + (self.root.winfo_width()//2) - 350
-        y = self.root.winfo_y() + (self.root.winfo_height()//2) - 300
-        dialog.geometry(f"+{x}+{y}")
-        
-        # Ensure visibility
-        dialog.deiconify()
-        dialog.lift()
-        dialog_root = self._apply_custom_toplevel_chrome(dialog, f"Mods in {pack['name']}")
+        self._in_modpack_details_view = True
+        if hasattr(self, 'modpacks_browse_view') and self.modpacks_browse_view.winfo_exists():
+            self.modpacks_browse_view.pack_forget()
+
+        if hasattr(self, 'modpack_details_view') and self.modpack_details_view.winfo_exists():
+            try:
+                self.modpack_details_view.destroy()
+            except Exception:
+                pass
+
+        page = tk.Frame(self.tabs["Modpacks"], bg=COLORS['main_bg'])
+        self.modpack_details_view = page
+        dialog_root = page
         
         mods_dir = os.path.join(self.get_modpack_dir(pack['id']), "mods")
         if not os.path.exists(mods_dir): os.makedirs(mods_dir)
@@ -376,6 +376,15 @@ class ModpacksScreenMixin:
         title_frame = tk.Frame(header, bg=COLORS['sidebar_bg'])
         title_frame.pack(fill="x")
         
+        back_btn = self._make_btn(
+            title_frame,
+            "← Back to Modpacks",
+            style="secondary",
+            font_size=9,
+            command=self.close_modpack_details_page,
+        )
+        back_btn.pack(side="left", padx=(0, 15))
+
         tk.Label(title_frame, text=pack['name'], font=("Segoe UI", 16, "bold"),
                  bg=COLORS['sidebar_bg'], fg=COLORS['text_primary']).pack(side="left")
         
@@ -614,7 +623,7 @@ class ModpacksScreenMixin:
             bind_hover_surfaces(card, [card, left, info, actions_row], info_widgets, del_btn)
 
             def show_mod_card_menu(event, f=filename, d=display_name):
-                m = NeoContextMenu(dialog)
+                m = NeoContextMenu(self.root)
                 m.add_item("📁 Open Mods Folder", lambda: open_path_in_system(mods_dir))
                 m.add_separator()
                 m.add_item("🗑 Remove Mod", lambda: delete_mod(f, d), is_danger=True)
@@ -655,7 +664,7 @@ class ModpacksScreenMixin:
             bind_hover_surfaces(row, [row, left, info, actions_row], [name_lbl, meta_lbl], del_btn)
 
             def show_mod_row_menu(event, f=filename, d=display_name):
-                m = NeoContextMenu(dialog)
+                m = NeoContextMenu(self.root)
                 m.add_item("📁 Open Mods Folder", lambda: open_path_in_system(mods_dir))
                 m.add_separator()
                 m.add_item("🗑 Remove Mod", lambda: delete_mod(f, d), is_danger=True)
@@ -668,7 +677,7 @@ class ModpacksScreenMixin:
             after_id = layout_state.get("render_after_id")
             if after_id is not None:
                 try:
-                    dialog.after_cancel(after_id)
+                    self.root.after_cancel(after_id)
                 except Exception:
                     pass
             layout_state["render_after_id"] = None
@@ -676,7 +685,7 @@ class ModpacksScreenMixin:
             batch_after_id = layout_state.get("batch_after_id")
             if batch_after_id is not None:
                 try:
-                    dialog.after_cancel(batch_after_id)
+                    self.root.after_cancel(batch_after_id)
                 except Exception:
                     pass
             layout_state["batch_after_id"] = None
@@ -763,7 +772,7 @@ class ModpacksScreenMixin:
                     # A render can become obsolete while its next batch is in
                     # Tk's queue.  Never let it append results to a newer view.
                     try:
-                        if not dialog.winfo_exists() or layout_state["render_generation"] != render_generation:
+                        if not page.winfo_exists() or layout_state["render_generation"] != render_generation:
                             return
                     except tk.TclError:
                         return
@@ -785,7 +794,7 @@ class ModpacksScreenMixin:
                         render_state["restored_position"] = True
 
                     if batch_end < len(files):
-                        layout_state["batch_after_id"] = dialog.after(6, render_batch)
+                        layout_state["batch_after_id"] = self.root.after(6, render_batch)
                     else:
                         layout_state["batch_after_id"] = None
                         progress_label.destroy()
@@ -794,17 +803,17 @@ class ModpacksScreenMixin:
 
                 # Give Tk a chance to paint the header/count before creating
                 # the first card batch.
-                layout_state["batch_after_id"] = dialog.after(1, render_batch)
+                layout_state["batch_after_id"] = self.root.after(1, render_batch)
             else:
                 scroll_frame.update_idletasks()
                 canvas.configure(scrollregion=canvas.bbox("all"))
                 canvas.yview_moveto(0.0 if reset_scroll else current_top)
 
-        # Let the popup paint immediately, then scan/render its installed
+        # Let the view paint immediately, then scan/render its installed
         # files. This avoids the blank flash on large modpack directories.
         self._show_skeleton_list(scroll_frame, rows=3, card_height=112, padx=12, pady=6)
         self._bind_smooth_scroll(canvas, scroll_frame)
-        dialog.after(50, render_mods)
+        self.root.after(50, render_mods)
         
         # Bind search to debounced re-render
         search_state = {"after_id": None}
@@ -817,16 +826,30 @@ class ModpacksScreenMixin:
             after_id = search_state.get("after_id")
             if after_id is not None:
                 try:
-                    dialog.after_cancel(after_id)
+                    self.root.after_cancel(after_id)
                 except Exception:
                     pass
             try:
-                search_state["after_id"] = dialog.after(180, run_search_render) # type: ignore
+                search_state["after_id"] = self.root.after(180, run_search_render) # type: ignore
             except Exception:
                 search_state["after_id"] = None
                 render_mods()
 
         search_var.trace_add("write", schedule_search_render)
+        page.bind("<Escape>", lambda _e: self.close_modpack_details_page())
+        page.pack(fill="both", expand=True)
+
+    def close_modpack_details_page(self):
+        self._in_modpack_details_view = False
+        if hasattr(self, 'modpack_details_view') and self.modpack_details_view.winfo_exists():
+            self.modpack_details_view.pack_forget()
+            try:
+                self.modpack_details_view.destroy()
+            except Exception:
+                pass
+        if hasattr(self, 'modpacks_browse_view') and self.modpacks_browse_view.winfo_exists():
+            self.modpacks_browse_view.pack(fill="both", expand=True)
+            self.refresh_modpacks_list()
 
     def show_import_curseforge_dialog(self):
         """Import a local CurseForge export, including its overrides folder.
@@ -836,74 +859,67 @@ class ModpacksScreenMixin:
         CurseForge API; without one, the launcher still imports all included
         overrides and retains the manifest's unresolved file list.
         """
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Import CurseForge Modpack")
-        dialog.geometry("620x330")
-        dialog.configure(bg=COLORS['main_bg'])
-        dialog.transient(self.root)
-        dialog.grab_set()
-        dialog.resizable(False, False)
-        _schedule_window_centering(dialog, self.root, width=620, height=330)
-        dialog_root = self._apply_custom_toplevel_chrome(dialog, "Import CurseForge Modpack")
+        mgr = get_modal_manager(self.root)
+        if not mgr:
+            return
 
-        content = tk.Frame(dialog_root, bg=COLORS['main_bg'], padx=24, pady=22)
-        content.pack(fill="both", expand=True)
-        tk.Label(content, text="Import CurseForge Modpack", font=("Segoe UI", 15, "bold"),
-                 bg=COLORS['main_bg'], fg=COLORS['text_primary']).pack(anchor="w")
-        tk.Label(
-            content,
-            text="Choose a CurseForge export (.zip). Overrides are imported securely. An API key is optional but required to download the manifest's mod files.",
-            font=("Segoe UI", 9), bg=COLORS['main_bg'], fg=COLORS['text_secondary'],
-            justify="left", wraplength=560,
-        ).pack(anchor="w", pady=(6, 16))
+        def build_content(content, close_modal):
+            tk.Label(
+                content,
+                text="Choose a CurseForge export (.zip). Overrides are imported securely. An API key is optional but required to download the manifest's mod files.",
+                font=("Segoe UI", 9), bg=COLORS['card_bg'], fg=COLORS['text_secondary'],
+                justify="left", wraplength=520,
+            ).pack(anchor="w", pady=(0, 16))
 
-        archive_var = tk.StringVar()
-        archive_row = tk.Frame(content, bg=COLORS['main_bg'])
-        archive_row.pack(fill="x")
-        archive_entry = tk.Entry(archive_row, textvariable=archive_var, bg=COLORS['input_bg'],
-                                 fg=COLORS['text_primary'], relief="flat", insertbackground="white")
-        archive_entry.pack(side="left", fill="x", expand=True, ipady=6)
+            archive_var = tk.StringVar()
+            archive_row = tk.Frame(content, bg=COLORS['card_bg'])
+            archive_row.pack(fill="x")
+            archive_entry = tk.Entry(archive_row, textvariable=archive_var, bg=COLORS['input_bg'],
+                                     fg=COLORS['text_primary'], relief="flat", insertbackground="white")
+            archive_entry.pack(side="left", fill="x", expand=True, ipady=6)
 
-        def choose_archive():
-            selected = filedialog.askopenfilename(
-                parent=dialog,
-                title="Choose CurseForge Modpack",
-                filetypes=[("CurseForge Modpack", "*.zip"), ("All Files", "*")],
-            )
-            if selected:
-                archive_var.set(selected)
+            def choose_archive():
+                selected = filedialog.askopenfilename(
+                    parent=self.root,
+                    title="Choose CurseForge Modpack",
+                    filetypes=[("CurseForge Modpack", "*.zip"), ("All Files", "*")],
+                )
+                if selected:
+                    archive_var.set(selected)
 
-        self._make_btn(archive_row, "Browse…", style="secondary", font_size=9, command=choose_archive).pack(side="left", padx=(8, 0))
+            self._make_btn(archive_row, "Browse…", style="secondary", font_size=9, command=choose_archive).pack(side="left", padx=(8, 0))
 
-        tk.Label(content, text="CurseForge API key (optional)", font=("Segoe UI", 9, "bold"),
-                 bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(anchor="w", pady=(16, 5))
-        api_key_var = tk.StringVar(value=str(self.addons_config.get("curseforge_api_key", "")))
-        tk.Entry(content, textvariable=api_key_var, show="•", bg=COLORS['input_bg'], fg=COLORS['text_primary'],
-                 relief="flat", insertbackground="white").pack(fill="x", ipady=6)
+            tk.Label(content, text="CurseForge API key (optional)", font=("Segoe UI", 9, "bold"),
+                     bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(anchor="w", pady=(16, 5))
+            api_key_var = tk.StringVar(value=str(self.addons_config.get("curseforge_api_key", "")))
+            tk.Entry(content, textvariable=api_key_var, show="•", bg=COLORS['input_bg'], fg=COLORS['text_primary'],
+                     relief="flat", insertbackground="white").pack(fill="x", ipady=6)
 
-        status = tk.Label(content, text="", font=("Segoe UI", 9), bg=COLORS['main_bg'], fg=COLORS['error_red'])
-        status.pack(anchor="w", pady=(8, 0))
-        actions = tk.Frame(content, bg=COLORS['main_bg'])
-        actions.pack(side="bottom", fill="x")
+            status = tk.Label(content, text="", font=("Segoe UI", 9), bg=COLORS['card_bg'], fg=COLORS.get('error_red', '#EF4444'))
+            status.pack(anchor="w", pady=(8, 0))
+            actions = tk.Frame(content, bg=COLORS['card_bg'])
+            actions.pack(side="bottom", fill="x")
 
-        def begin_import():
-            archive_path = archive_var.get().strip()
-            if not archive_path or not os.path.isfile(archive_path):
-                status.config(text="Choose a valid CurseForge .zip export first.")
-                return
-            api_key = api_key_var.get().strip()
-            if api_key:
-                self.addons_config["curseforge_api_key"] = api_key
-                self.save_config(sync_ui=False)
-            task_id = self.add_download_task(os.path.basename(archive_path), "modpack")
-            dialog.destroy()
-            self.download_manager.queue_modpack(
-                lambda: self._import_curseforge_modpack_thread(archive_path, api_key, task_id),
-                task_id,
-            )
+            def begin_import():
+                archive_path = archive_var.get().strip()
+                if not archive_path or not os.path.isfile(archive_path):
+                    status.config(text="Choose a valid CurseForge .zip export first.")
+                    return
+                api_key = api_key_var.get().strip()
+                if api_key:
+                    self.addons_config["curseforge_api_key"] = api_key
+                    self.save_config(sync_ui=False)
+                task_id = self.add_download_task(os.path.basename(archive_path), "modpack")
+                close_modal()
+                self.download_manager.queue_modpack(
+                    lambda: self._import_curseforge_modpack_thread(archive_path, api_key, task_id),
+                    task_id,
+                )
 
-        self._make_btn(actions, "Cancel", style="secondary", font_size=9, command=dialog.destroy).pack(side="right")
-        self._make_btn(actions, "Import", style="primary", font_size=9, bold=True, command=begin_import).pack(side="right", padx=(0, 8))
+            self._make_btn(actions, "Cancel", style="secondary", font_size=9, command=close_modal).pack(side="right")
+            self._make_btn(actions, "Import", style="primary", font_size=9, bold=True, command=begin_import).pack(side="right", padx=(0, 8))
+
+        mgr.show_modal("Import CurseForge Modpack", build_content, width=580, height=360)
 
     def _curseforge_loader_from_manifest(self, manifest):
         minecraft = manifest.get("minecraft", {}) if isinstance(manifest, dict) else {}
@@ -1174,102 +1190,78 @@ class ModpacksScreenMixin:
         return self.show_create_modpack_page()
 
     def show_link_modpack_dialog(self, pack):
-        dialog = tk.Toplevel(self.root)
-        dialog.title(f"Link '{pack['name']}'")
-        dialog.geometry("450x450")
-        dialog.config(bg=COLORS['main_bg'])
-        if os.name != "nt":
-            dialog.transient(self.root)
-        dialog.resizable(False, False)
-        if os.name != "nt":
-            dialog.grab_set()
-        
-        # Center on parent
-        dialog.update_idletasks()
-        x = self.root.winfo_x() + (self.root.winfo_width()//2) - 225
-        y = self.root.winfo_y() + (self.root.winfo_height()//2) - 225
-        dialog.geometry(f"+{x}+{y}")
-        
-        # Ensure visibility
-        dialog.deiconify()
-        dialog.lift()
-        dialog_root = self._apply_custom_toplevel_chrome(dialog, f"Link '{pack['name']}'")
-        
-        tk.Label(dialog_root, text="Select Installation to Link", font=("Segoe UI", 12),
-                 bg=COLORS['main_bg'], fg="white").pack(pady=15)
-                 
-        tk.Label(dialog_root, text=f"Requires: {pack['mc_version']} ({pack['loader']})", 
-                 bg=COLORS['main_bg'], fg=COLORS['text_secondary']).pack(pady=(0, 15))
-                 
-        # List Compatible Installs
-        insts = self.get_installations().items()
-        
-        scroll = tk.Scrollbar(dialog_root)
-        scroll.pack(side="right", fill="y")
-        lb = tk.Listbox(dialog_root, bg=COLORS['input_bg'], fg="white", yscrollcommand=scroll.set, width=40)
-        lb.pack(pady=10, fill="both", expand=True)
-        scroll.config(command=lb.yview)
-        
-        map_insts = {} # index -> inst_id
-        
-        idx = 0
-        for inst_id, inst in insts:
-            # Check version match
-            # "version" holds e.g. "1.20.1"
-            # "loader" holds e.g. "Fabric"
-            
-            v_id = inst.get('version', '').lower()
-            l_id = inst.get('loader', '').lower()
-            
-            # Loose compatibility check
-            # Pack version should be in installation version string
-            # Pack loader should match installation loader (excluding Vanilla)
-            
-            is_compat = False
-            
-            if pack['loader'].lower() == "fabric":
-                 if "fabric" in l_id and pack['mc_version'] in v_id: is_compat = True
-            elif pack['loader'].lower() == "forge":
-                 if "forge" in l_id and pack['mc_version'] in v_id: is_compat = True
-            
-            # Also allow fuzzy match if user knows what they are doing
-            # or if installation is just "1.20.1" (Vanila) and we want to allow it (Wait, no, we need loader installed)
-            # Actually, the launcher installs the loader on launch if missing FOR THAT VERSION.
-            # But here we are linking to an EXISTING installation profile.
-            
-            # Simplified check:
-            if pack['mc_version'] in v_id:
-                 is_compat = True
-                 
-            if is_compat:
-                lb.insert("end", f"{inst.get('name', 'Unnamed')} ({v_id} - {l_id})")
-                map_insts[idx] = inst_id
-                idx += 1
-                
-        def link():
-            sel = lb.curselection()
-            if not sel: return
-            inst_id = map_insts[sel[0]]
-            
-            # Link it
-            pack['linked_installation_id'] = inst_id
-            self.save_modpacks()
-            
-            # Close dialog first
-            dialog.destroy()
-            
-            # Then refresh UI
-            self.root.after(50, self.refresh_modpacks_list)
-        
-        def create_match():
-             threading.Thread(target=self._create_matching_installation_thread, args=(pack, dialog), daemon=True).start()
+        mgr = get_modal_manager(self.root)
+        if not mgr:
+            return
 
-        create_match_btn = self._make_btn(dialog_root, "Create Matching Installation", style="secondary",
-                                           font_size=10, bold=True, command=create_match)
-        create_match_btn.pack(pady=(15, 5), fill="x", padx=30)
-        link_btn = self._make_btn(dialog_root, "Link Selected", style="primary",
-                                  font_size=10, bold=True, command=link)
-        link_btn.pack(pady=(5, 15), fill="x", padx=30)
+        def build_content(body_frame, close_modal):
+            tk.Label(body_frame, text=f"Requires: {pack['mc_version']} ({pack['loader']})", 
+                     bg=COLORS['card_bg'], fg=COLORS['text_secondary'], font=("Segoe UI", 9)).pack(anchor="w", pady=(0, 10))
+
+            insts = self.get_installations().items()
+
+            list_frame = tk.Frame(body_frame, bg=COLORS['card_bg'])
+            list_frame.pack(fill="both", expand=True)
+
+            scroll = ttk.Scrollbar(list_frame)
+            scroll.pack(side="right", fill="y")
+            lb = tk.Listbox(list_frame, bg=COLORS['input_bg'], fg="white", yscrollcommand=scroll.set,
+                            selectbackground=COLORS.get('accent_color', '#2ECC71'), selectforeground="white",
+                            relief="flat", highlightthickness=0, font=("Segoe UI", 10))
+            lb.pack(fill="both", expand=True)
+            scroll.config(command=lb.yview)
+
+            map_insts = {}  # index -> inst_id
+            idx = 0
+            for inst_id, inst in insts:
+                v_id = inst.get('version', '').lower()
+                l_id = inst.get('loader', '').lower()
+                is_compat = False
+                if pack['loader'].lower() == "fabric":
+                    if "fabric" in l_id and pack['mc_version'] in v_id: is_compat = True
+                elif pack['loader'].lower() == "forge":
+                    if "forge" in l_id and pack['mc_version'] in v_id: is_compat = True
+                if pack['mc_version'] in v_id:
+                    is_compat = True
+
+                if is_compat:
+                    lb.insert("end", f"  {inst.get('name', 'Unnamed')} ({v_id} - {l_id})")
+                    map_insts[idx] = inst_id
+                    idx += 1
+
+            if idx == 0:
+                lb.insert("end", "  (No compatible installations found)")
+                lb.config(state="disabled")
+
+            def link():
+                sel = lb.curselection()
+                if not sel or sel[0] not in map_insts: return
+                inst_id = map_insts[sel[0]]
+
+                pack['linked_installation_id'] = inst_id
+                self.save_modpacks()
+                close_modal()
+                self.root.after(50, self.refresh_modpacks_list)
+
+            def create_match():
+                threading.Thread(target=self._create_matching_installation_thread, args=(pack, close_modal), daemon=True).start()
+
+            actions = tk.Frame(body_frame, bg=COLORS['card_bg'], pady=10)
+            actions.pack(fill="x", side="bottom")
+
+            create_match_btn = self._make_btn(actions, "Create Matching Installation", style="secondary",
+                                               font_size=9, bold=True, command=create_match)
+            create_match_btn.pack(side="left")
+
+            link_btn = self._make_btn(actions, "Link Selected", style="primary",
+                                      font_size=9, bold=True, command=link)
+            link_btn.pack(side="right")
+
+            cancel_btn = self._make_btn(actions, "Cancel", style="secondary",
+                                        font_size=9, command=close_modal)
+            cancel_btn.pack(side="right", padx=(0, 8))
+
+        mgr.show_modal(f"Link '{pack['name']}'", build_content, width=520, height=440)
 
     def _create_matching_installation_thread(self, pack, dialog):
         try:
@@ -1313,16 +1305,18 @@ class ModpacksScreenMixin:
                 self.refresh_installations_list()
                 self.update_installation_dropdown()
                 self.refresh_modpacks_list()
-                if dialog.winfo_exists():
+                if callable(dialog):
+                    dialog()
+                elif hasattr(dialog, "destroy") and dialog.winfo_exists():
                     dialog.destroy()
-                messagebox.showinfo("Success", f"Created installation '{new_name}' and linked it.")
+                custom_showinfo("Success", f"Created installation '{new_name}' and linked it.", parent=self.root)
             
             self.root.after(0, update_ui)
             
         except Exception as e:
             print(e)
             err_msg = str(e)
-            self.root.after(0, lambda m=err_msg: messagebox.showerror("Error", m))
+            self.root.after(0, lambda m=err_msg: custom_showerror("Error", m, parent=self.root))
 
     def update_active_modpack_dropdown(self):
         if hasattr(self, 'mods_active_pack_combobox'):
