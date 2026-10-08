@@ -25,6 +25,7 @@ from nlc.ui.components.context_menu import NeoContextMenu, attach_context_menu
 from nlc.net.http import get_http_session
 from nlc.net.downloader import _atomic_download
 from nlc.core.launch import safe_extract_zip as _safe_extract_zip
+from nlc.core.instances import export_modpack_to_mrpack, export_modpack_to_zip
 
 logger = logging.getLogger(__name__)
 
@@ -236,6 +237,9 @@ class ModpacksScreenMixin:
             m.add_item("🔗 Link Installation", lambda: self.show_link_modpack_dialog(pack))
             m.add_item("📁 Open Folder", lambda: open_path_in_system(self.get_modpack_dir(pack['id'])))
             m.add_separator()
+            m.add_item("📤 Export as .mrpack", lambda: self.export_modpack(pack, format="mrpack"))
+            m.add_item("🗜 Export as .zip", lambda: self.export_modpack(pack, format="zip"))
+            m.add_separator()
             m.add_item("🗑 Delete Modpack", lambda: self.delete_modpack(pack), is_danger=True)
             if event:
                 m.show_at(event.x_root, event.y_root)
@@ -284,6 +288,62 @@ class ModpacksScreenMixin:
         # Reset active pack selection if deleted pack was active
         if hasattr(self, 'active_modpack_var') and self.active_modpack_var.get() == pack['name']:
             self.active_modpack_var.set("None")
+
+    def export_modpack(self, pack: dict, format: str = "mrpack") -> None:
+        """Export modpack to .mrpack or .zip."""
+        pack_dir = self.get_modpack_dir(pack['id'])
+        if not os.path.exists(pack_dir):
+            custom_showerror("Export Error", f"Modpack directory not found for '{pack.get('name', 'Pack')}'.", parent=self.root)
+            return
+
+        name_slug = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in pack.get("name", "modpack"))
+        default_ext = ".mrpack" if format == "mrpack" else ".zip"
+        filetypes = [("Modrinth Modpack", "*.mrpack")] if format == "mrpack" else [("Zip Archive", "*.zip")]
+
+        target_file = filedialog.asksaveasfilename(
+            parent=self.root,
+            title=f"Export Modpack as {default_ext.upper()}",
+            initialfile=f"{name_slug}{default_ext}",
+            defaultextension=default_ext,
+            filetypes=filetypes
+        )
+        if not target_file:
+            return
+
+        self.show_progress_overlay(f"Exporting '{pack.get('name')}'…")
+
+        def run_export():
+            try:
+                if format == "mrpack":
+                    export_modpack_to_mrpack(
+                        modpack_dir=pack_dir,
+                        output_path=target_file,
+                        modpack_name=pack.get("name", "Custom Pack"),
+                        version_id=pack.get("version_name", "1.0.0"),
+                        game_version=pack.get("mc_version", "1.20.1"),
+                        loader=pack.get("loader", "Fabric")
+                    )
+                else:
+                    export_modpack_to_zip(
+                        modpack_dir=pack_dir,
+                        output_path=target_file
+                    )
+                self.root.after(0, lambda: [
+                    self.hide_progress_overlay(),
+                    custom_showinfo(
+                        "Export Complete",
+                        f"Successfully exported '{pack.get('name')}' to:\n{target_file}",
+                        parent=self.root
+                    )
+                ])
+            except Exception as e:
+                logger.exception("Export failed: %s", e)
+                self.root.after(0, lambda err=str(e): [
+                    self.hide_progress_overlay(),
+                    custom_showerror("Export Failed", f"Failed to export modpack:\n{err}", parent=self.root)
+                ])
+
+        threading.Thread(target=run_export, daemon=True).start()
 
     def show_modpack_contents_dialog(self, pack):
         dialog = tk.Toplevel(self.root)
@@ -334,6 +394,16 @@ class ModpacksScreenMixin:
 
         self._make_btn(actions, "🔄 Refresh", style="secondary", font_size=9,
                       command=refresh_list).pack(side="left")
+
+        def show_export_menu():
+            m = NeoContextMenu(self.root)
+            m.add_item("📤 Export as .mrpack", lambda: self.export_modpack(pack, format="mrpack"))
+            m.add_item("🗜 Export as .zip", lambda: self.export_modpack(pack, format="zip"))
+            m.show_below(export_btn)
+
+        export_btn = self._make_btn(actions, "📤 Export", style="secondary", font_size=9,
+                                    command=show_export_menu)
+        export_btn.pack(side="left", padx=5)
 
         view_mode_var = tk.StringVar(value=getattr(self, "installed_mods_view_mode", "grid"))
         grid_btn = self._make_btn(actions, "Grid", style="secondary", font_size=9)
