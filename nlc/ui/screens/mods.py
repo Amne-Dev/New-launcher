@@ -1003,9 +1003,10 @@ class ModsScreenMixin:
                  with open(index_path, 'r') as f:
                      idx = json.load(f)
                      
-                 # Download mods
-                 target_dir = os.path.join(self.get_modpack_dir(new_id), "mods")
-                 if not os.path.exists(target_dir): os.makedirs(target_dir)
+                 # Initialize isolated pack directory
+                 pack_dir = os.path.abspath(self.get_modpack_dir(new_id))
+                 os.makedirs(pack_dir, exist_ok=True)
+                 os.makedirs(os.path.join(pack_dir, "mods"), exist_ok=True)
                  
                  files_list = idx.get('files', [])
                  total_files = len(files_list)
@@ -1017,36 +1018,47 @@ class ModsScreenMixin:
 
                      downloads = file_def.get('downloads') or []
                      d_url = downloads[0] if downloads else ""
-                     f_path = str(file_def.get('path') or "")
+                     f_path = str(file_def.get('path') or "").replace("\", "/").lstrip("/")
+                     if not f_path or not d_url:
+                         completed_files += 1
+                         continue
+
                      f_name = os.path.basename(f_path)
+                     dest = os.path.abspath(os.path.join(pack_dir, f_path))
+                     if os.path.commonpath((pack_dir, dest)) != pack_dir:
+                         raise ValueError(f"Unsafe modpack file path: {f_path}")
                      
-                     # Allow subdirectories 
-                     # Modrinth packs put mods in 'mods/...' usually.
-                     # We flatten? No, keep it in mods dir.
-                     # If path starts with 'mods/', it goes to target_dir.
-                     # If path is 'config/', we ignore for now as requested (simple implementation)
-                     if f_path.startswith("mods/"):
-                         pack_dir = os.path.abspath(self.get_modpack_dir(new_id))
-                         dest = os.path.abspath(os.path.join(pack_dir, f_path))
-                         if not d_url or os.path.commonpath((pack_dir, dest)) != pack_dir:
-                             raise ValueError(f"Unsafe or incomplete modpack entry: {f_path}")
-                         # Ensure dir exists
-                         os.makedirs(os.path.dirname(dest), exist_ok=True)
-                         
-                         self.root.after(0, lambda n=f_name: self.update_download_task(task_id, detail=f"Downloading {n}"))
-                         _atomic_download(
-                             d_url,
-                             dest,
-                             cancel_event=cancel_event,
-                             expected_sha1=(file_def.get("hashes") or {}).get("sha1"),
-                         )
+                     # Ensure parent dir exists
+                     os.makedirs(os.path.dirname(dest), exist_ok=True)
+                     
+                     self.root.after(0, lambda n=f_name: self.update_download_task(task_id, detail=f"Downloading {n}"))
+                     _atomic_download(
+                         d_url,
+                         dest,
+                         cancel_event=cancel_event,
+                         expected_sha1=(file_def.get("hashes") or {}).get("sha1"),
+                     )
                                  
                      completed_files += 1
                      if total_files > 0:
-                         prog = 10 + (completed_files / total_files * 85)
+                         prog = 10 + (completed_files / total_files * 75)
                          self.root.after(0, lambda p=prog: self.update_download_task(task_id, p))
                                  
-                     # To support config overrides, we would need to copy from extracted 'overrides' folder too.
+                 # Copy overrides (config/, shaderpacks/, resourcepacks/, etc.)
+                 self.root.after(0, lambda: self.update_download_task(task_id, 88, detail="Applying modpack overrides…"))
+                 for override_folder in ("overrides", "client-overrides"):
+                     override_dir = os.path.join(temp_dir, override_folder)
+                     if os.path.isdir(override_dir):
+                         for root_d, dirs, files in os.walk(override_dir):
+                             rel = os.path.relpath(root_d, override_dir)
+                             target_sub = os.path.abspath(os.path.join(pack_dir, rel)) if rel != "." else pack_dir
+                             if os.path.commonpath((pack_dir, target_sub)) != pack_dir:
+                                 continue
+                             os.makedirs(target_sub, exist_ok=True)
+                             for f in files:
+                                 src_f = os.path.join(root_d, f)
+                                 dst_f = os.path.join(target_sub, f)
+                                 shutil.copy2(src_f, dst_f)
                  
                  # Add to modpacks list
                  self.root.after(0, lambda: self.complete_download_task(task_id))
