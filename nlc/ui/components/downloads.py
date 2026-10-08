@@ -118,8 +118,10 @@ class DownloadQueueMixin:
         task_id = str(uuid.uuid4())
         
         # Card style with subtle border
-        card_bg = "#2b2b2b"
-        border_color = "#3d3d3d"
+        card_bg = COLORS.get('card_bg', '#242830')
+        border_color = COLORS.get('border_subtle', '#2D3139')
+        hover_bg = COLORS.get('hover_bg', '#282C36')
+        text_sec = COLORS.get('text_secondary', '#A6ACB8')
         
         border_frame = tk.Frame(self.queue_list_frame, bg=border_color, padx=1, pady=1)
         border_frame.pack(fill="x", pady=3)
@@ -137,7 +139,7 @@ class DownloadQueueMixin:
         
         # Detail Frame (Container)
         detail_frame = tk.Frame(frame, bg=card_bg)
-        detail_lbl = tk.Label(detail_frame, text="Starting...", font=("Segoe UI", 7), fg="#cccccc", bg=card_bg, anchor="w")
+        detail_lbl = tk.Label(detail_frame, text="Starting...", font=("Segoe UI", 7), fg=text_sec, bg=card_bg, anchor="w")
         detail_lbl.pack(fill="x")
         
         # Dropdown/Expand capability
@@ -151,12 +153,12 @@ class DownloadQueueMixin:
                     btn.config(text="▲")
             
             btn = tk.Button(top, text="▼", font=("Segoe UI", 6), bg=card_bg, fg="white", 
-                            bd=0, activebackground="#3d3d3d", activeforeground="white",
+                            bd=0, activebackground=hover_bg, activeforeground="white",
                             command=toggle, width=2, cursor="hand2")
             btn.pack(side="right")
             
             # Hover effect
-            btn.bind("<Enter>", lambda e: btn.config(bg="#3d3d3d"))
+            btn.bind("<Enter>", lambda e: btn.config(bg=hover_bg))
             btn.bind("<Leave>", lambda e: btn.config(bg=card_bg))
         else:
              # Just show status inline or always hidden? 
@@ -179,7 +181,7 @@ class DownloadQueueMixin:
         }
         
         # Context Menu for Cancellation
-        menu = tk.Menu(frame, tearoff=0, bg="#2b2b2b", fg="white")
+        menu = tk.Menu(frame, tearoff=0, bg=card_bg, fg="white")
         menu.add_command(label="Cancel", command=lambda: self.cancel_download(task_id))
         
         def show_menu(e):
@@ -215,14 +217,16 @@ class DownloadQueueMixin:
     def complete_download_task(self, task_id):
         if task_id not in self.download_tasks: return
         
+        success_col = COLORS.get('success_green', '#10B981')
+        subtle_border = COLORS.get('border_subtle', '#2D3139')
         data = self.download_tasks[task_id]
         data['pb']['value'] = 100
-        data['detail_lbl'].config(text="Completed ✓", fg="#2ecc71")
+        data['detail_lbl'].config(text="Completed ✓", fg=success_col)
         
         # Visual feedback - brief green highlight
         if 'border_frame' in data:
-            data['border_frame'].config(bg="#2ecc71")
-            self.root.after(300, lambda: data['border_frame'].config(bg="#3d3d3d") if task_id in self.download_tasks else None)
+            data['border_frame'].config(bg=success_col)
+            self.root.after(300, lambda: data['border_frame'].config(bg=subtle_border) if task_id in self.download_tasks else None)
         
         # Fade out or remove
         def remove():
