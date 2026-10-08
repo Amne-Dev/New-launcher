@@ -273,8 +273,18 @@ class LockerScreenMixin:
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
 
-        # Defaults
-        defaults = ["background.png", "image1.png", "Island.png", "River.png"]
+        # Defaults - scan wallpapers resource directory with q66ll6p2dw9f1.png first
+        discovered = []
+        wp_res_dir = resource_path("wallpapers")
+        if os.path.exists(wp_res_dir) and os.path.isdir(wp_res_dir):
+            for f in sorted(os.listdir(wp_res_dir)):
+                if f.lower().endswith(('.png', '.jpg', '.jpeg')):
+                    discovered.append(f)
+        if "q66ll6p2dw9f1.png" in discovered:
+            discovered.remove("q66ll6p2dw9f1.png")
+            discovered.insert(0, "q66ll6p2dw9f1.png")
+
+        defaults = discovered if discovered else ["q66ll6p2dw9f1.png", "background.png", "image1.png", "Island.png", "River.png"]
         
         # Helper: Get Hash
         def get_img_hash(p):

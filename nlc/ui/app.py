@@ -5190,8 +5190,8 @@ class MinecraftLauncher(
         # --- Default Wallpaper Fallback ---
         if not self.hero_img_raw:
              try:
-                 # Check for 'Island.png' or 'background.png' in wallpapers dir
-                 possible_defaults = ["Island.png", "background.png"]
+                 # Check for 'q66ll6p2dw9f1.png', 'Island.png', or 'background.png' in wallpapers dir
+                 possible_defaults = ["q66ll6p2dw9f1.png", "Island.png", "background.png"]
                  for name in possible_defaults:
                      path = resource_path(os.path.join("wallpapers", name))
                      if os.path.exists(path):
