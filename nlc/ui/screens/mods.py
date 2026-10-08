@@ -27,6 +27,7 @@ import minecraft_launcher_lib
 from nlc.storage.paths import resource_path, open_path_in_system
 from nlc.ui.theme import COLORS, FONT_FAMILY
 from nlc.ui.components.dialogs import custom_showinfo, custom_showerror, custom_askyesno
+from nlc.ui.components.modal import get_modal_manager
 from nlc.ui.components.context_menu import NeoContextMenu, attach_context_menu, attach_entry_context_menu
 from nlc.net.http import get_http_session
 from nlc.net.downloader import _atomic_download
@@ -827,98 +828,94 @@ class ModsScreenMixin:
 
     def _prompt_modpack_version(self, mod_data, versions):
         result = {"version": None}
-        dialog = tk.Toplevel(self.root)
-        dialog.title(f"Choose Version - {mod_data.get('title', 'Modpack')}")
-        dialog.geometry("560x280")
-        dialog.config(bg=COLORS['main_bg'])
-        if os.name != "nt":
-            dialog.transient(self.root)
-            dialog.grab_set()
+        mgr = get_modal_manager(self.root)
+        if not mgr:
+            return None
 
-        dialog_root = self._apply_custom_toplevel_chrome(dialog, f"Install {mod_data.get('title', 'Modpack')}")
+        wait_var = tk.BooleanVar(self.root, value=False)
 
-        container = tk.Frame(dialog_root, bg=COLORS['main_bg'], padx=24, pady=24)
-        container.pack(fill="both", expand=True)
+        def build_content(container, close_modal):
+            tk.Label(
+                container,
+                text="Choose which version of this modpack to install.",
+                font=("Segoe UI", 10),
+                bg=COLORS['card_bg'],
+                fg=COLORS['text_secondary'],
+            ).pack(anchor="w", pady=(0, 16))
 
-        tk.Label(
-            container,
-            text="Select Modpack Version",
-            font=("Segoe UI", 14, "bold"),
-            bg=COLORS['main_bg'],
-            fg=COLORS['text_primary'],
-        ).pack(anchor="w")
+            options = [self._format_modpack_version_option(version) for version in versions]
+            selected_index = {"value": 0}
+            version_var = tk.StringVar(value=options[0] if options else "")
 
-        tk.Label(
-            container,
-            text="Choose which version of this modpack to install.",
-            font=("Segoe UI", 10),
-            bg=COLORS['main_bg'],
-            fg=COLORS['text_secondary'],
-        ).pack(anchor="w", pady=(6, 16))
-
-        options = [self._format_modpack_version_option(version) for version in versions]
-        selected_index = {"value": 0}
-        version_var = tk.StringVar(value=options[0] if options else "")
-
-        combo = ttk.Combobox(
-            container,
-            textvariable=version_var,
-            values=options,
-            state="readonly",
-            style="Launcher.TCombobox",
-        )
-        combo.pack(fill="x", ipady=6)
-        if options:
-            combo.current(0)
-
-        detail_lbl = tk.Label(
-            container,
-            text="",
-            font=("Segoe UI", 9),
-            bg=COLORS['main_bg'],
-            fg=COLORS['text_secondary'],
-            justify="left",
-            anchor="w",
-        )
-        detail_lbl.pack(fill="x", pady=(14, 0))
-
-        def update_version_details(*_args):
-            try:
-                idx = combo.current()
-            except Exception:
-                idx = selected_index["value"]
-            if idx is None or idx < 0 or idx >= len(versions):
-                idx = 0
-            selected_index["value"] = idx
-            version = versions[idx]
-            mrpack_file = self._get_modpack_version_file(version)
-            game_versions = ", ".join(str(v) for v in version.get('game_versions', [])[:3]) or "Unknown"
-            loaders = ", ".join(str(v) for v in version.get('loaders', [])[:3]) or "Unknown"
-            file_name = mrpack_file.get('filename', 'Unknown') if mrpack_file else "Missing .mrpack"
-            detail_lbl.config(
-                text=f"Minecraft: {game_versions}\nLoader: {loaders}\nFile: {file_name}"
+            combo = ttk.Combobox(
+                container,
+                textvariable=version_var,
+                values=options,
+                state="readonly",
+                style="Launcher.TCombobox",
             )
+            combo.pack(fill="x", ipady=6)
+            if options:
+                combo.current(0)
 
-        combo.bind("<<ComboboxSelected>>", update_version_details)
-        update_version_details()
+            detail_lbl = tk.Label(
+                container,
+                text="",
+                font=("Segoe UI", 9),
+                bg=COLORS['card_bg'],
+                fg=COLORS['text_secondary'],
+                justify="left",
+                anchor="w",
+            )
+            detail_lbl.pack(fill="x", pady=(14, 0))
 
-        btn_row = tk.Frame(container, bg=COLORS['main_bg'])
-        btn_row.pack(side="bottom", fill="x", pady=(20, 0))
+            def update_version_details(*_args):
+                try:
+                    idx = combo.current()
+                except Exception:
+                    idx = selected_index["value"]
+                if idx is None or idx < 0 or idx >= len(versions):
+                    idx = 0
+                selected_index["value"] = idx
+                version = versions[idx]
+                mrpack_file = self._get_modpack_version_file(version)
+                game_versions = ", ".join(str(v) for v in version.get('game_versions', [])[:3]) or "Unknown"
+                loaders = ", ".join(str(v) for v in version.get('loaders', [])[:3]) or "Unknown"
+                file_name = mrpack_file.get('filename', 'Unknown') if mrpack_file else "Missing .mrpack"
+                detail_lbl.config(
+                    text=f"Minecraft: {game_versions}\nLoader: {loaders}\nFile: {file_name}"
+                )
 
-        def confirm_install():
-            idx = selected_index["value"]
-            if 0 <= idx < len(versions):
-                result["version"] = versions[idx]
-            dialog.destroy()
+            combo.bind("<<ComboboxSelected>>", update_version_details)
+            update_version_details()
 
-        self._make_btn(
-            btn_row, "Cancel", style="secondary", font_size=10, command=dialog.destroy
-        ).pack(side="right")
-        self._make_btn(
-            btn_row, "Install", style="primary", font_size=10, bold=True, command=confirm_install
-        ).pack(side="right", padx=(0, 8))
+            btn_row = tk.Frame(container, bg=COLORS['card_bg'])
+            btn_row.pack(side="bottom", fill="x", pady=(20, 0))
 
-        self.root.wait_window(dialog)
+            def confirm_install():
+                idx = selected_index["value"]
+                if 0 <= idx < len(versions):
+                    result["version"] = versions[idx]
+                close_modal()
+
+            self._make_btn(
+                btn_row, "Cancel", style="secondary", font_size=10, command=close_modal
+            ).pack(side="right")
+            self._make_btn(
+                btn_row, "Install", style="primary", font_size=10, bold=True, command=confirm_install
+            ).pack(side="right", padx=(0, 8))
+
+        def on_close():
+            wait_var.set(True)
+
+        mgr.show_modal(
+            f"Install {mod_data.get('title', 'Modpack')}",
+            build_content,
+            width=560,
+            height=300,
+            on_close=on_close
+        )
+        self.root.wait_variable(wait_var)
         return result["version"]
 
     def _install_mr_modpack(self, mod_data, btn_widget):
@@ -1565,35 +1562,65 @@ class ModsScreenMixin:
 
     def _open_gallery_lightbox(self, gallery, initial_index=0):
         if not gallery: return
-        dialog_bg = COLORS['main_bg']
+        dialog_bg = COLORS.get('sidebar_bg', '#12141A')
+        card_bg = COLORS.get('main_bg', '#181A20')
         dialog_text_sec = COLORS.get('text_secondary', '#A0AAB0')
         dialog_text_pri = COLORS['text_primary']
 
-        dialog = tk.Toplevel(self.root)
-        dialog.title(gallery[initial_index].get("title") or "Screenshot Preview")
-        dialog.geometry("920x680")
-        dialog.config(bg=dialog_bg)
-        if os.name != "nt":
-            dialog.transient(self.root)
+        # In-window darkened overlay frame placed over self.root
+        overlay = tk.Frame(self.root, bg="#000000")
+        overlay.place(x=0, y=0, relwidth=1, relheight=1)
+        overlay.lift()
+
+        # Dimmed backdrop scrim
+        scrim = tk.Canvas(overlay, bg="#000000", highlightthickness=0)
+        scrim.place(x=0, y=0, relwidth=1, relheight=1)
+
+        # Centered Card Frame
+        card = tk.Frame(overlay, bg=dialog_bg, highlightbackground=COLORS.get('border_subtle', '#33373E'), highlightthickness=1)
+        card.place(relx=0.5, rely=0.5, anchor="center", relwidth=0.88, relheight=0.88)
+
+        # Top Bar with Title and Close (✕)
+        top_bar = tk.Frame(card, bg=dialog_bg, padx=16, pady=10)
+        top_bar.pack(side="top", fill="x")
+
+        title_lbl = tk.Label(top_bar, text="", font=(FONT_FAMILY, 11, "bold"), fg=dialog_text_pri, bg=dialog_bg)
+        title_lbl.pack(side="left")
+
+        def close_lightbox():
+            if overlay.winfo_exists():
+                overlay.place_forget()
+                overlay.destroy()
+
+        close_btn = tk.Label(top_bar, text="✕", font=(FONT_FAMILY, 11, "bold"), bg=dialog_bg, fg=dialog_text_sec, cursor="hand2", padx=8)
+        close_btn.pack(side="right")
+        close_btn.bind("<Button-1>", lambda _e: close_lightbox())
+        close_btn.bind("<Enter>", lambda _e: close_btn.config(fg="white"))
+        close_btn.bind("<Leave>", lambda _e: close_btn.config(fg=dialog_text_sec))
+
+        # Main image preview area
+        content_box = tk.Frame(card, bg=card_bg)
+        content_box.pack(expand=True, fill="both", padx=16, pady=(0, 10))
+
+        img_lbl = tk.Label(content_box, text="Loading full image...", bg=card_bg, fg=dialog_text_sec)
+        img_lbl.pack(expand=True, fill="both", padx=10, pady=10)
+
+        # Bottom Bar with Counter, Previous, Next
+        bottom_bar = tk.Frame(card, bg=dialog_bg, pady=10, padx=16)
+        bottom_bar.pack(side="bottom", fill="x")
+
+        counter_lbl = tk.Label(bottom_bar, text="", font=(FONT_FAMILY, 9), fg=dialog_text_sec, bg=dialog_bg)
+        counter_lbl.pack(side="left")
+
+        btn_box = tk.Frame(bottom_bar, bg=dialog_bg)
+        btn_box.pack(side="right")
 
         current_idx = [initial_index]
-        img_lbl = tk.Label(dialog, text="Loading full image...", bg=dialog_bg, fg=dialog_text_sec, width=80, height=25)
-        img_lbl.pack(expand=True, fill="both", padx=20, pady=(20, 10))
-
-        title_lbl = tk.Label(dialog, text="", font=(FONT_FAMILY, 11, "bold"), fg=dialog_text_pri, bg=dialog_bg)
-        title_lbl.pack(fill="x", padx=20)
-
-        counter_lbl = tk.Label(dialog, text="", font=(FONT_FAMILY, 9), fg=dialog_text_sec, bg=dialog_bg)
-        counter_lbl.pack(pady=4)
-
-        bottom_bar = tk.Frame(dialog, bg=dialog_bg, pady=10)
-        bottom_bar.pack(fill="x", padx=20)
 
         def show_current():
             idx = current_idx[0]
             item = gallery[idx]
-            dialog.title(item.get("title") or f"Screenshot {idx+1}")
-            title_lbl.config(text=item.get("title") or "")
+            title_lbl.config(text=item.get("title") or f"Screenshot {idx+1}")
             counter_lbl.config(text=f"Image {idx + 1} of {len(gallery)}")
             img_lbl.config(image="", text="Loading...")
 
@@ -1605,13 +1632,15 @@ class ModsScreenMixin:
                     if resp.status_code == 200:
                         with Image.open(io.BytesIO(resp.content)) as src:
                             full = src.convert("RGBA")
-                            full.thumbnail((880, 520), Image.Resampling.BILINEAR)
+                            cw = max(400, content_box.winfo_width() - 40)
+                            ch = max(300, content_box.winfo_height() - 40)
+                            full.thumbnail((cw, ch), Image.Resampling.BILINEAR)
                         def set_full():
-                            if dialog.winfo_exists() and img_lbl.winfo_exists():
+                            if overlay.winfo_exists() and img_lbl.winfo_exists():
                                 photo = ImageTk.PhotoImage(full)
                                 img_lbl.config(image=photo, text="")
                                 img_lbl.image = photo  # type: ignore[attr-defined]
-                        dialog.after(0, set_full)
+                        self.root.after(0, set_full)
                 except Exception as exc:
                     logger.debug("Failed loading lightbox image %s: %s", img_url, exc)
             _MOD_ICON_POOL.submit(load_full)
@@ -1626,13 +1655,15 @@ class ModsScreenMixin:
                 current_idx[0] += 1
                 show_current()
 
-        self._make_btn(bottom_bar, "◀ Previous", style="secondary", font_size=10, command=prev_img).pack(side="left")
-        self._make_btn(bottom_bar, "Next ▶", style="secondary", font_size=10, command=next_img).pack(side="left", padx=10)
-        self._make_btn(bottom_bar, "Close", style="primary", font_size=10, command=dialog.destroy).pack(side="right")
+        self._make_btn(btn_box, "◀ Previous", style="secondary", font_size=9, command=prev_img).pack(side="left", padx=4)
+        self._make_btn(btn_box, "Next ▶", style="secondary", font_size=9, command=next_img).pack(side="left", padx=4)
+        self._make_btn(btn_box, "Close", style="primary", font_size=9, command=close_lightbox).pack(side="left", padx=(8, 0))
 
-        dialog.bind("<Left>", lambda e: prev_img())
-        dialog.bind("<Right>", lambda e: next_img())
-        dialog.bind("<Escape>", lambda e: dialog.destroy())
+        scrim.bind("<Button-1>", lambda _e: close_lightbox())
+        overlay.bind("<Escape>", lambda _e: close_lightbox())
+        overlay.bind("<Left>", lambda _e: prev_img())
+        overlay.bind("<Right>", lambda _e: next_img())
+        overlay.focus_set()
 
         show_current()
 
