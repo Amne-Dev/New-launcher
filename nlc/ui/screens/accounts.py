@@ -24,203 +24,281 @@ logger = logging.getLogger(__name__)
 
 class AccountsScreenMixin:
     """Mixin providing profile/account menus, addition modals, and authentication flows."""
-    def toggle_profile_menu(self):
-        if hasattr(self, 'profile_menu') and self.profile_menu:
+    def close_profile_drawer(self):
+        """Collapse in-sidebar account drawer if open."""
+        if getattr(self, 'sidebar_account_drawer_open', False):
+            if hasattr(self, 'sidebar_account_drawer') and self.sidebar_account_drawer.winfo_exists():
+                self.sidebar_account_drawer.pack_forget()
+            self.sidebar_account_drawer_open = False
+            if hasattr(self, 'sidebar_chevron') and self.sidebar_chevron.winfo_exists():
+                self.sidebar_chevron.config(text="▾")
+        if hasattr(self, 'profile_menu') and self.profile_menu and isinstance(self.profile_menu, tk.Toplevel):
             try:
                 if self.profile_menu.winfo_exists():
-                    print("Closing existing profile menu")
                     self.profile_menu.destroy()
-                    self.profile_menu = None
-                    return
-            except:
-                self.profile_menu = None
+            except Exception:
+                pass
+            self.profile_menu = None
 
-        print("Opening profile menu")
-        menu = tk.Toplevel(self.root)
-        menu.overrideredirect(True)
-        menu.config(bg=COLORS['card_bg'], highlightthickness=1, highlightbackground=COLORS.get('border_subtle', '#2D3139'))
-        menu.transient(self.root)
-        menu.attributes('-topmost', True)
-        self.profile_menu = menu
-
-        # Position with screen bounds check
-        try:
-            x = self.sidebar.winfo_rootx() + self.sidebar.winfo_width()
-            y = self.profile_frame.winfo_rooty()
-            
-            # Check screen bounds
-            screen_w = self.root.winfo_screenwidth()
-            screen_h = self.root.winfo_screenheight()
-            
-            # Adjust if menu would go off-screen
-            if x + 250 > screen_w:
-                x = self.sidebar.winfo_rootx() - 250
-            if y + 300 > screen_h:
-                y = screen_h - 300 - 10
-                
-            menu.geometry(f"250x300+{x}+{y}")
-        except: 
-            menu.geometry("250x300")
-
-        tk.Label(menu, text="ACCOUNTS", font=(FONT_FAMILY, 10, "bold"), 
-                bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(anchor="w", padx=15, pady=10)
-
-        # Create Footer FIRST (so we can pack it to bottom)
-        footer = tk.Frame(menu, bg=COLORS['bottom_bar_bg'], height=45)
-        # Use pack(side="bottom") for footer first to ensure it stays visible!
-        footer.pack(fill="x", side="bottom") 
-        footer.pack_propagate(False)
-
-        # Scrollable Area
-        container = tk.Frame(menu, bg=COLORS['card_bg'])
-        container.pack(fill="both", expand=True)
-
-        canvas = tk.Canvas(container, bg=COLORS['card_bg'], highlightthickness=0)
-        scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview, style="Launcher.Vertical.TScrollbar")
-        list_frame = tk.Frame(canvas, bg=COLORS['card_bg'])
-
-        list_frame.bind(
-            "<Configure>",
-            lambda e: canvas.configure(
-                scrollregion=canvas.bbox("all")
+    def toggle_profile_menu(self):
+        """Toggle the collapsible in-app Account Center drawer in the sidebar."""
+        # Ensure drawer exists on sidebar
+        if not hasattr(self, 'sidebar_account_drawer') or not self.sidebar_account_drawer.winfo_exists():
+            target_parent = getattr(self, 'sidebar', getattr(self, 'root', None))
+            if target_parent is None:
+                return
+            self.sidebar_account_drawer = tk.Frame(
+                target_parent,
+                bg=COLORS['card_bg'],
+                highlightthickness=1,
+                highlightbackground=COLORS.get('border_subtle', '#2D3139')
             )
+            self.sidebar_account_drawer_open = False
+
+        if getattr(self, 'sidebar_account_drawer_open', False):
+            # Collapse drawer
+            self.sidebar_account_drawer.pack_forget()
+            self.sidebar_account_drawer_open = False
+            self.profile_menu = None
+            if hasattr(self, 'sidebar_chevron') and self.sidebar_chevron.winfo_exists():
+                self.sidebar_chevron.config(text="▾")
+            return
+
+        # Expand drawer
+        self.sidebar_account_drawer_open = True
+        self.profile_menu = None
+        if hasattr(self, 'sidebar_chevron') and self.sidebar_chevron.winfo_exists():
+            self.sidebar_chevron.config(text="▴")
+
+        self.render_sidebar_account_drawer()
+        sep = getattr(self, 'sidebar_nav_separator', None)
+        if sep and sep.winfo_exists():
+            self.sidebar_account_drawer.pack(fill="x", padx=10, pady=(0, 10), before=sep)
+        else:
+            self.sidebar_account_drawer.pack(fill="x", padx=10, pady=(0, 10))
+
+    def render_sidebar_account_drawer(self):
+        """Render the contents of the in-sidebar Account Center drawer."""
+        if not hasattr(self, 'sidebar_account_drawer') or not self.sidebar_account_drawer.winfo_exists():
+            return
+
+        drawer = self.sidebar_account_drawer
+        for child in drawer.winfo_children():
+            try:
+                child.destroy()
+            except Exception:
+                pass
+
+        card_bg = COLORS['card_bg']
+        drawer.config(
+            bg=card_bg,
+            highlightthickness=1,
+            highlightbackground=COLORS.get('border_subtle', '#2D3139')
         )
 
-        canvas.create_window((0, 0), window=list_frame, anchor="nw", width=230) # 250 - 20 padding/scrollbar
-        canvas.configure(yscrollcommand=scrollbar.set)
+        # Header Row
+        header_frame = tk.Frame(drawer, bg=card_bg)
+        header_frame.pack(fill="x", padx=10, pady=(8, 4))
 
-        canvas.pack(side="left", fill="both", expand=True)
-        # Scrollbar packing handled in refresh/configure
-        
-        # Smooth mousewheel
-        self._bind_wheel_events(canvas, lambda e, c=canvas: self._smooth_scroll(c, e), f"direct_{id(canvas)}")
-        self._bind_smooth_scroll(canvas, list_frame)
-        
-        # Update Scrollbar visibility
-        def update_scroll_state(e=None):
-            canvas.configure(scrollregion=canvas.bbox("all"))
-            bbox = canvas.bbox("all")
-            if bbox and (bbox[3] - bbox[1]) > canvas.winfo_height():
-                scrollbar.pack(side="right", fill="y")
-            else:
-                scrollbar.pack_forget()
-            self._bind_smooth_scroll(canvas, list_frame)
+        count_text = f"ACCOUNTS ({len(self.profiles)})" if hasattr(self, 'profiles') and self.profiles else "ACCOUNTS"
+        tk.Label(
+            header_frame,
+            text=count_text,
+            font=(FONT_FAMILY, 8, "bold"),
+            bg=card_bg,
+            fg=COLORS['text_secondary']
+        ).pack(side="left")
 
-        list_frame.bind("<Configure>", update_scroll_state)
-
-        if not self.profiles:
-             tk.Label(list_frame, text="No profiles", bg=COLORS['card_bg'], fg=COLORS['text_secondary']).pack(pady=10)
+        # Profiles list
+        profiles = getattr(self, 'profiles', [])
+        if not profiles:
+            tk.Label(
+                drawer,
+                text="No accounts",
+                font=(FONT_FAMILY, 9),
+                bg=card_bg,
+                fg=COLORS.get('text_muted', '#6B7280')
+            ).pack(pady=8)
         else:
-            for idx, p in enumerate(self.profiles):
-                self.create_profile_item(list_frame, idx, p)
+            if len(profiles) > 3:
+                scroll_container = tk.Frame(drawer, bg=card_bg, height=180)
+                scroll_container.pack(fill="x", padx=6, pady=2)
+                scroll_container.pack_propagate(False)
 
-        add_acct_btn = self._make_btn(footer, "+ Add Account", style="text", font_size=9,
-                                       command=self.open_add_account_modal)
-        add_acct_btn.config(bg=COLORS['bottom_bar_bg'], fg=COLORS['text_primary'])
-        add_acct_btn.bind("<Enter>", lambda e: add_acct_btn.config(fg="white"))
-        add_acct_btn.bind("<Leave>", lambda e: add_acct_btn.config(fg=COLORS['text_primary']))
-        add_acct_btn.pack(side="left", padx=10, fill="y")
+                canvas = tk.Canvas(scroll_container, bg=card_bg, highlightthickness=0, height=180)
+                list_frame = tk.Frame(canvas, bg=card_bg)
 
-        # Ensure menu is visible and focused with slide animation
-        menu.update_idletasks()
-        menu.deiconify()
-        menu.lift()
-        menu.focus_set()
-        self._animate_menu_open(menu, 300, direction="down")
-        menu.bind("<FocusOut>", lambda e: self._close_menu_delayed(menu))
+                list_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+                canvas.create_window((0, 0), window=list_frame, anchor="nw", width=210)
+                canvas.pack(side="left", fill="both", expand=True)
 
-    def _close_menu_delayed(self, menu):
-        # Small delay to allow button clicks inside
-        try:
-            if menu and menu.winfo_exists():
-                # Check if focus is still in the menu tree
-                focused = self.root.focus_displayof()
-                if focused and str(focused).startswith(str(menu)):
-                    return  # Don't close if focus is still inside
-                menu.destroy()
-        except:
-            pass
+                self._bind_wheel_events(canvas, lambda e, c=canvas: self._smooth_scroll(c, e), f"sb_acct_{id(canvas)}")
+                self._bind_smooth_scroll(canvas, list_frame)
+
+                for idx, p in enumerate(profiles):
+                    self.create_sidebar_profile_item(list_frame, idx, p)
+            else:
+                list_frame = tk.Frame(drawer, bg=card_bg)
+                list_frame.pack(fill="x", padx=6, pady=2)
+                for idx, p in enumerate(profiles):
+                    self.create_sidebar_profile_item(list_frame, idx, p)
+
+        # Footer Action Button: + Add Account
+        footer_frame = tk.Frame(drawer, bg=card_bg)
+        footer_frame.pack(fill="x", padx=8, pady=(6, 8))
+
+        add_btn = self._make_btn(
+            footer_frame,
+            "+ Add Account",
+            style="secondary",
+            font_size=9,
+            bold=True,
+            command=self.open_add_account_modal
+        )
+        add_btn.pack(fill="x", ipady=3)
+
+    def create_sidebar_profile_item(self, parent, idx, profile):
+        """Render a single account card in the in-sidebar drawer."""
+        is_active = (idx == self.current_profile_index)
+        bg = COLORS.get('hover_bg', '#3A3F4D') if is_active else COLORS['card_bg']
+        card_border = COLORS['accent_color'] if is_active else COLORS.get('border_subtle', '#2D3139')
+
+        frame = tk.Frame(
+            parent,
+            bg=bg,
+            cursor="hand2",
+            highlightthickness=1,
+            highlightbackground=card_border,
+            padx=6,
+            pady=4
+        )
+        frame.pack(fill="x", pady=2)
+
+        # Player skin head (24x24)
+        head = self.get_head_from_skin(profile.get("skin_path"), size=24)
+        lbl_icon = tk.Label(frame, image=head, bg=bg, cursor="hand2")
+        lbl_icon.image = head  # type: ignore[attr-defined]
+        lbl_icon.pack(side="left", padx=(2, 6))
+
+        # Text column (Name & Type)
+        text_frame = tk.Frame(frame, bg=bg, cursor="hand2")
+        text_frame.pack(side="left", fill="x", expand=True)
+
+        display_name = self._get_streamer_safe_name(profile.get("name", "Unknown"))
+        lbl_name = tk.Label(
+            text_frame,
+            text=display_name,
+            font=(FONT_FAMILY, 9, "bold" if is_active else "normal"),
+            bg=bg,
+            fg=COLORS['text_primary'],
+            anchor="w",
+            cursor="hand2"
+        )
+        lbl_name.pack(fill="x")
+
+        type_text = profile.get("type", "offline").capitalize()
+        lbl_type = tk.Label(
+            text_frame,
+            text=type_text,
+            font=(FONT_FAMILY, 7),
+            bg=bg,
+            fg=COLORS['accent_color'] if is_active else COLORS['text_secondary'],
+            anchor="w",
+            cursor="hand2"
+        )
+        lbl_type.pack(fill="x")
+
+        # Active checkmark
+        if is_active:
+            lbl_check = tk.Label(
+                frame,
+                text="✓",
+                font=(FONT_FAMILY, 8, "bold"),
+                bg=bg,
+                fg=COLORS.get('play_btn_green', '#2ECC71')
+            )
+            lbl_check.pack(side="right", padx=(2, 4))
+
+        # Delete Button
+        err_red = COLORS.get('error_red', '#EF4444')
+        del_btn = self._make_btn(
+            frame,
+            "×",
+            style="danger",
+            font_size=10,
+            bold=True,
+            icon=True,
+            command=lambda i=idx: self.delete_profile(i)
+        )
+        del_btn.config(bg=bg, fg=err_red, activebackground=bg, activeforeground=err_red)
+        del_btn.bind("<Enter>", lambda e, b=del_btn: b.config(fg="white", bg=err_red))
+        del_btn.bind("<Leave>", lambda e, b=del_btn, rbg=bg: b.config(fg=err_red, bg=rbg))
+        del_btn.pack(side="right", padx=(2, 2))
+
+        def on_click(e=None):
+            old_idx = self.current_profile_index
+            self.current_profile_index = idx
+            if old_idx != idx:
+                self.update_active_profile()
+                if hasattr(self, 'update_installation_dropdown'):
+                    self.update_installation_dropdown()
+            self.render_sidebar_account_drawer()
+
+        frame.bind("<Button-1>", on_click)
+        lbl_icon.bind("<Button-1>", on_click)
+        text_frame.bind("<Button-1>", on_click)
+        lbl_name.bind("<Button-1>", on_click)
+        lbl_type.bind("<Button-1>", on_click)
+
+        # Hover state
+        hover_col = COLORS.get('card_hover', '#2C313C')
+        def on_enter(e=None):
+            if not (idx == self.current_profile_index):
+                frame.config(bg=hover_col)
+                lbl_icon.config(bg=hover_col)
+                text_frame.config(bg=hover_col)
+                lbl_name.config(bg=hover_col)
+                lbl_type.config(bg=hover_col)
+                del_btn.config(bg=hover_col)
+
+        def on_leave(e=None):
+            if not (idx == self.current_profile_index):
+                frame.config(bg=bg)
+                lbl_icon.config(bg=bg)
+                text_frame.config(bg=bg)
+                lbl_name.config(bg=bg)
+                lbl_type.config(bg=bg)
+                del_btn.config(bg=bg)
+
+        frame.bind("<Enter>", on_enter)
+        frame.bind("<Leave>", on_leave)
+
+    def create_profile_item(self, parent, idx, profile):
+        """Backward-compatible alias for create_sidebar_profile_item."""
+        return self.create_sidebar_profile_item(parent, idx, profile)
 
     def delete_profile(self, idx):
-        if not self.profiles or idx < 0 or idx >= len(self.profiles): return
-        
+        if not self.profiles or idx < 0 or idx >= len(self.profiles):
+            return
+
         p_name = self.profiles[idx].get("name", "Account")
         display_name = self._get_streamer_safe_name(p_name)
         if custom_askyesno("Remove Account", f"Are you sure you want to remove account '{display_name}'?"):
             del self.profiles[idx]
-            
+
             # Reset index if needed
             if self.current_profile_index >= len(self.profiles):
                 self.current_profile_index = max(0, len(self.profiles) - 1)
-            
+
             if not self.profiles:
                 self.create_default_profile()
-            
+
             # Update UI first, then save to avoid redundant syncs
             self.update_active_profile()
             self.save_config(sync_ui=False)
-            
-            # Close menu to refresh
-            if hasattr(self, 'profile_menu') and self.profile_menu:
-                try:
-                    if self.profile_menu.winfo_exists():
-                        self.profile_menu.destroy()
-                except:
-                    pass
 
-    def create_profile_item(self, parent, idx, profile):
-        is_active = (idx == self.current_profile_index)
-        bg = COLORS.get('hover_bg', '#3A3F4D') if is_active else COLORS['card_bg']
-        
-        frame = tk.Frame(parent, bg=bg, pady=8, padx=10, cursor="hand2")
-        frame.pack(fill="x", pady=1)
-        
-        head = self.get_head_from_skin(profile.get("skin_path"), size=24)
-        lbl_icon = tk.Label(frame, image=head, bg=bg) # type: ignore
-        lbl_icon.image = head # type: ignore # keep ref
-        lbl_icon.pack(side="left", padx=(0, 10))
-        
-        tk.Label(frame, text=self._get_streamer_safe_name(profile.get("name", "Unknown")), font=(FONT_FAMILY, 10, "bold"),
-                bg=bg, fg=COLORS['text_primary']).pack(side="left")
-        
-        # Delete Button
-        err_red = COLORS.get('error_red', '#EF4444')
-        del_btn = self._make_btn(frame, "-", style="danger", font_size=12, bold=True, icon=True,
-                                 command=lambda: self.delete_profile(idx))
-        del_btn.config(bg=bg, fg=err_red, activebackground=bg, activeforeground=err_red)
-        del_btn.bind("<Enter>", lambda e: del_btn.config(fg="white", bg=err_red))
-        del_btn.bind("<Leave>", lambda e: del_btn.config(fg=err_red, bg=bg))
-        
-        # Only show delete if strictly more than 1 profile? Or allow deleting the last one (which resets to default)?
-        # User said "right of every account".
-        # Standard launcher behavior typically allows removing any added account.
-        del_btn.pack(side="right", padx=(5, 0))
-
-        tk.Label(frame, text=profile.get("type", "offline").title(), font=(FONT_FAMILY, 8),
-                bg=bg, fg=COLORS['text_secondary']).pack(side="right")
-        
-        def on_click(e):
-            old_index = self.current_profile_index
-            self.current_profile_index = idx
-            
-            # Only update if index actually changed
-            if old_index != idx:
-                self.update_active_profile()
-                # Update installation dropdown in case settings changed
-                if hasattr(self, 'update_installation_dropdown'):
-                    self.update_installation_dropdown()
-                    
-            if hasattr(self, 'profile_menu') and self.profile_menu:
-                try:
-                    if self.profile_menu.winfo_exists():
-                        self.profile_menu.destroy()
-                except:
-                    pass
-            
-        frame.bind("<Button-1>", on_click)
-        for child in frame.winfo_children():
-            if child != del_btn:
-                child.bind("<Button-1>", on_click)
+            if hasattr(self, 'render_sidebar_account_drawer') and getattr(self, 'sidebar_account_drawer_open', False):
+                self.render_sidebar_account_drawer()
 
     def open_add_account_modal(self):
         print("Opening add account modal")
