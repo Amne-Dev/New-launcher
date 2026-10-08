@@ -302,7 +302,7 @@ class AccountsScreenMixin:
 
     def open_add_account_modal(self):
         print("Opening add account modal")
-        if hasattr(self, 'profile_menu') and self.profile_menu:
+        if hasattr(self, 'profile_menu') and self.profile_menu and isinstance(self.profile_menu, tk.Toplevel):
             try:
                 if self.profile_menu.winfo_exists():
                     self.profile_menu.destroy()
