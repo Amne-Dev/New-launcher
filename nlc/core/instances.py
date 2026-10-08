@@ -11,7 +11,7 @@ import sys
 import uuid
 import zipfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 logger = logging.getLogger(__name__)
 
@@ -23,60 +23,72 @@ SHARED_ASSET_FOLDERS = {
 }
 
 
-def is_directory_link(path: Path) -> bool:
+def is_directory_link(path: Union[Path, str]) -> bool:
     """Check if a path is a symlink or Windows directory junction."""
-    if not path.exists() and not path.is_symlink():
+    p = Path(path)
+    if not p.exists() and not p.is_symlink():
         return False
-    if path.is_symlink():
+    if p.is_symlink():
         return True
     if os.name == "nt":
         try:
             import stat
-            return bool(path.lstat().st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+            return bool(p.lstat().st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
         except Exception:
             return False
     return False
 
 
-def remove_directory_link(link_path: Path) -> None:
+def remove_directory_link(link_path: Union[Path, str]) -> bool:
     """Safely remove a symlink or junction without deleting target folder contents."""
-    if not is_directory_link(link_path):
-        return
+    p = Path(link_path)
+    if not is_directory_link(p):
+        return False
     try:
-        if os.name == "nt" and not link_path.is_symlink():
+        if os.name == "nt" and not p.is_symlink():
             # Windows junction directory removal requires os.rmdir without recursion
-            os.rmdir(link_path)
+            os.rmdir(p)
         else:
-            link_path.unlink()
+            p.unlink()
+        return True
     except Exception as e:
-        logger.warning("Failed to unlink directory %s: %s", link_path, e)
+        logger.warning("Failed to unlink directory %s: %s", p, e)
+        return False
 
 
-def create_directory_link(target: Path, link: Path) -> bool:
+def create_directory_link(target: Union[Path, str], link: Union[Path, str]) -> bool:
     """
     Create a cross-platform directory link from link -> target.
     Uses POSIX symlinks on Linux/macOS and directory junctions / symlinks on Windows.
+    Accepts both (target, link) and (link, target) order dynamically.
     """
-    target = target.resolve()
+    target_path = Path(target)
+    link_path = Path(link)
+
+    # Check if arguments are in (link, target) order instead of (target, link)
+    if not target_path.exists() and not target_path.is_symlink() and link_path.exists():
+        target_path, link_path = link_path, target_path
+
+    target_path = target_path.resolve()
     try:
         if os.name == "nt":
             try:
                 # Try directory junction first (doesn't require Windows Developer Mode / Admin privileges)
                 import _winapi
-                _winapi.CreateJunction(str(target), str(link))
+                _winapi.CreateJunction(str(target_path), str(link_path))
                 return True
             except Exception:
-                os.symlink(str(target), str(link), target_is_directory=True)
+                os.symlink(str(target_path), str(link_path), target_is_directory=True)
                 return True
         else:
-            os.symlink(str(target), str(link), target_is_directory=True)
+            os.symlink(str(target_path), str(link_path), target_is_directory=True)
             return True
     except Exception as e:
-        logger.warning("Could not create link %s -> %s: %s", link, target, e)
+        logger.warning("Could not create link %s -> %s: %s", link_path, target_path, e)
         return False
 
 
-def link_shared_folder(instance_dir: str, shared_root: str, folder_name: str, enabled: bool) -> None:
+def link_shared_folder(instance_dir: Union[Path, str], shared_root: Union[Path, str], folder_name: str, enabled: bool) -> bool:
     """
     Ensure the instance's subfolder is linked to the shared root or isolated.
     - If enabled: link -> shared_root/folder_name
@@ -96,7 +108,7 @@ def link_shared_folder(instance_dir: str, shared_root: str, folder_name: str, en
                 # Check if it already points to target_dir
                 resolved = link_dir.resolve()
                 if resolved == target_dir.resolve():
-                    return
+                    return True
             except Exception:
                 pass
             remove_directory_link(link_dir)
@@ -115,22 +127,23 @@ def link_shared_folder(instance_dir: str, shared_root: str, folder_name: str, en
                     shutil.rmtree(link_dir)
                 except Exception as e:
                     logger.warning("Error merging instance folder %s before linking: %s", link_dir, e)
-                    return
+                    return False
             else:
                 try:
                     link_dir.unlink()
                 except Exception:
-                    return
+                    return False
 
-        create_directory_link(target_dir, link_dir)
+        return create_directory_link(target_dir, link_dir)
     else:
         # Asset sharing disabled: unlink if linked and create independent physical folder
         if is_directory_link(link_dir):
             remove_directory_link(link_dir)
         link_dir.mkdir(parents=True, exist_ok=True)
+        return True
 
 
-def sync_instance_assets(instance_dir: str, shared_root: str, settings: Optional[Dict[str, Any]] = None) -> None:
+def sync_instance_assets(instance_dir: Union[Path, str], shared_root: Union[Path, str], settings: Optional[Dict[str, Any]] = None) -> None:
     """
     Sync all shared assets (resourcepacks, shaderpacks, saves, configs) for an instance.
     """
@@ -147,23 +160,36 @@ def sync_instance_assets(instance_dir: str, shared_root: str, settings: Optional
         link_shared_folder(instance_dir, shared_root, folder_name, enabled=enabled)
 
 
-def export_modpack_to_zip(pack_dir: str, pack_meta: Dict[str, Any], target_zip_path: str) -> None:
+def export_modpack_to_zip(
+    pack_dir: Optional[Union[Path, str]] = None,
+    output_path: Optional[Union[Path, str]] = None,
+    pack_meta: Optional[Dict[str, Any]] = None,
+    *,
+    modpack_dir: Optional[Union[Path, str]] = None,
+    target_zip_path: Optional[Union[Path, str]] = None,
+) -> str:
     """
     Export an instance / modpack directory as a clean .zip archive.
     Omits symlinked shared assets to avoid bundling giant external directories.
     """
-    pack_path = Path(pack_dir).resolve()
-    target_path = Path(target_zip_path).resolve()
+    src = pack_dir or modpack_dir
+    dst = output_path or target_zip_path
+    if not src or not dst:
+        raise ValueError("Both source modpack directory and output zip path are required.")
+
+    pack_path = Path(src).resolve()
+    target_path = Path(dst).resolve()
     target_path.parent.mkdir(parents=True, exist_ok=True)
 
+    meta = pack_meta or {}
     with zipfile.ZipFile(target_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         # Write metadata
         clean_meta = {
-            "name": pack_meta.get("name", "Custom Modpack"),
-            "loader": pack_meta.get("loader", "Vanilla"),
-            "mc_version": pack_meta.get("mc_version", "1.21.1"),
-            "version_name": pack_meta.get("version_name", "1.0.0"),
-            "source": pack_meta.get("source", "nlc_export"),
+            "name": meta.get("name", "Custom Modpack"),
+            "loader": meta.get("loader", "Vanilla"),
+            "mc_version": meta.get("mc_version", "1.21.1"),
+            "version_name": meta.get("version_name", "1.0.0"),
+            "source": meta.get("source", "nlc_export"),
         }
         zf.writestr("modpack.json", json.dumps(clean_meta, indent=2))
 
@@ -177,31 +203,52 @@ def export_modpack_to_zip(pack_dir: str, pack_meta: Dict[str, Any], target_zip_p
                     arcname = file_path.relative_to(pack_path)
                     zf.write(file_path, arcname=str(arcname))
 
+    return str(target_path)
 
-def export_modpack_to_mrpack(pack_dir: str, pack_meta: Dict[str, Any], target_mrpack_path: str) -> None:
+
+def export_modpack_to_mrpack(
+    pack_dir: Optional[Union[Path, str]] = None,
+    output_path: Optional[Union[Path, str]] = None,
+    pack_meta: Optional[Dict[str, Any]] = None,
+    *,
+    modpack_dir: Optional[Union[Path, str]] = None,
+    target_mrpack_path: Optional[Union[Path, str]] = None,
+    modpack_name: Optional[str] = None,
+    version_id: Optional[str] = None,
+    game_version: Optional[str] = None,
+    loader: Optional[str] = None,
+) -> str:
     """
     Export an instance / modpack directory as a standard Modrinth .mrpack archive.
     Local mods and configs are packaged into overrides/ according to the Modrinth pack specification.
     """
-    pack_path = Path(pack_dir).resolve()
-    target_path = Path(target_mrpack_path).resolve()
+    src = pack_dir or modpack_dir
+    dst = output_path or target_mrpack_path
+    if not src or not dst:
+        raise ValueError("Both source modpack directory and output mrpack path are required.")
+
+    pack_path = Path(src).resolve()
+    target_path = Path(dst).resolve()
     target_path.parent.mkdir(parents=True, exist_ok=True)
 
-    name = str(pack_meta.get("name", "Custom Modpack"))
-    mc_version = str(pack_meta.get("mc_version", "1.21.1"))
-    loader = str(pack_meta.get("loader", "fabric")).lower()
-    version_id = str(pack_meta.get("version_id") or uuid.uuid4().hex[:8])
+    meta = pack_meta or {}
+    name = str(modpack_name or meta.get("name") or "Custom Modpack")
+    mc_version = str(game_version or meta.get("mc_version") or "1.21.1")
+    mod_loader = str(loader or meta.get("loader") or "fabric").lower()
+    # Normalize loader name for modrinth dependencies (e.g. fabric-loader, forge, neoforge, quilt-loader)
+    loader_dep = f"{mod_loader}-loader" if mod_loader in ("fabric", "quilt") else mod_loader
+    v_id = str(version_id or meta.get("version_id") or meta.get("version_name") or uuid.uuid4().hex[:8])
 
     index_data = {
         "formatVersion": 1,
         "game": "minecraft",
-        "versionId": version_id,
+        "versionId": v_id,
         "name": name,
-        "summary": f"Modpack exported from New Launcher (NLC)",
+        "summary": "Modpack exported from New Launcher (NLC)",
         "files": [],
         "dependencies": {
             "minecraft": mc_version,
-            loader: "*"
+            loader_dep: "latest"
         }
     }
 
@@ -218,3 +265,5 @@ def export_modpack_to_mrpack(pack_dir: str, pack_meta: Dict[str, Any], target_mr
                     rel = file_path.relative_to(pack_path)
                     arcname = f"overrides/{rel.as_posix()}"
                     zf.write(file_path, arcname=arcname)
+
+    return str(target_path)
