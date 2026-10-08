@@ -1068,19 +1068,15 @@ class MinecraftLauncher(
         
         # Progressbar
         style.configure("Launcher.Horizontal.TProgressbar",
-                       troughcolor="#212121",
-                       background=COLORS['success_green'],
-                       bordercolor="#212121",
-                       lightcolor="#212121",
-                       darkcolor="#212121",
+                       troughcolor=COLORS.get('input_bg', '#212121'),
+                       background=COLORS.get('play_btn_green', COLORS.get('success_green', '#10B981')),
+                       bordercolor=COLORS.get('input_bg', '#212121'),
+                       lightcolor=COLORS.get('input_bg', '#212121'),
+                       darkcolor=COLORS.get('input_bg', '#212121'),
                        borderwidth=0,
                        thickness=15)
         
         # Scrollbar (Custom Dark)
-        # Note: 'clam' theme Scrollbars are tricky. 
-        # We need to use 'Vertical.TScrollbar' and define the layout or element options clearly.
-        # Alternatively, using standard Tk Scrollbar with colors if ttk fails, but let's try to fix style map.
-        
         style.layout("Launcher.Vertical.TScrollbar", 
                     [('Vertical.Scrollbar.trough',
                       {'children': [('Vertical.Scrollbar.thumb', 
@@ -1088,17 +1084,17 @@ class MinecraftLauncher(
                        'sticky': 'ns'})]) # type: ignore
                        
         style.configure("Launcher.Vertical.TScrollbar",
-                       background="#3A3B3C",
+                       background=COLORS.get('input_bg', '#2E333E'),
                        troughcolor=COLORS['main_bg'],
                        bordercolor=COLORS['main_bg'],
                        arrowcolor=COLORS['text_secondary'],
-                       lightcolor="#3A3B3C",
-                       darkcolor="#3A3B3C",
+                       lightcolor=COLORS.get('input_bg', '#2E333E'),
+                       darkcolor=COLORS.get('input_bg', '#2E333E'),
                        relief="flat",
                        borderwidth=0)
         
         style.map("Launcher.Vertical.TScrollbar",
-                 background=[('pressed', '#505050'), ('active', '#4a4a4a')],
+                 background=[('pressed', COLORS.get('hover_bg', '#3A3F4D')), ('active', COLORS.get('card_hover', '#2C313C'))],
                  arrowcolor=[('pressed', COLORS['text_primary']), ('active', COLORS['text_primary'])])
 
     def _set_custom_window_chrome(self, enabled):
@@ -2634,6 +2630,12 @@ class MinecraftLauncher(
         except Exception as e:
             logger.debug("Failed refreshing all buttons: %s", e)
 
+        # 5. Synchronize TTK widget styles
+        try:
+            self.setup_styles()
+        except Exception as e:
+            logger.debug("Failed refreshing TTK styles: %s", e)
+
         if save:
             try:
                 self.save_config(sync_ui=True, immediate=True)
@@ -2975,14 +2977,18 @@ class MinecraftLauncher(
         dots_frame = tk.Frame(step_bar, bg=COLORS.get('sidebar_bg', '#1E1E1E'))
         dots_frame.pack(side="right", padx=16)
         dot_labels = []
+        dot_inactive_bg = COLORS.get('input_bg', '#2E333E')
+        dot_inactive_fg = COLORS.get('text_muted', '#6B7280')
+        accent_color = COLORS.get('accent_color', '#2ECC71')
+
         for i, step_name in enumerate(STEPS):
             dot_f = tk.Frame(dots_frame, bg=COLORS.get('sidebar_bg', '#1E1E1E'))
             dot_f.pack(side="left", padx=10)
             dot = tk.Label(dot_f, text=f"{i + 1}", font=("Segoe UI", 8, "bold"),
-                           bg="#3A3A3A", fg="white", width=2, height=1)
+                           bg=dot_inactive_bg, fg="white", width=2, height=1)
             dot.pack(side="left", padx=(0, 4))
             lbl = tk.Label(dot_f, text=step_name, font=("Segoe UI", 8),
-                           bg=COLORS.get('sidebar_bg', '#1E1E1E'), fg="#707070")
+                           bg=COLORS.get('sidebar_bg', '#1E1E1E'), fg=dot_inactive_fg)
             lbl.pack(side="left")
             dot_labels.append((dot, lbl))
 
@@ -2992,11 +2998,11 @@ class MinecraftLauncher(
                     dot.config(text="✓", bg=COLORS.get('success_green', '#2D8F36'), fg="white")
                     lbl.config(fg=COLORS.get('success_green', '#2D8F36'))
                 elif i == active_idx:
-                    dot.config(text=f"{i + 1}", bg=COLORS.get('accent_blue', '#3498DB'), fg="white")
+                    dot.config(text=f"{i + 1}", bg=accent_color, fg="white")
                     lbl.config(fg="white")
                 else:
-                    dot.config(text=f"{i + 1}", bg="#3A3A3A", fg="#707070")
-                    lbl.config(fg="#707070")
+                    dot.config(text=f"{i + 1}", bg=dot_inactive_bg, fg=dot_inactive_fg)
+                    lbl.config(fg=dot_inactive_fg)
 
         # ── Scrollable or centered content area ──
         content_canvas = tk.Canvas(onboarding_view, bg=main_bg, highlightthickness=0)
@@ -3113,13 +3119,13 @@ class MinecraftLauncher(
             code_lbl.pack()
 
             url_lbl = tk.Label(content, text="", font=("Segoe UI", 10, "underline"),
-                              bg=main_bg, fg="#3498DB", cursor="hand2")
+                              bg=main_bg, fg=COLORS.get('accent_blue', '#3498DB'), cursor="hand2")
             url_lbl.pack(pady=4)
 
             btn_row = tk.Frame(content, bg=main_bg)
             btn_row.pack(pady=12)
 
-            copy_btn = make_btn(btn_row, "Copy Code", "#404040",
+            copy_btn = make_btn(btn_row, "Copy Code", COLORS.get('input_bg', '#404040'),
                                lambda: None, font_size=9, bold=False)
             copy_btn.pack(side="left", padx=6)
             copy_btn.config(state="disabled")
@@ -3156,12 +3162,12 @@ class MinecraftLauncher(
                     if onboarding_view.winfo_exists():
                         code_lbl.config(text=user_code)
                         url_lbl.config(text=verification_uri)
-                        status_lbl.config(text="Enter the code above at the link below")
+                        status_lbl.config(text="Sign in using the verification code below")
                         inst_lbl.config(text="1. Click the link  2. Paste the code  3. Sign in with Microsoft")
                         copy_btn.config(state="normal",
                             command=lambda: (self.root.clipboard_clear(),
                                              self.root.clipboard_append(user_code),
-                                             copy_btn.config(text="Copied!", fg="#2D8F36"),
+                                             copy_btn.config(text="Copied!", fg=COLORS.get('success_green', '#2D8F36')),
                                              self.root.after(1500, lambda: copy_btn.config(text="Copy Code", fg="white") if copy_btn.winfo_exists() else None)))
 
                     while onboarding_view.winfo_exists():
@@ -3614,7 +3620,7 @@ class MinecraftLauncher(
         target = getattr(self, 'new_inst_btn', None)
         self.show_coach_mark(
             target,
-            "Create and manage game installations here.\nUse 'New installation' to add versions, mods, and loaders.",
+            "Create and manage game installations here.\nUse 'New installation' in the top bar to add versions, mods, and loaders.",
             next_action=self.start_locker_tour,
             step_info="TOUR 1 OF 3 • INSTALLATIONS",
         )
@@ -3632,7 +3638,7 @@ class MinecraftLauncher(
 
         self.show_coach_mark(
             target,
-            "Customize your look here!\nSwitch between Skins and Wallpapers.",
+            "Customize your look in the Locker!\nSwitch between Skins and Wallpapers using the sub-tabs.",
             next_action=self.start_settings_tour,
             step_info="TOUR 2 OF 3 • LOCKER",
         )
@@ -3655,7 +3661,7 @@ class MinecraftLauncher(
         
         self.show_coach_mark(
             target,
-            "Finally, configure advanced options, memory,\nand account management here.",
+            "Configure launcher settings, memory allocation,\nand custom appearance here.",
             next_action=self.finish_tour_celebration,
             step_info="TOUR 3 OF 3 • SETTINGS",
         )
@@ -3666,32 +3672,36 @@ class MinecraftLauncher(
         if not hasattr(self, 'content_area') or not self.content_area.winfo_exists():
             return
 
+        card_bg = COLORS['card_bg']
+        accent_col = COLORS.get('accent_color', '#2ECC71')
+        text_pri = COLORS['text_primary']
+
         card = tk.Frame(
             self.content_area,
-            bg=COLORS.get('card_bg', '#1e1e24'),
+            bg=card_bg,
             highlightthickness=1,
-            highlightbackground=COLORS.get('accent_color', '#0078D7'),
+            highlightbackground=accent_col,
             padx=20,
             pady=16,
         )
         card.place(relx=0.5, rely=0.88, anchor="s")
 
-        header = tk.Frame(card, bg=COLORS.get('card_bg', '#1e1e24'))
+        header = tk.Frame(card, bg=card_bg)
         header.pack(fill="x")
         tk.Label(
             header,
             text="🎉 ALL SET!",
             font=("Segoe UI", 10, "bold"),
-            bg=COLORS.get('card_bg', '#1e1e24'),
-            fg=COLORS.get('accent_color', '#0078D7'),
+            bg=card_bg,
+            fg=accent_col,
         ).pack(side="left")
 
         tk.Label(
             card,
             text="You're ready to play! Have fun with New Launcher.",
             font=("Segoe UI", 11, "bold"),
-            bg=COLORS.get('card_bg', '#1e1e24'),
-            fg=COLORS.get('text_main', '#ffffff'),
+            bg=card_bg,
+            fg=text_pri,
         ).pack(anchor="w", pady=(6, 12))
 
         def dismiss():
@@ -3702,8 +3712,8 @@ class MinecraftLauncher(
             card,
             text="Let's Go",
             font=("Segoe UI", 10, "bold"),
-            bg=COLORS.get('accent_color', '#0078D7'),
-            fg="white",
+            bg=accent_col,
+            fg=COLORS.get('play_btn_text', 'white'),
             padx=16,
             pady=6,
             cursor="hand2",
@@ -3730,18 +3740,23 @@ class MinecraftLauncher(
                 self.root.after(100, next_action)
             return
 
+        card_bg = COLORS['card_bg']
+        accent_col = COLORS.get('accent_color', '#2ECC71')
+        text_pri = COLORS['text_primary']
+        text_muted = COLORS.get('text_muted', '#6B7280')
+
         card = tk.Frame(
             self.content_area,
-            bg=COLORS.get('card_bg', '#1e1e24'),
+            bg=card_bg,
             highlightthickness=1,
-            highlightbackground=COLORS.get('accent_color', '#0078D7'),
+            highlightbackground=accent_col,
             padx=18,
             pady=14,
         )
         self.tour_card = card
         card.place(relx=0.5, rely=0.92, anchor="s")
 
-        header = tk.Frame(card, bg=COLORS.get('card_bg', '#1e1e24'))
+        header = tk.Frame(card, bg=card_bg)
         header.pack(fill="x", pady=(0, 4))
 
         if step_info:
@@ -3749,16 +3764,16 @@ class MinecraftLauncher(
                 header,
                 text=step_info,
                 font=("Segoe UI", 8, "bold"),
-                bg=COLORS.get('card_bg', '#1e1e24'),
-                fg=COLORS.get('accent_color', '#0078D7'),
+                bg=card_bg,
+                fg=accent_col,
             ).pack(side="left")
 
         close_lbl = tk.Label(
             header,
             text="✕",
             font=("Segoe UI", 9, "bold"),
-            bg=COLORS.get('card_bg', '#1e1e24'),
-            fg=COLORS.get('text_muted', '#8a8a93'),
+            bg=card_bg,
+            fg=text_muted,
             cursor="hand2",
         )
         close_lbl.pack(side="right")
@@ -3768,21 +3783,21 @@ class MinecraftLauncher(
             card,
             text=text,
             font=("Segoe UI", 10),
-            bg=COLORS.get('card_bg', '#1e1e24'),
-            fg=COLORS.get('text_main', '#ffffff'),
+            bg=card_bg,
+            fg=text_pri,
             justify="left",
         )
         body_lbl.pack(anchor="w", pady=(2, 10))
 
-        controls = tk.Frame(card, bg=COLORS.get('card_bg', '#1e1e24'))
+        controls = tk.Frame(card, bg=card_bg)
         controls.pack(fill="x")
 
         skip_lbl = tk.Label(
             controls,
             text="Skip Tour",
             font=("Segoe UI", 8, "underline"),
-            bg=COLORS.get('card_bg', '#1e1e24'),
-            fg=COLORS.get('text_muted', '#8a8a93'),
+            bg=card_bg,
+            fg=text_muted,
             cursor="hand2",
         )
         skip_lbl.pack(side="left")
@@ -3798,8 +3813,8 @@ class MinecraftLauncher(
             controls,
             text=btn_text,
             font=("Segoe UI", 9, "bold"),
-            bg=COLORS.get('accent_color', '#0078D7'),
-            fg="white",
+            bg=accent_col,
+            fg=COLORS.get('play_btn_text', 'white'),
             padx=14,
             pady=5,
             cursor="hand2",
