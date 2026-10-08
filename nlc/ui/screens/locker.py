@@ -425,7 +425,8 @@ class LockerScreenMixin:
         """Render a single frame of the 3D model and update canvas without flicker."""
         if not hasattr(self, 'preview_canvas') or not self.preview_canvas.winfo_exists():
             return
-        if not self.skin_path or not os.path.exists(self.skin_path):
+        skin_p = getattr(self, 'skin_path', None)
+        if not skin_p or not os.path.exists(skin_p):
             self.preview_canvas.delete("all")
             return
 
@@ -444,7 +445,7 @@ class LockerScreenMixin:
         walk_phase = getattr(self, 'preview_walk_phase', 0.0) if getattr(self, 'is_walking', True) else 0.0
 
         rendered = SkinRenderer3D.render_frame(
-            skin_path=self.skin_path,
+            skin_path=skin_p,
             cape_path=cape_path,
             yaw_deg=yaw,
             pitch_deg=pitch,

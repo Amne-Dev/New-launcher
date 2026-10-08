@@ -112,82 +112,36 @@ class DownloadQueueMixin:
             action.pack_propagate(False)
 
     def add_download_task(self, name, type_str="file"):
-        # Show container if hidden with fade-in effect
-        if not self.queue_container.winfo_viewable():
-             self.queue_container.pack(side="bottom", fill="x", padx=10, pady=10)
-
         task_id = str(uuid.uuid4())
-        
-        # Card style with subtle border
-        card_bg = COLORS.get('card_bg', '#242830')
-        border_color = COLORS.get('border_subtle', '#2D3139')
-        hover_bg = COLORS.get('hover_bg', '#282C36')
-        text_sec = COLORS.get('text_secondary', '#A6ACB8')
-        
-        border_frame = tk.Frame(self.queue_list_frame, bg=border_color, padx=1, pady=1)
-        border_frame.pack(fill="x", pady=3)
-        
-        frame = tk.Frame(border_frame, bg=card_bg, pady=6, padx=10)
-        frame.pack(fill="x")
-        
-        # Title Row
-        top = tk.Frame(frame, bg=card_bg)
-        top.pack(fill="x")
-        
-        # Truncate name
-        disp_name = (name[:18] + '..') if len(name) > 18 else name
-        tk.Label(top, text=disp_name, font=("Segoe UI", 8, "bold"), fg="white", bg=card_bg, anchor="w").pack(side="left")
-        
-        # Detail Frame (Container)
-        detail_frame = tk.Frame(frame, bg=card_bg)
-        detail_lbl = tk.Label(detail_frame, text="Starting...", font=("Segoe UI", 7), fg=text_sec, bg=card_bg, anchor="w")
-        detail_lbl.pack(fill="x")
-        
-        # Dropdown/Expand capability
-        if type_str == "modpack":
-            def toggle():
-                if detail_frame.winfo_viewable():
-                    detail_frame.pack_forget()
-                    btn.config(text="▼")
-                else:
-                    detail_frame.pack(fill="x", pady=(2,0))
-                    btn.config(text="▲")
-            
-            btn = tk.Button(top, text="▼", font=("Segoe UI", 6), bg=card_bg, fg="white", 
-                            bd=0, activebackground=hover_bg, activeforeground="white",
-                            command=toggle, width=2, cursor="hand2")
-            btn.pack(side="right")
-            
-            # Hover effect
-            btn.bind("<Enter>", lambda e: btn.config(bg=hover_bg))
-            btn.bind("<Leave>", lambda e: btn.config(bg=card_bg))
-        else:
-             # Just show status inline or always hidden? 
-             # For single files, maybe no detail frame, or always visible?
-             # Let's keep it simpler: hidden by default.
-             pass
+        disp_name = (name[:24] + '..') if len(name) > 24 else name
 
-        # Progress
-        pb = ttk.Progressbar(frame, orient="horizontal", mode="determinate", length=100)
-        pb.pack(fill="x", pady=3)
-        
+        # 1. Register with NotificationStore
+        if hasattr(self, 'notifications') and self.notifications:
+            self.notifications.add(
+                category="download",
+                title=name,
+                message="Starting download...",
+                item_id=task_id,
+                progress=0.0,
+                status="active"
+            )
+
+        # 2. Trigger rich Toast notification with Radial Progress Bar
+        if hasattr(self, 'toast_manager') and self.toast_manager:
+            self.toast_manager.show_download_toast(
+                task_id=task_id,
+                title=disp_name,
+                detail="Starting...",
+                initial_progress=0.0,
+                on_cancel=lambda: self.cancel_download(task_id)
+            )
+
+        cancel_ev = threading.Event()
         self.download_tasks[task_id] = {
-            "border_frame": border_frame,
-            "frame": frame,
-            "pb": pb,
-            "detail_lbl": detail_lbl,
-            "detail_frame": detail_frame,
+            "name": name,
             "type": type_str,
-            "cancel_event": threading.Event()
+            "cancel_event": cancel_ev
         }
-        
-        # Modern Context Menu for Cancellation
-        def build_download_menu() -> NeoContextMenu:
-            m = NeoContextMenu(frame, min_width=140)
-            m.add_item("Cancel Download", lambda: self.cancel_download(task_id), icon="✕", is_danger=True)
-            return m
-
-        attach_context_menu(frame, build_download_menu, include_children=True)
         return task_id
 
     def cancel_download(self, task_id):
@@ -196,58 +150,33 @@ class DownloadQueueMixin:
             self.update_download_task(task_id, detail="Cancelling...")
 
     def update_download_task(self, task_id, progress=None, status=None, detail=None):
-        if task_id not in self.download_tasks: return
-        data = self.download_tasks[task_id]
-        
-        if progress is not None:
-            data['pb']['value'] = max(0, min(100, float(progress)))
+        pct = max(0.0, min(100.0, float(progress))) if progress is not None else None
 
-        if status is not None:
-            # Keep the task title useful without adding another cramped line.
-            data['detail_lbl'].config(fg=COLORS['text_secondary'])
-            
-        if detail is not None:
-             data['detail_lbl'].config(text=detail)
+        if hasattr(self, 'toast_manager') and self.toast_manager:
+            self.toast_manager.update_download_toast(task_id, progress=pct, detail=detail)
+
+        if hasattr(self, 'notifications') and self.notifications:
+            self.notifications.update(task_id, progress=pct, message=detail)
 
     def complete_download_task(self, task_id):
-        if task_id not in self.download_tasks: return
-        
-        success_col = COLORS.get('success_green', '#10B981')
-        subtle_border = COLORS.get('border_subtle', '#2D3139')
-        data = self.download_tasks[task_id]
-        data['pb']['value'] = 100
-        data['detail_lbl'].config(text="Completed ✓", fg=success_col)
-        
-        # Visual feedback - brief green highlight
-        if 'border_frame' in data:
-            data['border_frame'].config(bg=success_col)
-            self.root.after(300, lambda: data['border_frame'].config(bg=subtle_border) if task_id in self.download_tasks else None)
-        
-        # Fade out or remove
-        def remove():
-            if task_id in self.download_tasks:
-                data = self.download_tasks[task_id]
-                if 'border_frame' in data:
-                    data['border_frame'].destroy()
-                elif 'frame' in data:
-                    data['frame'].destroy()
-                del self.download_tasks[task_id]
-            
-            if not self.download_tasks:
-                 self.queue_container.pack_forget()
-        
-        # Wait 2 sec
-        self.root.after(2000, remove)
-        if hasattr(self, "toast_manager"):
-            self.toast_manager.show("Download completed", kind="success")
+        if hasattr(self, 'toast_manager') and self.toast_manager:
+            self.toast_manager.complete_download_toast(task_id, message="Completed ✓")
+
+        if hasattr(self, 'notifications') and self.notifications:
+            self.notifications.update(task_id, progress=100.0, status="completed", message="Completed successfully")
+
+        if task_id in self.download_tasks:
+            del self.download_tasks[task_id]
 
     def fail_download_task(self, task_id, message="Download failed"):
-        if task_id not in self.download_tasks:
-            return
-        data = self.download_tasks[task_id]
-        data['detail_lbl'].config(text=message, fg=COLORS.get('error_red', '#E74C3C'))
-        if 'border_frame' in data:
-            data['border_frame'].config(bg=COLORS.get('error_red', '#E74C3C'))
+        if hasattr(self, 'toast_manager') and self.toast_manager:
+            self.toast_manager.fail_download_toast(task_id, message=message)
+
+        if hasattr(self, 'notifications') and self.notifications:
+            self.notifications.update(task_id, status="failed", message=message)
+
+        if task_id in self.download_tasks:
+            del self.download_tasks[task_id]
 
 
     def show_progress_overlay(self, task_name="Loading..."):

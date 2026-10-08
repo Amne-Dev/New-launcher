@@ -62,6 +62,7 @@ from nlc.ui.components.dialogs import (
     _build_missing_skin_head
 )
 from nlc.ui.components.toasts import ToastManager, PopupManager
+from nlc.ui.components.notifications import NotificationStore, NotificationCenterDrawer
 from nlc.ui.components.modal import InAppModalManager, set_modal_manager, get_modal_manager
 from nlc.ui.components.skin_renderer import SkinRenderer3D
 from nlc.ui.components.downloads import DownloadManager, DownloadQueueMixin
@@ -788,7 +789,13 @@ class MinecraftLauncher(
         except Exception:
             pass
         self.popup_manager = PopupManager(self.root)
-        self.toast_manager = ToastManager(self.root)
+        self.notifications = NotificationStore()
+        self.toast_manager = ToastManager(self.root, on_toast_click=lambda: self.toggle_notification_center())
+        self.notification_drawer = NotificationCenterDrawer(
+            self.root,
+            self.notifications,
+            on_badge_update=lambda count: self._update_notification_badge(count)
+        )
         self.modal_manager = InAppModalManager(self.root)
         set_modal_manager(self.modal_manager)
         self.root._nlc_popup_manager = self.popup_manager  # type: ignore[attr-defined]
@@ -2512,7 +2519,29 @@ class MinecraftLauncher(
         # Settings Link - Packed to bottom first to be at the very bottom
         self._create_sidebar_link("Settings", lambda: self.open_global_settings(), is_action=True, pack_side="bottom", icon="⚙")
 
-        # GitHub Link - Packed to bottom next to be above Settings
+        # Notifications Link - Packed to bottom next to be above Settings
+        notif_frame = self._create_sidebar_link(
+            "Notifications",
+            lambda: self.toggle_notification_center(),
+            is_action=True,
+            pack_side="bottom",
+            icon="bell_side.png",
+            highlight_on_click=False
+        )
+        self.sidebar_notif_badge = tk.Label(
+            notif_frame,
+            text="",
+            bg=COLORS['accent_color'],
+            fg="#FFFFFF",
+            font=(FONT_FAMILY, 7, "bold"),
+            padx=5,
+            pady=1,
+            cursor="hand2"
+        )
+        self.sidebar_notif_badge._keep_sidebar_bg = True
+        self.sidebar_notif_badge.bind("<Button-1>", lambda e: self.toggle_notification_center())
+
+        # GitHub Link - Packed to bottom next to be above Notifications
         self._create_sidebar_link("GitHub", "https://github.com/Amne-Dev/New-launcher", pack_side="bottom", icon="chiseled_bookshelf_occupied.png")
 
         # Download Queue UI (Initially hidden or empty)
@@ -4117,13 +4146,14 @@ class MinecraftLauncher(
                 elif isinstance(child, tk.Frame) and child != bar:
                     child.config(bg=target_bg)
 
-    def _create_sidebar_link(self, text, url_or_command, indicator_text=None, indicator_color=None, is_action=False, pack_side="top", icon=None):
+    def _create_sidebar_link(self, text, url_or_command, indicator_text=None, indicator_color=None, is_action=False, pack_side="top", icon=None, highlight_on_click=True):
         frame = tk.Frame(self.sidebar, bg=COLORS['sidebar_bg'], cursor="hand2", padx=15, pady=8)
         frame.pack(fill="x", side=cast(Any, pack_side))
         
         # Register for active state tracking
         if not hasattr(self, 'sidebar_items'): self.sidebar_items = []
-        self.sidebar_items.append(frame)
+        if highlight_on_click:
+            self.sidebar_items.append(frame)
         
         # Indicator (like "Java" or "Mods")
         if indicator_text:
@@ -4162,7 +4192,8 @@ class MinecraftLauncher(
         
         def handle_click(e):
             if is_action:
-                self.set_active_sidebar(frame)
+                if highlight_on_click:
+                    self.set_active_sidebar(frame)
                 url_or_command()
             else:
                 webbrowser.open(url_or_command)
@@ -4175,6 +4206,52 @@ class MinecraftLauncher(
         
         # Hover effect
         self._attach_sidebar_hover(frame)
+        return frame
+
+    def toggle_notification_center(self):
+        """Toggle slide-over Notification Center drawer."""
+        if hasattr(self, 'notification_drawer') and self.notification_drawer:
+            self.notification_drawer.toggle()
+
+    def _update_notification_badge(self, unread_count: int):
+        """Update the unread pill badge on the sidebar Notifications link."""
+        if not hasattr(self, 'sidebar_notif_badge') or not self.sidebar_notif_badge:
+            return
+        if unread_count > 0:
+            badge_text = str(unread_count) if unread_count < 100 else "99+"
+            self.sidebar_notif_badge.config(text=badge_text)
+            self.sidebar_notif_badge.pack(side="right", padx=(4, 0))
+        else:
+            self.sidebar_notif_badge.pack_forget()
+
+    def _notify_game_session_ended(self, inst_id, session_seconds, server_address=None):
+        """Notify user of session playtime and cumulative playtime after exiting game."""
+        if not inst_id:
+            return
+        inst_name = str(inst_id)
+        for inst in getattr(self, "installations", []):
+            if inst.get("id") == inst_id:
+                inst_name = inst.get("name", str(inst_id))
+                break
+
+        tracker = getattr(self, "addons_config", {}).get("playtime_tracker", {}) if hasattr(self, "addons_config") else {}
+        stats = tracker.get(inst_id, {})
+        total_seconds = int(stats.get("seconds", session_seconds))
+
+        if hasattr(self, "notifications") and self.notifications:
+            self.notifications.add_session(
+                inst_name=inst_name,
+                session_seconds=session_seconds,
+                total_seconds=total_seconds,
+                server=server_address
+            )
+        if hasattr(self, "toast_manager") and self.toast_manager:
+            self.toast_manager.show_session_toast(
+                inst_name=inst_name,
+                session_seconds=session_seconds,
+                total_seconds=total_seconds,
+                server=server_address
+            )
 
     # --- Smooth Scroll Utilities ---
     def _get_scroll_impulse(self, event):
@@ -4596,24 +4673,7 @@ class MinecraftLauncher(
     def _on_update_found(self, version, html_url, asset_url, asset_name=""):
         self._set_update_status(f"New version available: {version}", COLORS['accent_blue'])
         
-        # Choice: Yes -> Auto Update, Manual -> Visit Page, No -> Dismiss
-        btns = [
-            ("Yes, Update", True, "primary"), 
-            ("I'll do it myself", "manual", "secondary"), 
-            ("No", False, "secondary")
-        ]
-        
-        mbox = CustomMessagebox(
-            "Update Available", 
-            f"A new version ({version}) is available.\n\n"
-            "Would you like to auto-update now?", 
-            type="yesno", 
-            buttons=btns, 
-            parent=self.root
-        )
-        choice = mbox.result
-        
-        if choice is True:
+        def do_update():
             is_setup_asset = str(asset_name).lower().endswith("setup.exe") or str(asset_name).lower() == "nlcsetup.exe"
             if asset_url and is_setup_asset:
                 try:
@@ -4622,16 +4682,21 @@ class MinecraftLauncher(
                     pass
                 self.root.after(0, lambda u=asset_url, v=version: self.perform_auto_update(u, v))
             else:
-                custom_showerror(
-                    "Error",
-                    "Auto-update installer (NLCSetup.exe) was not found in this release.\n"
-                    "Opening release page instead."
-                )
                 if html_url:
                     webbrowser.open(html_url)
-        elif choice == "manual":
-             if html_url:
-                webbrowser.open(html_url)
+
+        if hasattr(self, "notifications") and self.notifications:
+            self.notifications.add_update(
+                version=version,
+                asset_url=asset_url,
+                html_url=html_url,
+                on_update=do_update
+            )
+        if hasattr(self, "toast_manager") and self.toast_manager:
+            self.toast_manager.show_update_toast(
+                version=version,
+                on_update=do_update
+            )
 
     def open_minecraft_dir(self):
         try:
@@ -6342,6 +6407,7 @@ class MinecraftLauncher(
             if inst_id:
                 session_seconds = max(0, int(time.time() - session_started_at))
                 self.root.after(0, lambda iid=inst_id, secs=session_seconds, srv=server_address, prt=server_port: self._record_play_session(iid, secs, srv, prt))
+                self.root.after(0, lambda iid=inst_id, secs=session_seconds, srv=server_address: self._notify_game_session_ended(iid, secs, srv))
             self.root.after(0, self.root.deiconify)
             self.root.after(0, lambda: self.update_rpc("Idle", "In Launcher"))
         except Exception as e:
