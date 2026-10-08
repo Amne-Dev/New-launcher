@@ -1,19 +1,20 @@
 """
-nlc.ui.components.toasts - Toast notifications and deduplicated popup manager
+nlc.ui.components.toasts - In-app toast notifications and deduplicated popup manager.
+Renders directly within the main window frame to eliminate Wayland (0,0) floating window bugs.
 """
 
 import logging
 import tkinter as tk
 from typing import Optional
 from nlc.ui.theme import COLORS, FONT_FAMILY
-from nlc.ui.components.dialogs import CustomMessagebox
 
 logger = logging.getLogger(__name__)
+
 
 class PopupManager:
     """Manages application dialogs with duplicate suppression."""
     def __init__(self, root: tk.Tk):
-        self.root = root
+        self.root = root.winfo_toplevel()
         self._active = set()
 
     def show(self, title: str, message: str, *, type="info", buttons=None, parent=None):
@@ -23,17 +24,33 @@ class PopupManager:
             return None
         self._active.add(signature)
         try:
-            dialog = CustomMessagebox(title, message, type=type, buttons=buttons, parent=parent or self.root)
-            return dialog.result
+            from nlc.ui.components.dialogs import custom_showinfo, custom_showerror, custom_askyesno
+            target_parent = parent or self.root
+            if type == "error":
+                return custom_showerror(title, message, parent=target_parent)
+            elif type == "yesno":
+                return custom_askyesno(title, message, parent=target_parent)
+            else:
+                return custom_showinfo(title, message, parent=target_parent)
         finally:
             self._active.discard(signature)
 
+
 class ToastManager:
-    """Non-blocking, deduplicated toast notifications."""
-    def __init__(self, root: tk.Tk):
-        self.root = root
+    """Non-blocking, deduplicated in-app toast notifications contained within the launcher window."""
+    def __init__(self, root: tk.Widget):
+        self.root = root.winfo_toplevel()
         self._toasts = []
         self._signatures = set()
+        self._container = None
+
+    def _ensure_container(self):
+        if self._container is None or not self._container.winfo_exists():
+            self._container = tk.Frame(self.root, bg=COLORS.get('main_bg', '#13151A'))
+            # Position at bottom-right inside the window, above status bar
+            self._container.place(relx=1.0, rely=1.0, x=-24, y=-90, anchor="se")
+            self._container.lift()
+        return self._container
 
     def show(self, message: str, *, kind="success", duration=3600):
         signature = (kind, str(message))
@@ -41,68 +58,65 @@ class ToastManager:
             return
         self._signatures.add(signature)
 
+        container = self._ensure_container()
+        container.lift()
+
         colors = {
-            "success": COLORS["success_green"],
-            "warning": COLORS["warning_orange"],
-            "error": COLORS["error_red"],
-            "info": COLORS["accent_blue"],
+            "success": COLORS.get("success_green", "#2ECC71"),
+            "warning": COLORS.get("warning_orange", "#F39C12"),
+            "error": COLORS.get("error_red", "#EF4444"),
+            "info": COLORS.get("accent_blue", "#3498DB"),
         }
+        kind_col = colors.get(kind, colors["info"])
+        card_bg = COLORS.get("card_bg", "#222630")
 
-        toast = tk.Toplevel(self.root)
-        toast.overrideredirect(True)
-        toast.configure(bg=COLORS["card_bg"])
-        try:
-            toast.attributes("-topmost", True)
-        except Exception:
-            pass
+        toast_card = tk.Frame(
+            container,
+            bg=card_bg,
+            highlightthickness=1,
+            highlightbackground=kind_col,
+            padx=14,
+            pady=10
+        )
+        toast_card.pack(side="top", pady=4, fill="x", anchor="e")
 
-        body = tk.Frame(toast, bg=COLORS["card_bg"], padx=14, pady=10)
-        body.pack(fill="both", expand=True)
-
-        tk.Label(
-            body,
+        dot = tk.Label(
+            toast_card,
             text="●",
-            fg=colors.get(kind, colors["info"]),
-            bg=COLORS["card_bg"],
+            fg=kind_col,
+            bg=card_bg,
             font=(FONT_FAMILY, 10, "bold")
-        ).pack(side="left", padx=(0, 8))
+        )
+        dot.pack(side="left", padx=(0, 8))
 
-        tk.Label(
-            body,
+        lbl = tk.Label(
+            toast_card,
             text=str(message),
-            fg=COLORS["text_primary"],
-            bg=COLORS["card_bg"],
+            fg=COLORS.get("text_primary", "#FFFFFF"),
+            bg=card_bg,
             font=(FONT_FAMILY, 9),
-            wraplength=330,
+            wraplength=340,
             justify="left"
-        ).pack(side="left")
+        )
+        lbl.pack(side="left")
 
         def dismiss():
-            if toast in self._toasts:
-                self._toasts.remove(toast)
+            if toast_card in self._toasts:
+                self._toasts.remove(toast_card)
             self._signatures.discard(signature)
             try:
-                toast.destroy()
-            except tk.TclError:
+                if toast_card.winfo_exists():
+                    toast_card.destroy()
+            except Exception:
                 pass
-            self._reposition()
+            if not self._toasts and self._container and self._container.winfo_exists():
+                try:
+                    self._container.place_forget()
+                except Exception:
+                    pass
 
-        toast.bind("<Button-1>", lambda _e: dismiss())
-        body.bind("<Button-1>", lambda _e: dismiss())
-        self._toasts.append(toast)
-        self._reposition()
-        toast.after(duration, dismiss)
+        for w in (toast_card, dot, lbl):
+            w.bind("<Button-1>", lambda _e: dismiss())
 
-    def _reposition(self):
-        self._toasts[:] = [t for t in self._toasts if t.winfo_exists()]
-        try:
-            self.root.update_idletasks()
-            x = self.root.winfo_rootx() + self.root.winfo_width() - 20
-            y = self.root.winfo_rooty() + 54
-            for toast in self._toasts:
-                toast.update_idletasks()
-                w, h = toast.winfo_reqwidth(), toast.winfo_reqheight()
-                toast.geometry(f"+{x - w}+{y}")
-                y += h + 8
-        except tk.TclError:
-            pass
+        self._toasts.append(toast_card)
+        toast_card.after(duration, dismiss)
