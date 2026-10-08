@@ -126,19 +126,43 @@ class CustomMessagebox(tk.Toplevel):
             pass
         self.destroy()
 
+def _resolve_modal_manager(parent=None):
+    try:
+        from nlc.ui.components.modal import get_modal_manager
+        if parent is not None and hasattr(parent, 'winfo_toplevel'):
+            return get_modal_manager(parent)
+        default_root = getattr(tk, '_default_root', None)
+        if default_root is not None and default_root.winfo_exists():
+            return get_modal_manager(default_root)
+        return get_modal_manager(None)
+    except Exception:
+        return None
+
 def custom_showinfo(title: str, message: str, parent=None):
+    mgr = _resolve_modal_manager(parent)
+    if mgr:
+        return mgr.show_messagebox(title, message, type="info")
     box = CustomMessagebox(title, message, type="info", parent=parent)
     return box.result
 
 def custom_showwarning(title: str, message: str, parent=None):
+    mgr = _resolve_modal_manager(parent)
+    if mgr:
+        return mgr.show_messagebox(title, message, type="warning")
     box = CustomMessagebox(title, message, type="warning", parent=parent)
     return box.result
 
 def custom_showerror(title: str, message: str, parent=None):
+    mgr = _resolve_modal_manager(parent)
+    if mgr:
+        return mgr.show_messagebox(title, message, type="error")
     box = CustomMessagebox(title, message, type="error", parent=parent)
     return box.result
 
 def custom_askyesno(title: str, message: str, parent=None) -> bool:
+    mgr = _resolve_modal_manager(parent)
+    if mgr:
+        return bool(mgr.show_messagebox(title, message, type="yesno"))
     box = CustomMessagebox(title, message, type="yesno", parent=parent)
     return bool(box.result)
 
