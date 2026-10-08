@@ -5442,8 +5442,8 @@ class MinecraftLauncher(
             return
 
         # Offline
-        if self.auto_download_mod:
-             if self.skin_path:
+        if getattr(self, 'auto_download_mod', False):
+             if getattr(self, 'skin_path', None):
                  self.skin_indicator.config(text="Ready: Local Skin Injection", fg=COLORS['success_green'])
              else:
                  self.skin_indicator.config(text="Injection enabled (No Skin)", fg=COLORS['accent_blue'])
