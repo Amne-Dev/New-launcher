@@ -6,7 +6,7 @@ import logging
 import os
 import tkinter as tk
 from typing import Any, List, Optional, Tuple
-from nlc.ui.theme import COLORS, FONT_FAMILY
+from nlc.ui.theme import COLORS, FONT_FAMILY, derive_hover_color
 
 logger = logging.getLogger(__name__)
 
@@ -55,8 +55,13 @@ class CustomMessagebox(tk.Toplevel):
 
         for text, val, style in buttons:
             is_danger = style == "danger"
-            b_bg = COLORS['error_red'] if is_danger else (COLORS['play_btn_green'] if style == "primary" else "#555555")
-            b_hover = "#C42B1C" if is_danger else (COLORS['play_btn_hover'] if style == "primary" else "#666666")
+            err_col = COLORS.get('error_red', '#EF4444')
+            sec_bg = COLORS.get('input_bg', '#2E333E')
+            sec_hover = COLORS.get('card_hover', '#3A3F4D')
+            primary_bg = COLORS.get('play_btn_green', COLORS.get('accent_color', '#2ECC71'))
+            primary_hover = COLORS.get('play_btn_hover', COLORS.get('accent_hover', '#27AE60'))
+            b_bg = err_col if is_danger else (primary_bg if style == "primary" else sec_bg)
+            b_hover = derive_hover_color(err_col) if is_danger else (primary_hover if style == "primary" else sec_hover)
 
             btn = tk.Button(
                 btn_inner,
