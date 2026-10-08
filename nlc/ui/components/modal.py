@@ -52,6 +52,17 @@ class InAppModalManager:
         """Check if any modal overlay is currently visible."""
         return self._active_modal is not None and self._active_modal.get("overlay_frame") is not None
 
+    @property
+    def has_open_modals(self) -> bool:
+        """Check if any modal overlay is currently open."""
+        return self.is_modal_active()
+
+    def close_active_modal(self, result: Any = None) -> None:
+        """Close the currently active modal overlay."""
+        if self._active_modal and self._active_modal.get("close_func"):
+            self._active_modal["close_func"](result)
+
+
     def show_modal(
         self,
         title: str,
