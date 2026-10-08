@@ -1440,7 +1440,7 @@ class LockerScreenMixin:
         )
         cw = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
         canvas.bind("<Configure>", lambda e: canvas.itemconfig(cw, width=e.width))
-        canvas.configure(yview_command=scrollbar.set)
+        canvas.configure(yscrollcommand=scrollbar.set)
 
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
