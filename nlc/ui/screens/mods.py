@@ -542,7 +542,7 @@ class ModsScreenMixin:
         
         # Meta
         tk.Label(info_frame, text=f"By {mod.get('author', 'Unknown')}", font=("Segoe UI", 8), 
-                 fg="#808080", bg=COLORS['card_bg'], anchor="w").pack(fill="x", pady=(2, 0))
+                 fg=COLORS.get('text_muted', '#6B7280'), bg=COLORS['card_bg'], anchor="w").pack(fill="x", pady=(2, 0))
 
         # Buttons
         btn_frame = tk.Frame(card, bg=COLORS['card_bg'])
@@ -1250,7 +1250,7 @@ class ModsScreenMixin:
                     btn.pack(side="top", pady=4)
                     btn.config(command=lambda b=btn, m=mod, p=active_pack_name: self._install_mod_to_pack(m, p, b))
             else:
-                tk.Label(hero_btn_frame, text="(Select a pack above to install)", font=(FONT_FAMILY, 9),
+                tk.Label(hero_btn_frame, text="(Select a modpack in the browse view to install)", font=(FONT_FAMILY, 9),
                          fg=text_secondary, bg=card_bg).pack(side="top", pady=4)
 
         # Loading placeholder
@@ -1523,24 +1523,28 @@ class ModsScreenMixin:
 
     def _open_gallery_lightbox(self, gallery, initial_index=0):
         if not gallery: return
+        dialog_bg = COLORS['main_bg']
+        dialog_text_sec = COLORS.get('text_secondary', '#A0AAB0')
+        dialog_text_pri = COLORS['text_primary']
+
         dialog = tk.Toplevel(self.root)
         dialog.title(gallery[initial_index].get("title") or "Screenshot Preview")
         dialog.geometry("920x680")
-        dialog.config(bg="#101216")
+        dialog.config(bg=dialog_bg)
         if os.name != "nt":
             dialog.transient(self.root)
 
         current_idx = [initial_index]
-        img_lbl = tk.Label(dialog, text="Loading full image...", bg="#101216", fg="#A0AAB0", width=80, height=25)
+        img_lbl = tk.Label(dialog, text="Loading full image...", bg=dialog_bg, fg=dialog_text_sec, width=80, height=25)
         img_lbl.pack(expand=True, fill="both", padx=20, pady=(20, 10))
 
-        title_lbl = tk.Label(dialog, text="", font=(FONT_FAMILY, 11, "bold"), fg="white", bg="#101216")
+        title_lbl = tk.Label(dialog, text="", font=(FONT_FAMILY, 11, "bold"), fg=dialog_text_pri, bg=dialog_bg)
         title_lbl.pack(fill="x", padx=20)
 
-        counter_lbl = tk.Label(dialog, text="", font=(FONT_FAMILY, 9), fg="#A0AAB0", bg="#101216")
+        counter_lbl = tk.Label(dialog, text="", font=(FONT_FAMILY, 9), fg=dialog_text_sec, bg=dialog_bg)
         counter_lbl.pack(pady=4)
 
-        bottom_bar = tk.Frame(dialog, bg="#101216", pady=10)
+        bottom_bar = tk.Frame(dialog, bg=dialog_bg, pady=10)
         bottom_bar.pack(fill="x", padx=20)
 
         def show_current():
@@ -1607,7 +1611,7 @@ class ModsScreenMixin:
         text_widget.tag_configure("bullet", font=(FONT_FAMILY, 10), lmargin1=15, lmargin2=25, foreground=text_primary)
         text_widget.tag_configure("bold", font=(FONT_FAMILY, 10, "bold"), foreground=text_primary)
         text_widget.tag_configure("italic", font=(FONT_FAMILY, 10, "italic"), foreground=text_primary)
-        text_widget.tag_configure("code", font=("Consolas", 9), background=input_bg, foreground="#E06C75")
+        text_widget.tag_configure("code", font=("Consolas", 9), background=input_bg, foreground=COLORS.get('warning_orange', '#F59E0B'))
         text_widget.tag_configure("normal", font=(FONT_FAMILY, 10), foreground=text_primary)
 
         link_counter = 0
