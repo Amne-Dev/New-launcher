@@ -145,6 +145,10 @@ class LockerScreenMixin:
 
     def switch_locker_view(self, view_name: str):
         self.locker_view.set(view_name)
+        if view_name == "Capes":
+            self.preview_yaw = 200.0  # Orient towards back so cape is immediately visible
+        elif view_name == "Skins":
+            self.preview_yaw = 30.0   # Orient towards front
         self.refresh_locker_view()
 
     def refresh_locker_screen_theme(self):
