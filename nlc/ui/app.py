@@ -45,7 +45,7 @@ import requests
 
 from nlc.ui.theme import COLORS, METRICS, FONT_FAMILY, THEMES, THEME_MANAGER
 from nlc.ui.animation import AnimationManager
-from nlc.storage.paths import resource_path, get_minecraft_dir, is_version_installed, RESAMPLE_NEAREST, FLIP_LEFT_RIGHT, AFFINE
+from nlc.storage.paths import resource_path, get_minecraft_dir, is_version_installed, RESAMPLE_NEAREST, FLIP_LEFT_RIGHT, AFFINE, open_path_in_system
 from nlc.storage.config import (
     CURRENT_VERSION, DEFAULT_RAM, DEFAULT_USERNAME, INSTALL_MARK,
     LOADERS, MOD_COMPATIBLE_LOADERS, ConfigManager
@@ -65,6 +65,7 @@ from nlc.ui.components.skin_renderer import SkinRenderer3D
 from nlc.ui.components.downloads import DownloadManager, DownloadQueueMixin
 from nlc.ui.components.buttons import make_button, make_badge, refresh_all_buttons
 from nlc.ui.components.cards import create_card
+from nlc.ui.components.context_menu import dismiss_active_context_menu
 from nlc.ui.dispatcher import EventDispatcher
 from nlc.ui.screens.accounts import AccountsScreenMixin
 from nlc.ui.screens.settings import SettingsScreenMixin, CATEGORIES
@@ -4410,6 +4411,11 @@ class MinecraftLauncher(
 
     def _close_all_menus(self):
         """Close all open dropdown menus when switching tabs or performing other actions"""
+        try:
+            dismiss_active_context_menu()
+        except Exception:
+            pass
+
         # Close installation selector menu
         if hasattr(self, '_selector_menu') and self._selector_menu:
             try:
@@ -4639,7 +4645,7 @@ class MinecraftLauncher(
 
     def open_minecraft_dir(self):
         try:
-            os.startfile(self.minecraft_dir)
+            open_path_in_system(self.minecraft_dir)
         except Exception as e:
             self.log(f"Error opening folder: {e}")
 
