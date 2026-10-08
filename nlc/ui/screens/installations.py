@@ -471,7 +471,7 @@ class InstallationsScreenMixin:
         menu.attributes('-topmost', True)
         
         # Border Frame
-        menu_frame = tk.Frame(menu, bg=COLORS['card_bg'], highlightbackground="#454545", highlightthickness=1)
+        menu_frame = tk.Frame(menu, bg=COLORS['card_bg'], highlightbackground=COLORS.get('border_subtle', '#33373E'), highlightthickness=1)
         menu_frame.pack(fill="both", expand=True)
 
         w = max(self.inst_selector_frame.winfo_width(), 300) # Enforce min width for longer names
@@ -833,10 +833,15 @@ class InstallationsScreenMixin:
                 
         # Icon Selector Modal
         def open_icon_selector(e):
+             modal_bg = COLORS['card_bg']
+             input_bg = COLORS.get('input_bg', '#2E333E')
+             text_primary = COLORS['text_primary']
+             text_muted = COLORS.get('text_muted', '#6B7280')
+
              sel_win = tk.Toplevel(self.root)
              sel_win.title("Select Icon")
              sel_win.geometry("480x550")
-             sel_win.configure(bg="#2d2d2d")
+             sel_win.configure(bg=modal_bg)
              sel_win.transient(self.root)
              # Don't use grab_set to allow parent window interaction
              sel_win.resizable(False, False)
@@ -852,26 +857,26 @@ class InstallationsScreenMixin:
              sel_win.lift()
              sel_root = self._apply_custom_toplevel_chrome(sel_win, "Select Icon")
 
-             tk.Label(sel_root, text="Select Icon", font=("Segoe UI", 12, "bold"), bg="#2d2d2d", fg="white").pack(pady=(12, 6))
+             tk.Label(sel_root, text="Select Icon", font=("Segoe UI", 12, "bold"), bg=modal_bg, fg=text_primary).pack(pady=(12, 6))
              
              # Search bar for icons
-             search_frame = tk.Frame(sel_root, bg="#1e1e1e", padx=8, pady=4)
+             search_frame = tk.Frame(sel_root, bg=input_bg, padx=8, pady=4)
              search_frame.pack(fill="x", padx=15, pady=(0, 8))
              
-             tk.Label(search_frame, text="🔍", bg="#1e1e1e", fg="#888888").pack(side="left", padx=(0, 5))
+             tk.Label(search_frame, text="🔍", bg=input_bg, fg=text_muted).pack(side="left", padx=(0, 5))
              icon_search_var = tk.StringVar()
-             icon_search_entry = tk.Entry(search_frame, textvariable=icon_search_var, bg="#1e1e1e", fg="white",
-                                         insertbackground="white", relief="flat", font=("Segoe UI", 9))
+             icon_search_entry = tk.Entry(search_frame, textvariable=icon_search_var, bg=input_bg, fg=text_primary,
+                                         insertbackground=text_primary, relief="flat", font=("Segoe UI", 9))
              icon_search_entry.pack(side="left", fill="x", expand=True)
 
              # Scrollable Frame for Icons
-             container = tk.Frame(sel_root, bg="#2d2d2d")
+             container = tk.Frame(sel_root, bg=modal_bg)
              container.pack(expand=True, fill="both", padx=10, pady=(0, 10))
              
-             canvas = tk.Canvas(container, bg="#2d2d2d", highlightthickness=0)
+             canvas = tk.Canvas(container, bg=modal_bg, highlightthickness=0)
              scrollbar = tk.Scrollbar(container, orient="vertical", command=canvas.yview)
              
-             icons_grid = tk.Frame(canvas, bg="#2d2d2d")
+             icons_grid = tk.Frame(canvas, bg=modal_bg)
              
              icons_grid.bind(
                  "<Configure>",
@@ -909,7 +914,9 @@ class InstallationsScreenMixin:
              seen_blocks = set(popular_blocks)
              all_icon_files = list(popular_blocks) + [f for f in all_found_icons if f not in seen_blocks]
              
-             slot_bg = "#8b8b8b"
+             slot_bg = input_bg
+             hover_bg = COLORS.get('hover_bg', '#3A3F4D')
+             border_col = COLORS.get('border_subtle', '#33373E')
              cols = 5
 
              def populate_icons(filter_str=""):
@@ -923,7 +930,7 @@ class InstallationsScreenMixin:
                  for i, name in enumerate(display_list):
                      path = f"icons/{name}"
                      slot = tk.Frame(icons_grid, bg=slot_bg, width=64, height=64, 
-                                    highlightbackground="white", highlightthickness=0)
+                                    highlightbackground=border_col, highlightthickness=1)
                      slot.grid(row=i//cols, column=i%cols, padx=6, pady=6)
                      slot.pack_propagate(False)
                      
@@ -942,8 +949,8 @@ class InstallationsScreenMixin:
                          sel_win.destroy()
                          
                      def on_hover(s=slot, l=lbl):
-                         s.config(bg="#a0a0a0")
-                         l.config(bg="#a0a0a0")
+                         s.config(bg=hover_bg)
+                         l.config(bg=hover_bg)
                          
                      def on_leave(s=slot, l=lbl):
                          s.config(bg=slot_bg)
@@ -1004,7 +1011,7 @@ class InstallationsScreenMixin:
         
         # Disclaimer
         self.disclaimer_lbl = tk.Label(fields_frame, text="⚠️ These versions need to be downloaded externally", 
-                                      bg=card_bg, fg="#F1C40F", font=("Segoe UI", 8), anchor="w")
+                                      bg=card_bg, fg=COLORS.get('warning_orange', '#F59E0B'), font=("Segoe UI", 8), anchor="w")
 
         # 3. VERSION
         create_label("VERSION").pack(fill="x", pady=(10,5))
@@ -1159,6 +1166,9 @@ class InstallationsScreenMixin:
                 pass
             return False
 
+        def is_editor_alive():
+            return bool(hasattr(self, 'inst_editor_view') and self.inst_editor_view and self.inst_editor_view.winfo_exists())
+
         def fetch_versions_thread(loader_type):
             try:
                 raw_versions = []
@@ -1217,15 +1227,15 @@ class InstallationsScreenMixin:
                          print(f"Error scanning installed versions: {e}")
 
                 self.cached_loader_versions = raw_versions
-                if win.winfo_exists():
+                if is_editor_alive():
                     self.root.after(0, self.update_modal_versions_list)
             except Exception as e:
                 print(f"Fetch error: {e}")
-                if win.winfo_exists():
-                    self.root.after(0, lambda err=str(e): self.modal_status_lbl.config(text=f"Error: {err}"))
+                if is_editor_alive():
+                    self.root.after(0, lambda err=str(e): self.modal_status_lbl.config(text=f"Error: {err}") if hasattr(self, 'modal_status_lbl') and self.modal_status_lbl.winfo_exists() else None)
 
         def update_list():
-            if not win.winfo_exists(): return
+            if not is_editor_alive(): return
             loader = loader_var.get()
             show_snaps = self.modal_show_snapshots.get()
             display_values = []
@@ -1416,10 +1426,11 @@ class InstallationsScreenMixin:
             close_menu()
             self.edit_installation(idx)
             
+        hover_bg = COLORS.get('hover_bg', '#3A3F4D')
         edit_btn = tk.Label(menu, text="Edit", font=("Segoe UI", 10), bg=COLORS['card_bg'], fg=COLORS['text_primary'], anchor="w", padx=10, pady=5)
         edit_btn.pack(fill="x")
         edit_btn.bind("<Button-1>", lambda e: do_edit())
-        edit_btn.bind("<Enter>", lambda e: edit_btn.config(bg="#454545"))
+        edit_btn.bind("<Enter>", lambda e: edit_btn.config(bg=hover_bg))
         edit_btn.bind("<Leave>", lambda e: edit_btn.config(bg=COLORS['card_bg']))
 
         # Delete
@@ -1447,7 +1458,7 @@ class InstallationsScreenMixin:
         del_btn = tk.Label(menu, text="Delete", font=("Segoe UI", 10), bg=COLORS['card_bg'], fg=COLORS['error_red'], anchor="w", padx=10, pady=5)
         del_btn.pack(fill="x")
         del_btn.bind("<Button-1>", lambda e: do_delete())
-        del_btn.bind("<Enter>", lambda e: del_btn.config(bg="#454545"))
+        del_btn.bind("<Enter>", lambda e: del_btn.config(bg=hover_bg))
         del_btn.bind("<Leave>", lambda e: del_btn.config(bg=COLORS['card_bg']))
 
         # Close on click outside or Escape
