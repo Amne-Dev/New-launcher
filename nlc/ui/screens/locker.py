@@ -17,18 +17,19 @@ from tkinter import ttk, filedialog
 from PIL import Image, ImageTk
 
 from typing import cast, Optional, List, Dict, Any, Tuple
-from nlc.storage.paths import resource_path, open_path_in_system, get_launcher_data_dir
+from nlc.storage.paths import resource_path, open_path_in_system, get_launcher_data_dir, RESAMPLE_NEAREST
 from nlc.ui.theme import COLORS, FONT_FAMILY
 from nlc.ui.components.dialogs import custom_showinfo, custom_showerror, custom_showwarning, custom_askyesno
 from nlc.ui.components.context_menu import NeoContextMenu, attach_context_menu
 from nlc.ui.components.modal import get_modal_manager
-from nlc.ui.components.skin_renderer import SkinRenderer3D
+from nlc.ui.components.skin_renderer import SkinRenderer3D, Model3DRenderer
+from nlc.net.capes import fetch_account_capes, download_and_cache_cape, set_active_mojang_cape, clear_active_mojang_cape
 
 logger = logging.getLogger(__name__)
 
 
 class LockerScreenMixin:
-    """Mixin providing redesigned Locker screen with 2.5D skin showcase, wardrobe presets, and wallpaper studio."""
+    """Mixin providing redesigned Locker screen with 3D skin showcase, wardrobe presets, capes studio & wallpapers."""
 
     def create_locker_tab(self):
         frame = tk.Frame(self.tab_container, bg=COLORS['main_bg'])
@@ -53,12 +54,23 @@ class LockerScreenMixin:
 
         self.locker_subtitle_lbl = tk.Label(
             title_box,
-            text="Skin showcase, wardrobe presets & wallpaper studio",
+            text="3D Skin showcase, wardrobe presets, capes & wallpaper studio",
             font=(FONT_FAMILY, 8),
             bg=COLORS['main_bg'],
             fg=COLORS['text_secondary']
         )
         self.locker_subtitle_lbl.pack(anchor="w", pady=(1, 0))
+
+        # 3D Animation & Drag State
+        self.preview_yaw = 30.0
+        self.preview_pitch = 10.0
+        self.preview_walk_phase = 0.0
+        self.is_walking = True
+        self._anim_running = False
+        self._anim_job = None
+        self._is_dragging = False
+        self.account_capes: List[Dict[str, Any]] = []
+        self.current_cape_path: Optional[str] = None
 
         # Segmented Pill Nav
         self.locker_view = tk.StringVar(value="Skins")
@@ -74,7 +86,45 @@ class LockerScreenMixin:
         self.locker_btn_frame = self.locker_nav_frame  # Backwards compatibility
 
         self.locker_btns = {}
-        for view_name, label_text in [("Skins", "👕 Skins"), ("Wallpapers", "🖼 Wallpapers")]:
+        self.update_locker_subtabs()
+
+        # Main Content Frame
+        self.locker_content = tk.Frame(frame, bg=COLORS['main_bg'])
+        self.locker_content.pack(fill="both", expand=True)
+
+        # Search variable for wardrobe filtering
+        self.wardrobe_search_var = tk.StringVar(value="")
+        self.wallpaper_filter_var = tk.StringVar(value="all")
+
+        # Start loading account capes asynchronously if Microsoft account
+        self.load_account_capes_async()
+
+        self.refresh_locker_view()
+
+    def has_owned_capes(self) -> bool:
+        """Return True only if active account is a Microsoft account with >= 1 capes."""
+        if not getattr(self, 'profiles', None) or not (0 <= getattr(self, 'current_profile_index', 0) < len(self.profiles)):
+            return False
+        p = self.profiles[self.current_profile_index]
+        if p.get("type") != "microsoft":
+            return False
+        return len(getattr(self, 'account_capes', [])) > 0
+
+    def update_locker_subtabs(self):
+        """Update navigation pill buttons depending on whether capes are owned."""
+        if not hasattr(self, 'locker_nav_frame') or not self.locker_nav_frame.winfo_exists():
+            return
+
+        for w in self.locker_nav_frame.winfo_children():
+            w.destroy()
+
+        views = [("Skins", "👕 Skins")]
+        if self.has_owned_capes():
+            views.append(("Capes", "🧣 Capes"))
+        views.append(("Wallpapers", "🖼 Wallpapers"))
+
+        self.locker_btns = {}
+        for view_name, label_text in views:
             btn = tk.Button(
                 self.locker_nav_frame,
                 text=label_text,
@@ -89,15 +139,8 @@ class LockerScreenMixin:
             btn.pack(side="left", padx=1)
             self.locker_btns[view_name] = btn
 
-        # Main Content Frame
-        self.locker_content = tk.Frame(frame, bg=COLORS['main_bg'])
-        self.locker_content.pack(fill="both", expand=True)
-
-        # Search variable for wardrobe filtering
-        self.wardrobe_search_var = tk.StringVar(value="")
-        self.wallpaper_filter_var = tk.StringVar(value="all")
-
-        self.refresh_locker_view()
+        if self.locker_view.get() == "Capes" and not self.has_owned_capes():
+            self.locker_view.set("Skins")
 
     def switch_locker_view(self, view_name: str):
         self.locker_view.set(view_name)
@@ -151,24 +194,16 @@ class LockerScreenMixin:
 
         if current_view == "Skins":
             self.render_skins_view(self.locker_content)
+        elif current_view == "Capes" and self.has_owned_capes():
+            self.render_capes_view(self.locker_content)
         else:
             self.render_wallpapers_view(self.locker_content)
 
     # -------------------------------------------------------------------------
-    # WARDROBE & SKINS VIEW
+    # 3D INTERACTIVE STAGE & ANIMATION ENGINE
     # -------------------------------------------------------------------------
-    def render_skins_view(self, parent: tk.Widget):
-        container = tk.Frame(parent, bg=COLORS['main_bg'])
-        container.pack(expand=True, fill="both", padx=20, pady=(0, 16))
-
-        # Two Column Layout: Left (Showcase Stage), Right (Geometry + Wardrobe Grid)
-        container.columnconfigure(0, weight=0, minsize=280)
-        container.columnconfigure(1, weight=1)
-        container.rowconfigure(0, weight=1)
-
-        # ---------------------------------------------------------------------
-        # LEFT: 3D SHOWCASE STAGE ("The Pedestal")
-        # ---------------------------------------------------------------------
+    def build_3d_stage(self, container: tk.Widget, default_yaw: float = 30.0) -> tk.Frame:
+        """Construct the interactive 3D model pedestal stage with drag-to-rotate and walk controls."""
         stage_frame = tk.Frame(container, bg=COLORS['main_bg'])
         stage_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 16), pady=0)
 
@@ -190,7 +225,6 @@ class LockerScreenMixin:
         top_bar = tk.Frame(self.preview_card, bg=card_bg)
         top_bar.pack(fill="x", pady=(0, 8))
 
-        # Active account tag
         p = self.profiles[self.current_profile_index] if (self.profiles and 0 <= self.current_profile_index < len(self.profiles)) else {}
         p_name = p.get("name", "Player")
         p_type = p.get("type", "offline").upper()
@@ -218,32 +252,88 @@ class LockerScreenMixin:
         )
         self.stage_model_badge.pack(side="right")
 
-        # Canvas for the 2.5D Skin Preview + Pedestal
+        # Active Cape Pill if equipped
+        if getattr(self, 'current_cape_path', None):
+            cape_name = "CAPE"
+            for c in getattr(self, 'account_capes', []):
+                if c.get("local_path") == self.current_cape_path:
+                    cape_name = f"🧣 {c.get('alias', 'CAPE')}".upper()
+                    break
+            self.stage_cape_badge = tk.Label(
+                top_bar,
+                text=cape_name,
+                font=(FONT_FAMILY, 8, "bold"),
+                bg=COLORS.get('input_bg', '#1E222B'),
+                fg=accent,
+                padx=6,
+                pady=3
+            )
+            self.stage_cape_badge.pack(side="right", padx=(0, 6))
+
+        # Canvas for the 3D Skin Preview + Pedestal
         self.preview_canvas = tk.Canvas(
             self.preview_card,
             bg=card_bg,
             width=280,
-            height=360,
-            highlightthickness=0
+            height=340,
+            highlightthickness=0,
+            cursor="hand2"
         )
-        self.preview_canvas.pack(fill="both", expand=True, pady=6)
+        self.preview_canvas.pack(fill="both", expand=True, pady=4)
+        self._pedestal_drawn = False
+        self._bind_canvas_drag(self.preview_canvas)
 
-        # Status indicator
+        # Status indicator / hints
         self.skin_indicator = tk.Label(
             self.preview_card,
-            text="",
-            font=(FONT_FAMILY, 9),
+            text="Drag to rotate 360°",
+            font=(FONT_FAMILY, 8),
             bg=card_bg,
-            fg=COLORS['text_secondary']
+            fg=COLORS['text_muted']
         )
-        self.skin_indicator.pack(pady=(4, 10))
+        self.skin_indicator.pack(pady=(2, 6))
 
-        # Action Toolbar at Bottom of Stage
+        # Bottom 2-Row Action Toolbar
         toolbar = tk.Frame(self.preview_card, bg=card_bg)
         toolbar.pack(fill="x", side="bottom")
 
+        # Row 1: 3D Animation Controls
+        anim_bar = tk.Frame(toolbar, bg=card_bg)
+        anim_bar.pack(fill="x", pady=(0, 4))
+
+        self.btn_walk_toggle = self._make_btn(
+            anim_bar,
+            "⏸ Stand" if getattr(self, 'is_walking', True) else "🚶 Walk",
+            style="secondary",
+            font_size=8,
+            command=self.toggle_walking_animation
+        )
+        self.btn_walk_toggle.pack(side="left", fill="x", expand=True, padx=(0, 2))
+
+        b_front = self._make_btn(
+            anim_bar,
+            "⟲ Front",
+            style="secondary",
+            font_size=8,
+            command=lambda: self.reset_preview_rotation(30.0)
+        )
+        b_front.pack(side="left", padx=2)
+
+        b_rear = self._make_btn(
+            anim_bar,
+            "↻ Back",
+            style="secondary",
+            font_size=8,
+            command=lambda: self.reset_preview_rotation(180.0)
+        )
+        b_rear.pack(side="left", padx=(2, 0))
+
+        # Row 2: Skin Management Controls
+        act_bar = tk.Frame(toolbar, bg=card_bg)
+        act_bar.pack(fill="x")
+
         b_upload = self._make_btn(
-            toolbar,
+            act_bar,
             "📂 Upload",
             style="primary",
             font_size=8,
@@ -252,7 +342,7 @@ class LockerScreenMixin:
         b_upload.pack(side="left", fill="x", expand=True, padx=(0, 2))
 
         b_fetch = self._make_btn(
-            toolbar,
+            act_bar,
             "🔍 Steal",
             style="secondary",
             font_size=8,
@@ -261,7 +351,7 @@ class LockerScreenMixin:
         b_fetch.pack(side="left", fill="x", expand=True, padx=2)
 
         b_export = self._make_btn(
-            toolbar,
+            act_bar,
             "💾 Export",
             style="secondary",
             font_size=8,
@@ -270,7 +360,7 @@ class LockerScreenMixin:
         b_export.pack(side="left", fill="x", expand=True, padx=2)
 
         b_refresh = self._make_btn(
-            toolbar,
+            act_bar,
             "🔄",
             style="secondary",
             font_size=8,
@@ -278,11 +368,168 @@ class LockerScreenMixin:
         )
         b_refresh.pack(side="left", padx=(2, 0))
 
-        # ---------------------------------------------------------------------
+        self.preview_yaw = default_yaw
+        self.start_preview_animation()
+        return stage_frame
+
+    def _bind_canvas_drag(self, canvas: tk.Canvas):
+        """Bind horizontal mouse dragging for fluid 360-degree rotation."""
+        def on_down(e):
+            self._drag_start_x = e.x
+            self._is_dragging = True
+            canvas.config(cursor="sb_h_double_arrow")
+
+        def on_move(e):
+            if not getattr(self, '_is_dragging', False):
+                return
+            dx = e.x - getattr(self, '_drag_start_x', e.x)
+            self._drag_start_x = e.x
+            self.preview_yaw = (getattr(self, 'preview_yaw', 30.0) + dx * 0.75) % 360.0
+            self.render_3d_stage_frame()
+
+        def on_up(e):
+            self._is_dragging = False
+            canvas.config(cursor="hand2")
+
+        canvas.bind("<Button-1>", on_down)
+        canvas.bind("<B1-Motion>", on_move)
+        canvas.bind("<ButtonRelease-1>", on_up)
+
+    def render_3d_stage_frame(self):
+        """Render a single frame of the 3D model and update canvas without flicker."""
+        if not hasattr(self, 'preview_canvas') or not self.preview_canvas.winfo_exists():
+            return
+        if not self.skin_path or not os.path.exists(self.skin_path):
+            self.preview_canvas.delete("all")
+            return
+
+        w = self.preview_canvas.winfo_width()
+        h = self.preview_canvas.winfo_height()
+        if w < 50: w = 280
+        if h < 50: h = 340
+
+        model = "classic"
+        if self.profiles and 0 <= self.current_profile_index < len(self.profiles):
+            model = self.profiles[self.current_profile_index].get("skin_model", "classic")
+
+        cape_path = getattr(self, 'current_cape_path', None)
+        yaw = getattr(self, 'preview_yaw', 30.0)
+        pitch = getattr(self, 'preview_pitch', 10.0)
+        walk_phase = getattr(self, 'preview_walk_phase', 0.0) if getattr(self, 'is_walking', True) else 0.0
+
+        rendered = SkinRenderer3D.render_frame(
+            skin_path=self.skin_path,
+            cape_path=cape_path,
+            yaw_deg=yaw,
+            pitch_deg=pitch,
+            walk_phase=walk_phase,
+            width=w,
+            height=h,
+            model=model
+        )
+
+        if not rendered:
+            return
+
+        self.preview_photo = ImageTk.PhotoImage(rendered)
+
+        # Draw Pedestal once, then reuse image id
+        pedestal_y = int(h * 0.86)
+        pw, ph = int(min(w * 0.75, 240)), 32
+
+        if not getattr(self, '_pedestal_drawn', False):
+            self.preview_canvas.delete("all")
+            self.preview_canvas.create_oval(
+                (w - pw) // 2, pedestal_y - ph // 2,
+                (w + pw) // 2, pedestal_y + ph // 2,
+                fill=COLORS.get('input_bg', '#151821'),
+                outline=COLORS.get('card_border', '#2F3647'),
+                width=2
+            )
+            inner_pw, inner_ph = int(pw * 0.76), 22
+            self.preview_canvas.create_oval(
+                (w - inner_pw) // 2, pedestal_y - inner_ph // 2,
+                (w + inner_pw) // 2, pedestal_y + inner_ph // 2,
+                fill=COLORS.get('card_bg', '#1A1E29'),
+                outline=COLORS.get('accent_color', '#2ECC71'),
+                width=1
+            )
+            self._pedestal_drawn = True
+            self.preview_canvas_img_id = self.preview_canvas.create_image(
+                w // 2, pedestal_y - int(h * 0.44), image=self.preview_photo, anchor="center"
+            )
+        else:
+            if hasattr(self, 'preview_canvas_img_id'):
+                self.preview_canvas.itemconfig(self.preview_canvas_img_id, image=self.preview_photo)
+            else:
+                self.preview_canvas_img_id = self.preview_canvas.create_image(
+                    w // 2, pedestal_y - int(h * 0.44), image=self.preview_photo, anchor="center"
+                )
+
+    def start_preview_animation(self):
+        """Start the lightweight 30 FPS walk cycle loop."""
+        if getattr(self, '_anim_running', False):
+            return
+        self._anim_running = True
+        self._tick_preview_animation()
+
+    def stop_preview_animation(self):
+        """Stop the animation loop to ensure 0% CPU consumption in background."""
+        self._anim_running = False
+        if hasattr(self, '_anim_job') and self._anim_job:
+            try:
+                self.root.after_cancel(self._anim_job)
+            except Exception:
+                pass
+            self._anim_job = None
+
+    def _tick_preview_animation(self):
+        if not getattr(self, '_anim_running', False):
+            return
+        if getattr(self, 'current_tab', '') != "Locker":
+            self.stop_preview_animation()
+            return
+
+        if getattr(self, 'is_walking', True):
+            self.preview_walk_phase = (getattr(self, 'preview_walk_phase', 0.0) + 0.12) % (math.pi * 2)
+            self.render_3d_stage_frame()
+
+        self._anim_job = self.root.after(33, self._tick_preview_animation)
+
+    def toggle_walking_animation(self):
+        self.is_walking = not getattr(self, 'is_walking', True)
+        if hasattr(self, 'btn_walk_toggle'):
+            self.btn_walk_toggle.config(text="⏸ Stand" if self.is_walking else "🚶 Walk")
+        if not self.is_walking:
+            self.preview_walk_phase = 0.0
+        self.render_3d_stage_frame()
+
+    def reset_preview_rotation(self, target_yaw: float = 30.0):
+        self.preview_yaw = target_yaw
+        self.render_3d_stage_frame()
+
+    # -------------------------------------------------------------------------
+    # WARDROBE & SKINS VIEW
+    # -------------------------------------------------------------------------
+    def render_skins_view(self, parent: tk.Widget):
+        container = tk.Frame(parent, bg=COLORS['main_bg'])
+        container.pack(expand=True, fill="both", padx=20, pady=(0, 16))
+
+        # Two Column Layout: Left (Showcase Stage), Right (Geometry + Wardrobe Grid)
+        container.columnconfigure(0, weight=0, minsize=280)
+        container.columnconfigure(1, weight=1)
+        container.rowconfigure(0, weight=1)
+
+        # LEFT: 3D SHOWCASE STAGE ("The Pedestal")
+        self.build_3d_stage(container, default_yaw=30.0)
+
         # RIGHT: CONTROLS & WARDROBE PRESETS GRID
-        # ---------------------------------------------------------------------
         controls_area = tk.Frame(container, bg=COLORS['main_bg'])
         controls_area.grid(row=0, column=1, sticky="nsew")
+
+        card_bg = COLORS.get('card_bg', '#222630')
+        border_col = COLORS.get('card_border', '#2A303F')
+        accent = COLORS.get('accent_color', '#2ECC71')
 
         # 1. Config Card (Geometry + Offline Injection)
         config_card = tk.Frame(
@@ -976,6 +1223,340 @@ class LockerScreenMixin:
             b_save.config(state="disabled")
 
         mgr.show_modal("Fetch Player Skin", build_content, width=540, height=420)
+
+    # -------------------------------------------------------------------------
+    # OFFICIAL ACCOUNT CAPES INTEGRATION & CAPE STUDIO
+    # -------------------------------------------------------------------------
+    def load_account_capes_async(self):
+        """Asynchronously retrieve official capes from Minecraft Services API if Microsoft account."""
+        if not getattr(self, 'profiles', None) or not (0 <= getattr(self, 'current_profile_index', 0) < len(self.profiles)):
+            self.account_capes = []
+            self.current_cape_path = None
+            self.update_locker_subtabs()
+            return
+
+        p = self.profiles[self.current_profile_index]
+        if p.get("type") != "microsoft":
+            self.account_capes = []
+            self.current_cape_path = None
+            self.update_locker_subtabs()
+            return
+
+        token = p.get("access_token")
+        if not token:
+            return
+
+        def _fetch_worker():
+            capes = fetch_account_capes(token)
+            active_path = None
+            for c in capes:
+                alias = c.get("alias", "cape")
+                c_path = download_and_cache_cape(c.get("url", ""), alias)
+                c["local_path"] = c_path
+                if c.get("state") == "ACTIVE":
+                    active_path = c_path
+
+            def _on_done():
+                self.account_capes = capes
+                if active_path:
+                    self.current_cape_path = active_path
+                    p["cape_path"] = active_path
+                elif p.get("cape_path") and os.path.exists(p.get("cape_path")):
+                    self.current_cape_path = p.get("cape_path")
+                self.update_locker_subtabs()
+                self.render_3d_stage_frame()
+                if getattr(self, 'locker_view', None) and self.locker_view.get() == "Capes":
+                    self.refresh_locker_view()
+
+            if hasattr(self, 'root') and self.root.winfo_exists():
+                self.root.after(0, _on_done)
+
+        threading.Thread(target=_fetch_worker, daemon=True).start()
+
+    def get_cape_thumbnail(self, cape_dict: Dict[str, Any], height: int = 36) -> Optional[ImageTk.PhotoImage]:
+        """Generate a 2D thumbnail swatch of the cape back face (1:1.6 aspect ratio)."""
+        local_path = cape_dict.get("local_path")
+        if not local_path or not os.path.exists(local_path):
+            url = cape_dict.get("url", "")
+            alias = cape_dict.get("alias", "cape")
+            local_path = download_and_cache_cape(url, alias)
+            cape_dict["local_path"] = local_path
+
+        if not local_path or not os.path.exists(local_path):
+            return None
+
+        try:
+            img = Image.open(local_path).convert("RGBA")
+            back_face = img.crop((1, 1, 11, 17))
+            w = int(height * (10.0 / 16.0))
+            thumb = back_face.resize((max(1, w), height), RESAMPLE_NEAREST)
+            photo = ImageTk.PhotoImage(thumb)
+            return photo
+        except Exception as e:
+            logger.error("Failed to generate cape thumbnail: %s", e)
+            return None
+
+    def render_capes_view(self, parent: tk.Widget):
+        """Render the Cape Studio showcasing owned official Minecraft capes."""
+        container = tk.Frame(parent, bg=COLORS['main_bg'])
+        container.pack(expand=True, fill="both", padx=20, pady=(0, 16))
+
+        container.columnconfigure(0, weight=0, minsize=280)
+        container.columnconfigure(1, weight=1)
+        container.rowconfigure(0, weight=1)
+
+        # LEFT: 3D Stage pre-turned to 150 degrees (rear view to highlight the cape)
+        self.build_3d_stage(container, default_yaw=150.0)
+
+        # RIGHT: Cape Selection Studio Card
+        controls_area = tk.Frame(container, bg=COLORS['main_bg'])
+        controls_area.grid(row=0, column=1, sticky="nsew")
+
+        card_bg = COLORS.get('card_bg', '#222630')
+        border_col = COLORS.get('card_border', '#2A303F')
+        accent = COLORS.get('accent_color', '#2ECC71')
+
+        capes_card = tk.Frame(
+            controls_area,
+            bg=card_bg,
+            highlightbackground=border_col,
+            highlightthickness=1,
+            padx=16,
+            pady=14
+        )
+        capes_card.pack(fill="both", expand=True)
+
+        # Header
+        c_header = tk.Frame(capes_card, bg=card_bg)
+        c_header.pack(fill="x", pady=(0, 10))
+
+        tk.Label(
+            c_header,
+            text="MINECRAFT CAPES",
+            font=(FONT_FAMILY, 9, "bold"),
+            bg=card_bg,
+            fg=COLORS['text_primary']
+        ).pack(side="left")
+
+        num_capes = len(getattr(self, 'account_capes', []))
+        tk.Label(
+            c_header,
+            text=f"{num_capes} Capes",
+            font=(FONT_FAMILY, 8, "bold"),
+            bg=COLORS.get('input_bg', '#1E222B'),
+            fg=COLORS['text_secondary'],
+            padx=6,
+            pady=2
+        ).pack(side="left", padx=(6, 0))
+
+        # Unequip action on right
+        b_unequip = tk.Button(
+            c_header,
+            text="🚫 Unequip Cape",
+            font=(FONT_FAMILY, 8, "bold"),
+            relief="flat",
+            bd=0,
+            bg=COLORS.get('input_bg', '#1E222B'),
+            fg=COLORS['text_primary'],
+            padx=8,
+            pady=3,
+            cursor="hand2",
+            command=self.unequip_active_cape
+        )
+        b_unequip.pack(side="right")
+
+        b_sync = tk.Button(
+            c_header,
+            text="🔄 Sync",
+            font=(FONT_FAMILY, 8, "bold"),
+            relief="flat",
+            bd=0,
+            bg=COLORS.get('input_bg', '#1E222B'),
+            fg=COLORS['text_secondary'],
+            padx=8,
+            pady=3,
+            cursor="hand2",
+            command=self.load_account_capes_async
+        )
+        b_sync.pack(side="right", padx=(0, 6))
+
+        tk.Label(
+            capes_card,
+            text="Official Minecraft capes retrieved from your account. Select a cape to equip it.",
+            font=(FONT_FAMILY, 8),
+            bg=card_bg,
+            fg=COLORS['text_secondary'],
+            anchor="w"
+        ).pack(fill="x", pady=(0, 10))
+
+        # Scrollable Cape List Frame
+        scroll_box = tk.Frame(capes_card, bg=card_bg)
+        scroll_box.pack(fill="both", expand=True)
+
+        canvas = tk.Canvas(scroll_box, bg=card_bg, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(scroll_box, orient="vertical", command=canvas.yview)
+        scrollable_frame = tk.Frame(canvas, bg=card_bg)
+
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        cw = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(cw, width=e.width))
+        canvas.configure(yview_command=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        if not getattr(self, 'account_capes', []):
+            empty_box = tk.Frame(scrollable_frame, bg=card_bg, pady=30)
+            empty_box.pack(fill="both", expand=True)
+            tk.Label(
+                empty_box,
+                text="No capes found on this account.",
+                font=(FONT_FAMILY, 9),
+                bg=card_bg,
+                fg=COLORS['text_secondary']
+            ).pack()
+            return
+
+        for cape in self.account_capes:
+            self._render_cape_card(scrollable_frame, cape)
+
+    def _render_cape_card(self, parent: tk.Widget, cape: Dict[str, Any]):
+        c_id = cape.get("id")
+        alias = cape.get("alias", "Minecraft Cape")
+        local_path = cape.get("local_path")
+        state = cape.get("state", "INACTIVE")
+        is_equipped = (state == "ACTIVE") or (local_path and local_path == getattr(self, 'current_cape_path', None))
+
+        card_bg = COLORS.get('input_bg', '#1E222B')
+        border_col = COLORS.get('card_border', '#2A303F')
+        accent = COLORS.get('accent_color', '#2ECC71')
+
+        card = tk.Frame(
+            parent,
+            bg=card_bg,
+            highlightthickness=1,
+            highlightbackground=accent if is_equipped else border_col,
+            padx=12,
+            pady=10,
+            cursor="hand2"
+        )
+        card.pack(fill="x", pady=4, padx=2)
+
+        # Right: Status / Button
+        right_box = tk.Frame(card, bg=card_bg)
+        right_box.pack(side="right", padx=(6, 0))
+
+        if is_equipped:
+            tk.Label(
+                right_box,
+                text="✓ EQUIPPED",
+                font=(FONT_FAMILY, 7, "bold"),
+                bg=accent,
+                fg="#FFFFFF",
+                padx=6,
+                pady=2
+            ).pack()
+        else:
+            tk.Button(
+                right_box,
+                text="Equip",
+                font=(FONT_FAMILY, 8, "bold"),
+                relief="flat",
+                bd=0,
+                bg=COLORS.get('card_bg', '#222630'),
+                fg=COLORS['text_primary'],
+                padx=10,
+                pady=3,
+                cursor="hand2",
+                command=lambda c=cape: self.equip_account_cape(c)
+            ).pack()
+
+        # Left: Cape Swatch Thumbnail (back texture)
+        thumb = self.get_cape_thumbnail(cape, height=36)
+        if thumb:
+            lbl_thumb = tk.Label(card, image=thumb, bg=card_bg)
+            lbl_thumb.image = thumb  # retain reference
+            lbl_thumb.pack(side="left", padx=(0, 12))
+
+        # Center: Name & Tag
+        info = tk.Frame(card, bg=card_bg)
+        info.pack(side="left", fill="x", expand=True)
+
+        tk.Label(
+            info,
+            text=alias,
+            font=(FONT_FAMILY, 9, "bold"),
+            bg=card_bg,
+            fg=COLORS['text_primary'],
+            anchor="w"
+        ).pack(fill="x")
+
+        tk.Label(
+            info,
+            text="OFFICIAL MOJANG CAPE",
+            font=(FONT_FAMILY, 7, "bold"),
+            bg=COLORS.get('card_bg', '#222630'),
+            fg=COLORS['text_secondary'],
+            padx=4,
+            pady=1,
+            anchor="w"
+        ).pack(anchor="w", pady=(2, 0))
+
+        def _on_click(_e):
+            self.equip_account_cape(cape)
+
+        card.bind("<Button-1>", _on_click)
+        info.bind("<Button-1>", _on_click)
+
+    def equip_account_cape(self, cape: Dict[str, Any]):
+        """Equip chosen cape on 3D model and sync with Mojang servers."""
+        p = self.profiles[self.current_profile_index] if self.profiles else {}
+        token = p.get("access_token")
+        c_id = cape.get("id")
+        local_path = cape.get("local_path")
+
+        self.current_cape_path = local_path
+        p["cape_path"] = local_path or ""
+        p["active_cape_id"] = c_id or ""
+
+        for c in getattr(self, 'account_capes', []):
+            if c.get("id") == c_id:
+                c["state"] = "ACTIVE"
+            else:
+                c["state"] = "INACTIVE"
+
+        self.render_3d_stage_frame()
+        self.refresh_locker_view()
+
+        if token and c_id:
+            def _sync():
+                set_active_mojang_cape(token, c_id)
+            threading.Thread(target=_sync, daemon=True).start()
+
+    def unequip_active_cape(self):
+        """Unequip active cape from 3D model and Mojang account."""
+        p = self.profiles[self.current_profile_index] if self.profiles else {}
+        token = p.get("access_token")
+
+        self.current_cape_path = None
+        if "cape_path" in p:
+            p["cape_path"] = ""
+        if "active_cape_id" in p:
+            p["active_cape_id"] = ""
+
+        for c in getattr(self, 'account_capes', []):
+            c["state"] = "INACTIVE"
+
+        self.render_3d_stage_frame()
+        self.refresh_locker_view()
+
+        if token:
+            def _sync():
+                clear_active_mojang_cape(token)
+            threading.Thread(target=_sync, daemon=True).start()
 
     # -------------------------------------------------------------------------
     # WALLPAPERS STUDIO VIEW
