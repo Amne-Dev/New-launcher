@@ -1,69 +1,117 @@
-# NLC (neo) A Minecraft launcher designed to be lightweight
-   
-Its Simple. Fast. Customizable.
+# New Launcher
 
-## ✨ What does it do?
-*   **Play Everything**: Supports **Vanilla**, **Fabric**, and **Forge**.
-*   **Looks Familiar**: A modern design that looks like the official launcher, but feels faster.
-*   **Custom Icons**: Pick real **Minecraft Blocks** (like Diamond Block, TNT, or Workbench) for your installation icons!
-*   **Discord Status**: Shows your friends exactly what you're playing with built-in Rich Presence.
-*   **Offline Support**: Create offline ("Developer") accounts easily.
+**A fast, focused Minecraft Java launcher for Windows and Linux.**
 
-## � Documentation
-For detailed guides, troubleshooting, and developer docs, check out our [**Project Wiki**](WIKI.md).
+New Launcher keeps the familiar parts of Minecraft launcher setup while making it easier to manage installations, modpacks, mods, skins, and profiles in one place.
 
-## 📥 How to Install
+<p align="center">
+    <a href="https://github.com/Amne-Dev/New-launcher/releases/latest"><img src="https://img.shields.io/github/v/release/Amne-Dev/New-launcher?label=Latest%20release&style=flat-square" alt="Latest release"></a>
+    <a href="https://github.com/Amne-Dev/New-launcher/releases"><img src="https://img.shields.io/github/downloads/Amne-Dev/New-launcher/total?label=Downloads&style=flat-square" alt="Total downloads"></a>
+    <a href="LICENSE"><img src="https://img.shields.io/github/license/Amne-Dev/New-launcher?style=flat-square" alt="License"></a>
+    <a href="https://github.com/Amne-Dev/New-launcher/issues"><img src="https://img.shields.io/github/issues/Amne-Dev/New-launcher?style=flat-square" alt="Open issues"></a>
+</p>
+
+<p align="center">
+    <a href="https://github.com/Amne-Dev/New-launcher/releases/latest">Download New Launcher</a>
+    &nbsp;&middot;&nbsp;
+    <a href="WIKI.md">Read the user guide</a>
+    &nbsp;&middot;&nbsp;
+    <a href="https://github.com/Amne-Dev/New-launcher/issues">Get help</a>
+</p>
+
+## See It In Action
+
+<p align="center">
+    <img src="web/img/hero.png" alt="New Launcher play screen" width="820">
+</p>
+
+<p align="center">
+    <img src="web/img/locker.png" alt="New Launcher skin locker" width="400">
+    <img src="web/img/modpacks.png" alt="New Launcher modpacks screen" width="400">
+</p>
+
+<p align="center">
+    <img src="web/img/mods.png" alt="New Launcher mods screen" width="820">
+</p>
+
+## Why New Launcher?
+
+- **Start playing quickly.** Install and launch Minecraft Java Edition from a simple, familiar interface.
+- **Keep installations organized.** Create separate profiles for different Minecraft versions and loaders.
+- **Choose your mod setup.** Use Vanilla, Fabric, Forge, BatMod, LabyMod, or Lunar Client installations where supported.
+- **Find and manage content.** Browse Modrinth, install modpacks, inspect mods, and turn individual mods on or off.
+- **Make it yours.** Customize installation icons with Minecraft block textures and manage skins in the built-in locker.
+- **Use the account setup that fits.** Sign in with Microsoft, connect supported skin services, or create an offline profile for local use.
+- **Stay connected.** Optional Discord Rich Presence can show what you are playing.
+
+## Install
 
 ### Windows
-1.  Download the latest `NLCSetup.exe` from the [Releases](https://github.com/Amne-Dev/New-launcher/releases) page.
-2.  Run the installer and follow the prompts.
-3.  Open **New Launcher** from the Start Menu or desktop shortcut.
+
+1. Open the [latest release](https://github.com/Amne-Dev/New-launcher/releases/latest).
+2. Download `NLCSetup.exe`.
+3. Run the installer and open **New Launcher** from the Start Menu.
 
 ### Linux
-1.  Download the latest Linux `AppImage` from the [Releases](https://github.com/Amne-Dev/New-launcher/releases) page.
-2.  Open a terminal in the folder containing the file.
-3.  Make it executable:
+
+1. Open the [latest release](https://github.com/Amne-Dev/New-launcher/releases/latest).
+2. Download the Linux AppImage.
+3. Make it executable and launch it:
 
 ```bash
-chmod +x NewLauncher-*-x86_64.AppImage
+chmod +x NewLauncher-*.AppImage
+./NewLauncher-*.AppImage
 ```
 
-4.  Launch it:
+The AppImage is portable and does not require a system-wide installation.
+
+## Your First Installation
+
+1. Open **Profiles** and sign in with Microsoft, or create an offline profile for local use.
+2. Open **Installations** and select **New Installation**.
+3. Choose a Minecraft version and loader, then select an icon if you want to personalize it.
+4. Return to **Play**, select the installation, and click **Play**.
+
+New Launcher can download the files it needs when you create an installation. A Java runtime may also be downloaded automatically when a loader requires it.
+
+## Modpacks, Mods, and Skins
+
+The **Modrinth** area lets you discover modpacks and mods without leaving the launcher. Installed modpacks stay linked to their Minecraft installation, and individual mods can be enabled or disabled from the management view.
+
+The **Locker** keeps your saved skins in one place. You can also use local skin files and supported online skin services.
+
+## Settings
+
+Open **Settings** to adjust Java memory, launcher behavior, and optional integrations. For a large modpack, increase the Java memory allocation gradually and leave enough memory available for your operating system.
+
+## Documentation and Support
+
+- [User guide and troubleshooting](WIKI.md)
+- [Changelog](CHANGELOG.md)
+- [Frequently asked questions](web/faq.html)
+- [Report a bug or request a feature](https://github.com/Amne-Dev/New-launcher/issues)
+- [Security policy](web/security.html)
+
+## Build From Source
+
+The launcher is written in Python. To run it locally, install the dependencies and start the application:
 
 ```bash
-./NewLauncher-*-x86_64.AppImage
+python -m pip install -r requirements.txt
+python main.py
 ```
 
-If your desktop does not launch AppImages directly, you can still run it from the terminal with the command above.
-
-### Linux From Source
-If you want to build the Linux AppImage yourself:
+To build the Linux AppImage from the repository root:
 
 ```bash
 chmod +x linux/build_appimage.sh
 ./linux/build_appimage.sh
 ```
 
-That script creates a portable Linux AppImage from the repository root.
+See [CREDITS.md](CREDITS.md) for the libraries used by the project and [WIKI.md](WIKI.md) for contributor notes.
 
-## 🎮 How to Play
-1.  **Create a Profile**: On the sidebar, click the profile name (e.g. "Steve") to add your own offline username.
-2.  **Add a Version**: 
-    *   Go to the **Installations** tab.
-    *   Click **New Installation**.
-    *   Pick a Version (like 1.20.1) and a Loader (Vanilla, Fabric, etc.).
-    *   **Pro Tip**: Click the icon box to choose a cool block texture!
-3.  **Launch**: Go back to the **Play** tab, select your version from the bottom list, and hit **PLAY**.
+## License
 
-## ⚡ Power Users (RAM)
-Need more memory for mods?
-1.  Click **Settings** on the sidebar.
-2.  Drag the **Java Memory** slider to the right.
-3.  That's it!
+New Launcher is open source. See [LICENSE](LICENSE) for the full license text.
 
-## 📜 Credits
-Huge thanks to the creators of the libraries used in this project: `minecraft-launcher-lib`, `requests`, `Pillow`, and `pypresence`.
-See the full [CREDITS.md](CREDITS.md) file for details.
-
----
-*This is an open-source project and is not affiliated with Mojang Studios or Microsoft.*
+New Launcher is not affiliated with Mojang Studios or Microsoft. Minecraft is a trademark of Microsoft Corporation.
