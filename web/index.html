@@ -54,7 +54,7 @@
     <!-- Hero Section -->
     <header class="hero">
         <div class="hero-content">
-            <span class="pixel-badge">✦ NEXT-GEN MINECRAFT CLIENT ✦</span>
+            <span class="pixel-badge blue">NEXT-GEN MINECRAFT CLIENT</span>
             <h1>The Better Way to Play <span class="accent">Minecraft</span>.</h1>
             <p class="hero-subtitle">Blazing fast startup, zero telemetry, and a sleek Neo interface. Experience an interactive 3D skin locker, 1-click Modrinth modpacks, and offline skin injection out of the box.</p>
             <div class="cta-group">
@@ -80,7 +80,7 @@
                     <div class="window-title">New Launcher — Minecraft Java Edition</div>
                     <div style="width: 40px;"></div>
                 </div>
-                <img src="img/hero_clean_window.png" alt="New Launcher Java Edition Interface" class="window-img" fetchpriority="high" loading="eager" width="1857" height="1064">
+                <img src="img/hero.png" alt="New Launcher Java Edition Interface" class="window-img" fetchpriority="high" loading="eager" width="1920" height="1080">
             </div>
         </div>
     </header>
@@ -124,7 +124,7 @@
                         <div class="window-title">Locker & Customization — 3D Wardrobe Studio</div>
                         <div style="width: 40px;"></div>
                     </div>
-                    <img src="img/locker_clean_window.png" alt="New Launcher Locker and 3D Skin Studio" class="window-img" loading="lazy" decoding="async" width="1857" height="1064">
+                    <img src="img/locker.png" alt="New Launcher Locker and 3D Skin Studio" class="window-img" loading="lazy" decoding="async" width="1920" height="1080">
                 </div>
             </div>
         </div>
@@ -139,10 +139,14 @@
                         <div class="dots">
                             <span></span><span></span><span></span>
                         </div>
-                        <div class="window-title">Modrinth Network — 1-Click Modpack Discovery</div>
-                        <div style="width: 40px;"></div>
+                        <div class="window-tabs">
+                            <button type="button" class="tab-btn active" id="tab-btn-modpacks" onclick="switchModrinthTab('modpacks')">Modpacks</button>
+                            <button type="button" class="tab-btn" id="tab-btn-mods" onclick="switchModrinthTab('mods')">Mods</button>
+                        </div>
+                        <div class="window-title">Modrinth Network</div>
                     </div>
-                    <img src="img/modrinth_clean_window.png" alt="New Launcher Modrinth Modpack Explorer" class="window-img" loading="lazy" decoding="async" width="1857" height="1064">
+                    <img id="img-modpacks" src="img/modpacks.png" alt="New Launcher Modrinth Modpack Discovery" class="window-img" loading="lazy" decoding="async" width="1920" height="1080">
+                    <img id="img-mods" src="img/mods.png" alt="New Launcher Modrinth Mods Browser" class="window-img" style="display: none;" loading="lazy" decoding="async" width="1920" height="1080">
                 </div>
             </div>
             <div class="showcase-info">
