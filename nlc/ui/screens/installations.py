@@ -12,6 +12,7 @@ import zipfile
 import logging
 import threading
 from datetime import datetime
+from typing import Optional
 import tkinter as tk
 from tkinter import ttk, filedialog
 from PIL import Image, ImageTk

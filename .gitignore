@@ -12,9 +12,6 @@ venv_build/
 docs/
 docs/refactor/
 
-# Agent & Assistant Configuration
-.agent/
-
 # PyInstaller
 build/
 dist/
@@ -27,8 +24,7 @@ logs/
 authlib-injector.log
 /skins
 launcher_config.json
-*.AppImage
-appimagetool*
+NewLauncher-1.4-x86_64.AppImage
 /AppDir
 /build_linux
 /dist_linux
