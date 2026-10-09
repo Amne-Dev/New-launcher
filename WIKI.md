@@ -3,7 +3,7 @@
 Welcome to the project wiki. This file provides a centralized, human-readable overview of the project and links to canonical documentation and website pages.
 
 ## Overview
-New Launcher is a lightweight, open-source Minecraft launcher supporting Vanilla, Fabric, and Forge. It focuses on speed, simplicity, and local-first privacy.
+New Launcher is an open-source Minecraft Java launcher for Windows and Linux. It keeps installation and launch workflows simple while adding profiles, modpacks, mods, skins, wallpapers, addons, and optional integrations.
 
 ## Quick links (hosted)
 - Website: https://amne-dev.github.io/New-launcher/
@@ -22,48 +22,77 @@ New Launcher is a lightweight, open-source Minecraft launcher supporting Vanilla
 - Wiki (site): https://amne-dev.github.io/New-launcher/wiki.html
 
 ## Getting Started
-1. Download the latest installer from the Releases page on GitHub: https://github.com/Amne-Dev/New-launcher/releases
-2. Run the installer for your platform (Windows installer provided). See `web/getting-started.html` (when available).
+1. Download the latest release from GitHub: https://github.com/Amne-Dev/New-launcher/releases/latest
+2. On Windows, run `NLCSetup.exe` and launch New Launcher from the Start Menu.
+3. On Linux, download the AppImage, make it executable, and launch it:
+    ```bash
+    chmod +x NewLauncher-*.AppImage
+    ./NewLauncher-*.AppImage
+    ```
+4. Create a profile, choose an installation, and launch Minecraft.
+
+The hosted [Getting Started](https://amne-dev.github.io/New-launcher/getting-started.html) page includes the short version of this guide. The [Download & Verification](https://amne-dev.github.io/New-launcher/download.html) page contains release download information.
 
 ## User Guide
 
-### 1. Managing Accounts
-The launcher supports three types of accounts:
-*   **Microsoft Account**: Click "Add Profile" -> "Microsoft". A browser window will open to authenticate with your Microsoft account. Once logged in, your skin and username will sync automatically.
-*   **Ely.by**: Click "Add Profile" -> "Ely.by". Enter your username and password. This supports skin injection automatically.
-*   **Offline**: Click "Add Profile" -> "Offline". Just enter a username.
-    *   *Note*: In offline mode, you can upload a custom skin file (.png) in the profile settings, which will be injected locally using an integrated auth server.
+### 1. Managing Profiles
+The launcher supports Microsoft, Ely.by, and offline profiles.
+
+* **Microsoft**: Use the Microsoft sign-in flow to authenticate through your browser. The profile's username, UUID, and skin information are used when Minecraft launches.
+* **Ely.by**: Sign in with an Ely.by account when you use that service's skin and account system.
+* **Offline**: Enter a local username without signing in. A local PNG skin can be selected for offline skin injection.
+
+Keep account credentials in the launcher and services they belong to. Only install addons and third-party integrations that you trust.
 
 ### 2. Creating Installations
 Navigate to the **Installations** tab to manage your game versions.
-*   **Create New**: Click the "+" button.
+*   **Create New**: Click **New Installation**.
     *   **Name**: Give your installation a name (e.g., "Survival 1.20").
     *   **Version**: Select the Minecraft version.
-    *   **Loader**: Choose between **Vanilla**, **Fabric**, or **Forge**. The launcher handles the installation of the modloader automatically.
-    *   **Icon**: Select a block icon or a custom `.png` image.
+    *   **Loader**: Choose **Vanilla**, **Forge**, **Fabric**, **BatMod**, **LabyMod**, or **Lunar Client** where supported. The launcher handles loader installation automatically.
+    *   **Icon**: Select a Minecraft block icon or a custom `.png` image.
+
+The installation editor also supports a custom Java executable and display resolution override. These values are saved per installation.
 
 ### 3. Settings & Customization
 Click the **Gear Icon** to access settings.
-*   **RAM Allocation**: Use the slider to increase memory for modded instances (Default is 4GB).
+*   **RAM Allocation**: Use the slider to increase memory for modded instances. The default allocation is 4 GB.
 *   **Wallpapers**: Customize the launcher background. You can select pre-loaded images or import your own from the `wallpapers/` folder.
 *   **Rich Presence**: Toggle Discord RPC integration to show your game status ("Playing Minecraft 1.21").
-*   **Java Arguments**: Advanced users can supply custom JVM arguments (e.g., G1GC flags).
+*   **Java Arguments**: Advanced users can supply custom JVM arguments.
+*   **Downloads**: Configure download speed and parallel download limits where available.
 
-### 4. Custom Skins (Offline/Ely.by)
+### 4. Modpacks and Mods
+The **Modrinth** area supports mod and modpack discovery. You can choose a modpack version, install it, link it to an installation, and manage its installed mods. Individual mods can be enabled or disabled before launch.
+
+Local CurseForge modpack exports can also be imported. Some CurseForge downloads require a user-provided API key.
+
+### 5. Custom Skins (Offline/Ely.by)
 *   **Ely.by**: Skins are managed on the Ely.by website.
 *   **Offline**: Go to your profile settings, click **"Select Skin"**, and choose a valid skin `.png` file. The launcher will start a local server to inject this skin into your game session transparently.
 
 ## Developer Documentation
-For those looking to contribute or understand the codebase, the project has recently been refactored (v1.4) into modular components:
+The current application is organized around `main.py` and the `nlc/` package:
 
-*   **`alt.py`**: The entry point and main application controller. Handles UI rendering and launch orchestration.
-*   **`auth.py`**: Authentication logic for various services (Ely.by local auth, etc.).
-*   **`handlers.py`**: Contains `http.server` handlers for local skin injection and Microsoft login callbacks.
-*   **`utils.py`**: Shared utility functions, file path management (resource_path), and image helpers.
-*   **`config.py`**: Global constants (Version, Client IDs, Defaults).
+* **`main.py`**: Application entry point.
+* **`nlc/ui/`**: Screens, widgets, dialogs, and application flow.
+* **`nlc/net/`**: Network-facing helpers and HTTP operations.
+* **`nlc/storage/`**: Configuration and persistent launcher data.
+* **`nlc/`**: Shared launcher logic, authentication, handlers, and utilities.
+* **`config.py`**: Version, account defaults, supported loaders, and global settings.
+
+The current release version is defined as `CURRENT_VERSION` in `config.py`.
 
 ### Building from Source (Windows)
-To build the executable, use PyInstaller with the provided spec file:
+Install the Python dependencies first, then run the application directly:
+
+```bash
+python -m pip install -r requirements.txt
+python main.py
+```
+
+Windows release builds are automated by `.github/workflows/windows-build.yml`. The provided PyInstaller specs can also be used for local builds:
+
 ```bash
 pyinstaller alt.spec
 ```
@@ -91,7 +120,7 @@ Since the project relies on system-level libraries (like Tkinter) that vary by d
     *   Install pip requirements.
     *   Run PyInstaller to create a portable binary.
     *   Download `appimagetool`.
-    *   Package everything into `NewLauncher-1.4-x86_64.AppImage`.
+    *   Package everything into a versioned `NewLauncher-*-x86_64.AppImage`.
 
 ### Skin System Architecture
 
@@ -129,16 +158,16 @@ This is a custom implementation allowing offline users to see their own skins wi
 The launcher does not collect, transmit, or aggregate user data. See `web/privacy.html` for details.
 
 ## Troubleshooting / FAQ
-See `web/faq.html` (to be added) for common issues. For immediate help, open an issue on GitHub: https://github.com/Amne-Dev/New-launcher/issues
+See the hosted [FAQ](https://amne-dev.github.io/New-launcher/faq.html) and [Support](https://amne-dev.github.io/New-launcher/support.html) pages for common issues. Include your operating system, launcher version, reproduction steps, and relevant logs when opening an issue on GitHub: https://github.com/Amne-Dev/New-launcher/issues
 
 ## Contributing
-Please read `CONTRIBUTING.md` (or `web/contributing.html` once added) for build and PR guidance. Basic steps:
+Please read the hosted [Contributing](https://amne-dev.github.io/New-launcher/contributing.html) page for build and pull request guidance. Basic steps:
 1. Fork the repo
 2. Create a feature branch
 3. Open a pull request with a clear description
 
 ## Security
-Report vulnerabilities via a GitHub issue or private contact if available. See `web/security.html` when added.
+Do not disclose security-sensitive details in a public issue. Follow the [Security Policy](https://amne-dev.github.io/New-launcher/security.html) for reporting guidance.
 
 ## Credits
 See `CREDITS.md` for contributors and third-party libraries.
