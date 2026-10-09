@@ -518,7 +518,7 @@ How to use:
         if not iso_value:
             return "Never"
         try:
-            return datetime.fromisoformat(str(iso_value)).strftime("%Y-%m-%d %H:%M")
+            return datetime.datetime.fromisoformat(str(iso_value)).strftime("%Y-%m-%d %H:%M")
         except Exception:
             return str(iso_value)
 
@@ -594,7 +594,7 @@ How to use:
 
         for inst in self.installations:
             if inst.get("id") == inst_id:
-                inst["last_played"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                inst["last_played"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
                 break
 
         self.save_config(sync_ui=False)
@@ -1055,7 +1055,7 @@ How to use:
             preview.pack(fill="x")
 
             tk.Label(card, text=os.path.basename(path), font=("Segoe UI", 9, "bold"), bg=COLORS.get('input_bg', '#1A1A1A'), fg=COLORS['text_primary'], anchor="w").pack(fill="x", pady=(8, 2))
-            tk.Label(card, text=datetime.fromtimestamp(os.path.getmtime(path)).strftime("%Y-%m-%d %H:%M"), font=("Segoe UI", 8), bg=COLORS.get('input_bg', '#1A1A1A'), fg=COLORS['text_secondary'], anchor="w").pack(fill="x")
+            tk.Label(card, text=datetime.datetime.fromtimestamp(os.path.getmtime(path)).strftime("%Y-%m-%d %H:%M"), font=("Segoe UI", 8), bg=COLORS.get('input_bg', '#1A1A1A'), fg=COLORS['text_secondary'], anchor="w").pack(fill="x")
 
             btns = tk.Frame(card, bg=COLORS.get('input_bg', '#1A1A1A'))
             btns.pack(fill="x", pady=(8, 0))

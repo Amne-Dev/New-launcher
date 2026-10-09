@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.0.1] - 2026-10-09
+
+### Fixed
+
+- **Windows Startup Error**: Fixed addon timestamp formatting using the `datetime` module correctly, preventing startup failures when rendering screenshots.
+- **Windows Alt-Tab Input Lockup**: Restored valid modal focus and cleared orphaned input grabs when the launcher regains focus.
+
 ## [3.0] - 2026-10-09
 
 ### Added

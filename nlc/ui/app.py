@@ -33,7 +33,7 @@ except (ImportError, AttributeError):
     ctypes = None
     wintypes = None
 from datetime import datetime
-from typing import Any, cast
+from typing import Any, Optional, cast
 
 logger = logging.getLogger(__name__)
 
