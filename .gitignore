@@ -12,6 +12,9 @@ venv_build/
 docs/
 docs/refactor/
 
+# Agent & Assistant Configuration
+.agent/
+
 # PyInstaller
 build/
 dist/
@@ -23,6 +26,7 @@ installer/
 logs/
 authlib-injector.log
 /skins
+launcher_config.json
 *.AppImage
 appimagetool*
 /AppDir
