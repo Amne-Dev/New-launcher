@@ -338,14 +338,23 @@ class ModpacksScreenMixin:
                         modpack_dir=pack_dir,
                         output_path=target_file
                     )
-                self.root.after(0, lambda: [
-                    self.hide_progress_overlay(),
-                    custom_showinfo(
-                        "Export Complete",
-                        f"Successfully exported '{pack.get('name')}' to:\n{target_file}",
-                        parent=self.root
-                    )
-                ])
+                def on_export_done():
+                    self.hide_progress_overlay()
+                    succ_msg = f"Exported '{pack.get('name')}' to {os.path.basename(target_file)}"
+                    if hasattr(self, 'toast_manager'):
+                        self.toast_manager.show(succ_msg, level="success")
+                    elif hasattr(self.root, 'toast_manager'):
+                        self.root.toast_manager.show(succ_msg, level="success")
+                    else:
+                        custom_showinfo("Export Complete", succ_msg, parent=self.root)
+                    if hasattr(self, 'notifications'):
+                        self.notifications.add(
+                            title="Modpack Exported",
+                            message=f"Successfully exported '{pack.get('name')}' to:\n{target_file}",
+                            level="success",
+                            action=lambda p=target_file: open_path_in_system(os.path.dirname(p))
+                        )
+                self.root.after(0, on_export_done)
             except Exception as e:
                 logger.exception("Export failed: %s", e)
                 self.root.after(0, lambda err=str(e): [
@@ -1480,7 +1489,19 @@ class ModpacksScreenMixin:
                     dialog()
                 elif hasattr(dialog, "destroy") and dialog.winfo_exists():
                     dialog.destroy()
-                custom_showinfo("Success", f"Created installation '{new_name}' and linked it.", parent=self.root)
+                created_msg = f"Created matching installation '{new_name}'"
+                if hasattr(self, 'toast_manager'):
+                    self.toast_manager.show(created_msg, level="success")
+                elif hasattr(self.root, 'toast_manager'):
+                    self.root.toast_manager.show(created_msg, level="success")
+                else:
+                    custom_showinfo("Success", f"Created installation '{new_name}' and linked it.", parent=self.root)
+                if hasattr(self, 'notifications'):
+                    self.notifications.add(
+                        title="Installation Created",
+                        message=f"Created matching installation '{new_name}' and linked it to '{pack.get('name')}'.",
+                        level="success"
+                    )
             
             self.root.after(0, update_ui)
             

@@ -1073,7 +1073,12 @@ class LockerScreenMixin:
         if out_file:
             try:
                 shutil.copy2(path, out_file)
-                custom_showinfo("Exported", f"Skin saved to:\n{out_file}", parent=self.root)
+                if hasattr(self, 'toast_manager'):
+                    self.toast_manager.show(f"Skin exported: {os.path.basename(out_file)}", level="success")
+                elif hasattr(self.root, 'toast_manager'):
+                    self.root.toast_manager.show(f"Skin exported: {os.path.basename(out_file)}", level="success")
+                else:
+                    custom_showinfo("Exported", f"Skin saved to:\n{out_file}", parent=self.root)
             except Exception as e:
                 custom_showerror("Error", f"Failed to export: {e}", parent=self.root)
 
@@ -1260,13 +1265,18 @@ class LockerScreenMixin:
                 if p_path and os.path.exists(p_path):
                     self.add_skin_to_history(p_path, p_mod)
                     self.render_skin_history()
-                    custom_showinfo("Saved", f"Skin saved to wardrobe presets!", parent=self.root)
+                    if hasattr(self, 'toast_manager'):
+                        self.toast_manager.show("Skin saved to wardrobe presets!", level="success")
+                    elif hasattr(self.root, 'toast_manager'):
+                        self.root.toast_manager.show("Skin saved to wardrobe presets!", level="success")
+                    else:
+                        custom_showinfo("Saved", "Skin saved to wardrobe presets!", parent=self.root)
 
-            b_equip = self._make_btn(action_row, "⚡ Equip Now", style="primary", font_size=9, command=on_equip)
+            b_equip = self._make_btn(action_row, "Equip Now", style="primary", font_size=9, command=on_equip)
             b_equip.pack(side="left", padx=(0, 6))
             b_equip.config(state="disabled")
 
-            b_save = self._make_btn(action_row, "💾 Save", style="secondary", font_size=9, command=on_save_to_wardrobe)
+            b_save = self._make_btn(action_row, "Save", style="secondary", font_size=9, command=on_save_to_wardrobe)
             b_save.pack(side="left")
             b_save.config(state="disabled")
 
@@ -1359,6 +1369,9 @@ class LockerScreenMixin:
 
     def get_cape_thumbnail(self, cape_dict: Dict[str, Any], height: int = 36) -> Optional[ImageTk.PhotoImage]:
         """Generate a 2D thumbnail swatch of the cape back face (1:1.6 aspect ratio)."""
+        if not hasattr(self, '_cape_thumb_cache'):
+            self._cape_thumb_cache = {}
+
         local_path = cape_dict.get("local_path")
         if not local_path or not os.path.exists(local_path):
             url = cape_dict.get("url", "")
@@ -1369,12 +1382,17 @@ class LockerScreenMixin:
         if not local_path or not os.path.exists(local_path):
             return None
 
+        cache_key = (local_path, height)
+        if cache_key in self._cape_thumb_cache:
+            return self._cape_thumb_cache[cache_key]
+
         try:
             img = Image.open(local_path).convert("RGBA")
             back_face = img.crop((1, 1, 11, 17))
             w = int(height * (10.0 / 16.0))
             thumb = back_face.resize((max(1, w), height), RESAMPLE_NEAREST)
             photo = ImageTk.PhotoImage(thumb)
+            self._cape_thumb_cache[cache_key] = photo
             return photo
         except Exception as e:
             logger.error("Failed to generate cape thumbnail: %s", e)
@@ -1642,6 +1660,49 @@ class LockerScreenMixin:
                 clear_active_mojang_cape(token)
             threading.Thread(target=_sync, daemon=True).start()
 
+    def get_wallpaper_thumbnail(self, path: str, size: Tuple[int, int] = (220, 124)) -> Optional[ImageTk.PhotoImage]:
+        """Load or create a lightweight, disk-persisted and memory-cached thumbnail for a wallpaper."""
+        if not path or not os.path.exists(path):
+            return None
+
+        if not hasattr(self, '_wallpaper_thumb_cache'):
+            self._wallpaper_thumb_cache = {}
+
+        try:
+            stat = os.stat(path)
+            cache_key = (path, stat.st_mtime, stat.st_size, size)
+            if cache_key in self._wallpaper_thumb_cache:
+                return self._wallpaper_thumb_cache[cache_key]
+
+            cache_dir = os.path.join(self.config_dir, "cache", "wallpaper_thumbs")
+            os.makedirs(cache_dir, exist_ok=True)
+            disk_key = hashlib.md5(f"{path}_{stat.st_mtime}_{stat.st_size}_{size[0]}x{size[1]}".encode('utf-8')).hexdigest()
+            disk_path = os.path.join(cache_dir, f"{disk_key}.jpg")
+
+            if os.path.isfile(disk_path):
+                try:
+                    with Image.open(disk_path) as cached_im:
+                        photo = ImageTk.PhotoImage(cached_im.copy())
+                        self._wallpaper_thumb_cache[cache_key] = photo
+                        return photo
+                except Exception:
+                    pass
+
+            # Generate compressed thumbnail
+            with Image.open(path) as raw_im:
+                im = raw_im.convert("RGB")
+                im.thumbnail(size, Image.Resampling.BILINEAR)
+                try:
+                    im.save(disk_path, "JPEG", quality=82, optimize=True)
+                except Exception:
+                    pass
+                photo = ImageTk.PhotoImage(im)
+                self._wallpaper_thumb_cache[cache_key] = photo
+                return photo
+        except Exception as e:
+            logger.debug("Failed creating wallpaper thumbnail for %s: %s", path, e)
+            return None
+
     # -------------------------------------------------------------------------
     # WALLPAPERS STUDIO VIEW
     # -------------------------------------------------------------------------
@@ -1673,17 +1734,15 @@ class LockerScreenMixin:
         thumb_frame.pack_propagate(False)
 
         if cur_wp and os.path.exists(cur_wp):
-            try:
-                raw_img = Image.open(cur_wp)
-                raw_img.thumbnail((220, 120))
-                tk_thumb = ImageTk.PhotoImage(raw_img)
+            tk_thumb = self.get_wallpaper_thumbnail(cur_wp, size=(220, 120))
+            if tk_thumb:
                 lbl_thumb = tk.Label(thumb_frame, image=tk_thumb, bg=card_bg)
                 lbl_thumb.image = tk_thumb  # type: ignore
                 lbl_thumb.pack(fill="both", expand=True)
-            except Exception:
-                tk.Label(thumb_frame, text="🖼", font=(FONT_FAMILY, 24), bg=card_bg, fg=COLORS['text_secondary']).pack(expand=True)
+            else:
+                tk.Label(thumb_frame, text="No Preview", font=(FONT_FAMILY, 10), bg=card_bg, fg=COLORS['text_secondary']).pack(expand=True)
         else:
-            tk.Label(thumb_frame, text="🖼", font=(FONT_FAMILY, 24), bg=card_bg, fg=COLORS['text_secondary']).pack(expand=True)
+            tk.Label(thumb_frame, text="No Wallpaper", font=(FONT_FAMILY, 10), bg=card_bg, fg=COLORS['text_secondary']).pack(expand=True)
 
         # Hero Info & Actions
         hero_info = tk.Frame(hero_card, bg=card_bg)
@@ -1724,7 +1783,7 @@ class LockerScreenMixin:
         if cur_wp and os.path.exists(cur_wp):
             self._make_btn(
                 hero_acts,
-                "📁 Show in Files",
+                "Show in Files",
                 style="secondary",
                 font_size=9,
                 command=lambda p=cur_wp: open_path_in_system(os.path.dirname(p))
@@ -1732,7 +1791,7 @@ class LockerScreenMixin:
 
             self._make_btn(
                 hero_acts,
-                "🔍 Preview Fullscreen",
+                "Preview Fullscreen",
                 style="secondary",
                 font_size=9,
                 command=lambda p=cur_wp: self.preview_wallpaper_fullscreen(p)
@@ -1776,7 +1835,7 @@ class LockerScreenMixin:
 
         b_wp_dir = tk.Button(
             toolbar,
-            text="📂 Open Folder",
+            text="Open Folder",
             font=(FONT_FAMILY, 9, "bold"),
             relief="flat",
             bd=0,
@@ -1833,9 +1892,11 @@ class LockerScreenMixin:
 
             # Thumbnail
             try:
-                im = Image.open(path)
-                im.thumbnail((220, 124))
-                tk_im = ImageTk.PhotoImage(im)
+                tk_im = self.get_wallpaper_thumbnail(path, size=(220, 124))
+                if not tk_im:
+                    im = Image.open(path)
+                    im.thumbnail((220, 124))
+                    tk_im = ImageTk.PhotoImage(im)
                 btn = tk.Button(
                     card,
                     image=tk_im,
@@ -1867,7 +1928,7 @@ class LockerScreenMixin:
             if is_active:
                 tk.Label(
                     bot,
-                    text="✓ ACTIVE",
+                    text="ACTIVE",
                     font=(FONT_FAMILY, 8, "bold"),
                     bg=accent,
                     fg="#FFFFFF",
@@ -1894,9 +1955,9 @@ class LockerScreenMixin:
             def make_wp_menu(p=path, is_def=is_default):
                 def show_menu(event):
                     menu = NeoContextMenu(self.root)
-                    menu.add_item("🖼 Set as Wallpaper", lambda: self.set_wallpaper(p))
-                    menu.add_item("🔍 Fullscreen Preview", lambda: self.preview_wallpaper_fullscreen(p))
-                    menu.add_item("📁 Open Folder", lambda: open_path_in_system(os.path.dirname(p)))
+                    menu.add_item("Set as Wallpaper", lambda: self.set_wallpaper(p))
+                    menu.add_item("Fullscreen Preview", lambda: self.preview_wallpaper_fullscreen(p))
+                    menu.add_item("Open Folder", lambda: open_path_in_system(os.path.dirname(p)))
                     if not is_def:
                         def delete_wp():
                             if custom_askyesno("Delete Wallpaper", "Are you sure you want to delete this custom wallpaper?", parent=self.root):
@@ -1907,7 +1968,7 @@ class LockerScreenMixin:
                                 except Exception as exc:
                                     custom_showerror("Error", f"Failed to delete wallpaper: {exc}", parent=self.root)
                         menu.add_separator()
-                        menu.add_item("🗑 Delete Wallpaper", delete_wp, is_danger=True)
+                        menu.add_item("Delete Wallpaper", delete_wp, is_danger=True)
                     menu.show_at(event.x_root, event.y_root)
                 return show_menu
 
@@ -1952,8 +2013,15 @@ class LockerScreenMixin:
                 btn.config(bg=input_bg, fg=COLORS['text_secondary'])
 
     def _discover_all_wallpapers(self) -> List[Tuple[str, str, bool, str]]:
+        if not hasattr(self, '_wallpaper_hash_cache'):
+            self._wallpaper_hash_cache = {}
+
         def get_img_hash(p):
             try:
+                st = os.stat(p)
+                ckey = (p, st.st_mtime, st.st_size)
+                if ckey in self._wallpaper_hash_cache:
+                    return self._wallpaper_hash_cache[ckey]
                 h = hashlib.sha1()
                 with open(p, 'rb') as f:
                     while True:
@@ -1961,7 +2029,9 @@ class LockerScreenMixin:
                         if not b:
                             break
                         h.update(b)
-                return h.hexdigest()
+                digest = h.hexdigest()
+                self._wallpaper_hash_cache[ckey] = digest
+                return digest
             except Exception:
                 return ""
 

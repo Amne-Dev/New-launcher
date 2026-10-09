@@ -4987,8 +4987,15 @@ class MinecraftLauncher(
         self.status_label.config(text=text, fg=color if color else COLORS['text_secondary'])
 
     def get_head_from_skin(self, skin_path, size=40):
+        if not hasattr(self, '_skin_head_cache'):
+            self._skin_head_cache = {}
         try:
             if skin_path and os.path.exists(skin_path):
+                st = os.stat(skin_path)
+                cache_key = (skin_path, st.st_mtime, st.st_size, size)
+                if cache_key in self._skin_head_cache:
+                    return self._skin_head_cache[cache_key]
+
                 img = Image.open(skin_path).convert("RGBA")
                 # Base head is 8x8 at (8, 8, 16, 16)
                 head = img.crop((8, 8, 16, 16))
@@ -4999,7 +5006,9 @@ class MinecraftLauncher(
                         head.alpha_composite(hat)
                 except Exception:
                     pass
-                return ImageTk.PhotoImage(head.resize((size, size), RESAMPLE_NEAREST))
+                photo = ImageTk.PhotoImage(head.resize((size, size), RESAMPLE_NEAREST))
+                self._skin_head_cache[cache_key] = photo
+                return photo
         except Exception:
             pass
 
@@ -5021,7 +5030,10 @@ class MinecraftLauncher(
         if out_file:
             try:
                 shutil.copy2(self.skin_path, out_file)
-                custom_showinfo("Exported", f"Skin saved to:\n{out_file}", parent=self.root)
+                if hasattr(self, 'toast_manager'):
+                    self.toast_manager.show(f"Skin exported: {os.path.basename(out_file)}", level="success")
+                else:
+                    custom_showinfo("Exported", f"Skin saved to:\n{out_file}", parent=self.root)
             except Exception as e:
                 custom_showerror("Export Error", f"Failed to save skin: {e}", parent=self.root)
 

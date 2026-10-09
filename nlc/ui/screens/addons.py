@@ -11,6 +11,7 @@ import logging
 import datetime
 import subprocess
 import threading
+import hashlib
 import webbrowser
 import tkinter as tk
 from tkinter import ttk, filedialog
@@ -56,8 +57,10 @@ class AddonsScreenMixin:
         # Header
         header = tk.Frame(frame, bg=COLORS['main_bg'], pady=20, padx=30)
         header.pack(fill="x")
+        self.addons_header_frame = header
         
-        tk.Label(header, text="Addons & Agent", font=("Segoe UI", 24, "bold"), bg=COLORS['main_bg'], fg=COLORS['text_primary']).pack(side="left")
+        self.addons_title_lbl = tk.Label(header, text="Addons & Agent", font=("Segoe UI", 24, "bold"), bg=COLORS['main_bg'], fg=COLORS['text_primary'])
+        self.addons_title_lbl.pack(side="left")
 
         # Scrollable Content
         canvas = tk.Canvas(frame, bg=COLORS['main_bg'], highlightthickness=0)
@@ -390,6 +393,9 @@ How to use:
         self._bind_smooth_scroll(canvas, content)
         update_scrollbar_visibility()
         self.refresh_addons_tab_state()
+
+        if getattr(self, "current_tab", None) == "Addons":
+            frame.pack(fill="both", expand=True)
 
     def _ensure_addons_config_defaults(self):
         self.addons_config = addon_normalize_config(getattr(self, "addons_config", {}))
@@ -963,10 +969,27 @@ How to use:
 
     def _get_screenshot_thumbnail(self, path, size=(170, 96)):
         try:
+            if not hasattr(self, 'screenshot_thumbnail_cache'):
+                self.screenshot_thumbnail_cache = {}
             mtime = os.path.getmtime(path)
             cache_key = (path, mtime, size)
             if cache_key in self.screenshot_thumbnail_cache:
                 return self.screenshot_thumbnail_cache[cache_key]
+
+            # Persistent disk cache check
+            cache_dir = os.path.join(getattr(self, 'config_dir', None) or os.path.expanduser('~/.nlc'), 'cache', 'screenshot_thumbs')
+            os.makedirs(cache_dir, exist_ok=True)
+            disk_key = hashlib.md5(f"{path}_{mtime}_{size[0]}x{size[1]}".encode('utf-8')).hexdigest()
+            disk_path = os.path.join(cache_dir, f"{disk_key}.jpg")
+
+            if os.path.isfile(disk_path):
+                try:
+                    with Image.open(disk_path) as cached_im:
+                        photo = ImageTk.PhotoImage(cached_im.copy())
+                        self.screenshot_thumbnail_cache[cache_key] = photo
+                        return photo
+                except Exception:
+                    pass
 
             img = Image.open(path).convert("RGB")
             img.thumbnail(size, Image.Resampling.LANCZOS)
@@ -974,6 +997,13 @@ How to use:
             offset_x = max(0, (size[0] - img.width) // 2)
             offset_y = max(0, (size[1] - img.height) // 2)
             background.paste(img, (offset_x, offset_y))
+
+            # Save to disk cache
+            try:
+                background.save(disk_path, "JPEG", quality=85)
+            except Exception:
+                pass
+
             photo = ImageTk.PhotoImage(background)
             self.screenshot_thumbnail_cache[cache_key] = photo
             return photo
@@ -1086,7 +1116,10 @@ How to use:
         if self.gh_sync_enabled.get():
              self.perform_gh_skin_sync()
         else:
-             custom_showinfo("Saved", "Settings saved.")
+             if hasattr(self, 'toast_manager'):
+                 self.toast_manager.show("Settings saved.", level="info")
+             else:
+                 custom_showinfo("Saved", "Settings saved.")
 
     def perform_gh_skin_sync(self):
         # Trigger Agent to Sync
@@ -1110,7 +1143,11 @@ How to use:
         def on_complete(res):
             self.hide_progress_overlay()
             if res.get("status") == "success":
-                custom_showinfo("Success", f"Skin sync complete!\n{res.get('msg', '')}")
+                msg = f"Skin sync complete! {res.get('msg', '')}".strip()
+                if hasattr(self, 'toast_manager'):
+                    self.toast_manager.show(msg, level="success")
+                else:
+                    custom_showinfo("Success", msg)
             else:
                 custom_showerror("Sync Error", res.get("msg", "Unknown error"))
                 
@@ -1256,14 +1293,52 @@ How to use:
             self.log("Agent stopped.")
 
     def refresh_addons_screen_theme(self):
-        """Re-render the Addons tab with active theme tokens."""
-        if hasattr(self, 'tabs') and "Addons" in self.tabs:
-            old_tab = self.tabs["Addons"]
-            if old_tab and old_tab.winfo_exists():
-                is_packed = bool(old_tab.winfo_ismapped())
-                old_tab.destroy()
-                self.create_addons_tab()
-                if is_packed:
-                    self.tabs["Addons"].pack(fill="both", expand=True)
+        """Update existing Addons tab widgets in-place with active theme tokens."""
+        main_bg = COLORS.get('main_bg', '#12141A')
+        card_bg = COLORS.get('card_bg', '#1E222B')
+        text_primary = COLORS.get('text_primary', '#FFFFFF')
+
+        tab = getattr(self, "tabs", {}).get("Addons")
+        if tab and tab.winfo_exists():
+            try:
+                tab.config(bg=main_bg)
+            except Exception:
+                pass
+
+        if hasattr(self, 'addons_header_frame') and self.addons_header_frame and self.addons_header_frame.winfo_exists():
+            try:
+                self.addons_header_frame.config(bg=main_bg)
+            except Exception:
+                pass
+
+        if hasattr(self, 'addons_title_lbl') and self.addons_title_lbl and self.addons_title_lbl.winfo_exists():
+            try:
+                self.addons_title_lbl.config(bg=main_bg, fg=text_primary)
+            except Exception:
+                pass
+
+        if hasattr(self, 'addons_canvas') and self.addons_canvas and self.addons_canvas.winfo_exists():
+            try:
+                self.addons_canvas.config(bg=main_bg)
+            except Exception:
+                pass
+
+        if hasattr(self, 'addons_scroll_frame') and self.addons_scroll_frame and self.addons_scroll_frame.winfo_exists():
+            try:
+                self.addons_scroll_frame.config(bg=main_bg)
+            except Exception:
+                pass
+
+        if hasattr(self, 'addons_content_frame') and self.addons_content_frame and self.addons_content_frame.winfo_exists():
+            try:
+                self.addons_content_frame.config(bg=main_bg)
+            except Exception:
+                pass
+
+        try:
+            self.refresh_addons_tab_state()
+        except Exception:
+            pass
+
 
 
