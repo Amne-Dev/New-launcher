@@ -23,8 +23,8 @@ installer/
 logs/
 authlib-injector.log
 /skins
-launcher_config.json
-NewLauncher-1.4-x86_64.AppImage
+*.AppImage
+appimagetool*
 /AppDir
 /build_linux
 /dist_linux

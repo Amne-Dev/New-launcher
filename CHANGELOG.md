@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.0] - 2026-10-09
+
+### Added
+
+- **Neo UI & Dark Slate Theme**: Full client redesign with Dark Slate color scheme (`#1E2025`, `#181A1E`, `#2ECC71`), Minecraft pixel typography, and modern responsive cards.
+- **Action Toasts & Fluid Feedback**: Interactive floating toasts for modpack downloads, instance creation, and system operations.
+- **Two-Tier Asset Caching**: Disk and memory caching for wallpapers, skins, and modpack thumbnails for lag-free scrolling and navigation.
+- **Locker & 3D Character Studio**: 3D skin preview stage, dynamic Steve (4px) vs Alex (3px) geometry toggle, saved wardrobe presets, and offline skin injection.
+- **Modrinth Modpack Discovery & Mod Inspector**: 1-click modpack installs, auto installation linking, and granular mod ON/OFF toggle switches.
+
 ## [2.8] - 2026-08-21
 
 ### Added
