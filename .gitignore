@@ -2,6 +2,15 @@
 __pycache__/
 *.pyc
 
+# Virtual Environment
+.venv/
+venv/
+venv_build/
+
+# Documentation & Refactor Archives
+docs/
+docs/refactor/
+
 # PyInstaller
 build/
 dist/
@@ -9,19 +18,20 @@ dist/
 # Installer Output
 installer/
 
-# Logs
+# Logs & Config
 logs/
 authlib-injector.log
 /skins
-authlib-injector.log
-launcher_config.json
 launcher_config.json
 NewLauncher-1.4-x86_64.AppImage
 /AppDir
 /build_linux
 /dist_linux
-/venv_build
 /addons/p3_menu/.gradle
 /addons/p3_menu/build_manual
 /NewLauncher.CSharpUI
 New-launcher.sln
+
+# Scratch & Temporary Files
+*.bak
+*.tmp
