@@ -47,6 +47,31 @@ class InAppModalManager:
         self.root = root.winfo_toplevel()
         self._active_modal: Optional[Dict[str, Any]] = None
         self._modal_stack: List[Dict[str, Any]] = []
+        self.root.bind("<Activate>", self._restore_modal_grab, add="+")
+
+    def _restore_modal_grab(self, _event: Optional[Any] = None) -> None:
+        """Repair modal input capture after the application regains focus on Windows."""
+        modal = self._active_modal
+        card = modal.get("card_frame") if modal else None
+        try:
+            if card is not None and card.winfo_exists():
+                card.grab_set()
+                card.focus_set()
+                return
+        except tk.TclError:
+            pass
+
+        if modal is None:
+            return
+
+        self._active_modal = None
+        self._modal_stack.clear()
+        try:
+            current_grab = self.root.grab_current()
+            if current_grab is not None:
+                current_grab.grab_release()
+        except tk.TclError:
+            pass
 
     def is_modal_active(self) -> bool:
         """Check if any modal overlay is currently visible."""
