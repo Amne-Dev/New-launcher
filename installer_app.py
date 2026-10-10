@@ -12,7 +12,7 @@ import winreg
 
 
 APP_NAME = "NLC"
-APP_VERSION = "3.0.1"
+APP_VERSION = "3.0.2"
 APP_PUBLISHER = "@amne-dev on github"
 APP_EXE = "NewLauncher.exe"
 AGENT_EXE = "agent.exe"
