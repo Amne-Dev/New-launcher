@@ -5048,6 +5048,7 @@ class MinecraftLauncher(
         p = self.profiles[self.current_profile_index]
         old_skin_path = self.skin_path
         self.skin_path = p.get("skin_path", "")
+        self.username = p.get("name", DEFAULT_USERNAME)
         
         # Enforce settings based on account type
         p_type = p.get("type", "offline")
