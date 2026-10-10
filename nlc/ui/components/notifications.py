@@ -465,6 +465,14 @@ class NotificationCenterDrawer:
         self._update_tab_buttons()
         self.render_feed()
 
+    def _invoke_action(self, callback: Callable):
+        """Close the drawer before running an action from a notification card."""
+        self.close()
+        try:
+            callback()
+        except Exception:
+            logger.exception("Notification action failed")
+
     def _update_tab_buttons(self):
         accent = COLORS.get('accent_color', '#2ECC71')
         input_bg = COLORS.get('input_bg', '#151821')
@@ -630,7 +638,7 @@ class NotificationCenterDrawer:
                 padx=8,
                 pady=2,
                 cursor="hand2",
-                command=item.action_callback
+                command=lambda callback=item.action_callback: self._invoke_action(callback)
             )
             act_btn.pack(anchor="w", pady=(6, 0))
 
