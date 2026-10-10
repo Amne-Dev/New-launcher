@@ -80,6 +80,48 @@ jobs:
           }
           $lines | Set-Content -Path release-assets\SHA256SUMS.txt
 
+      - name: Generate WinGet Manifest Candidate
+        shell: pwsh
+        run: |
+          $manifestRoot = "release-assets\winget\AmneDev.NewLauncher\$env:APP_VERSION"
+          New-Item -ItemType Directory -Force -Path $manifestRoot | Out-Null
+          $installerHash = (Get-FileHash -Algorithm SHA256 "release-assets\NLCSetup.exe").Hash.ToLower()
+          $installerUrl = "https://github.com/Amne-Dev/New-launcher/releases/download/v$env:APP_VERSION/NLCSetup.exe"
+
+          @"
+          PackageIdentifier: AmneDev.NewLauncher
+          PackageVersion: $env:APP_VERSION
+          InstallerType: exe
+          Installers:
+          - Architecture: x64
+            InstallerUrl: $installerUrl
+            InstallerSha256: $installerHash
+            InstallerSwitches:
+              Silent: --quiet
+              SilentWithProgress: --quiet
+          ManifestType: installer
+          ManifestVersion: 1.9.0
+          "@ | Set-Content -Path "$manifestRoot\AmneDev.NewLauncher.installer.yaml"
+
+          @"
+          PackageIdentifier: AmneDev.NewLauncher
+          PackageVersion: $env:APP_VERSION
+          PackageLocale: en-US
+          Publisher: Amne-Dev
+          PublisherUrl: https://github.com/Amne-Dev
+          PublisherSupportUrl: https://github.com/Amne-Dev/New-launcher/issues
+          PackageName: New Launcher
+          PackageUrl: https://github.com/Amne-Dev/New-launcher
+          License: MIT
+          LicenseUrl: https://github.com/Amne-Dev/New-launcher/blob/main/LICENSE
+          ShortDescription: A Minecraft launcher for managing accounts, installations, mods, and skins.
+          Tags:
+          - minecraft
+          - launcher
+          ManifestType: defaultLocale
+          ManifestVersion: 1.9.0
+          "@ | Set-Content -Path "$manifestRoot\AmneDev.NewLauncher.locale.en-US.yaml"
+
       - name: Upload Workflow Artifact
         uses: actions/upload-artifact@v4
         with:

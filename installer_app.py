@@ -339,6 +339,68 @@ def run_uninstall(target_dir: str, quiet: bool = False) -> int:
     return 0
 
 
+def run_silent_install(target_dir: str = "") -> int:
+    """Install the bundled launcher without creating a graphical installer window."""
+    target_dir = os.path.abspath(target_dir.strip() or default_install_dir())
+    can_write, write_reason = check_write_access(target_dir)
+    if not can_write:
+        raise PermissionError(write_reason)
+
+    payload_files = [APP_EXE, AGENT_EXE, "logo.ico", "logo.png"]
+    payload_sources = {name: resolve_payload_file(name) for name in payload_files}
+    missing = [name for name, source in payload_sources.items() if not source]
+    if missing:
+        raise RuntimeError("Installer payload is incomplete. Missing: " + ", ".join(missing))
+
+    for process_name in (APP_EXE, AGENT_EXE):
+        try:
+            subprocess.run(
+                ["taskkill", "/IM", process_name, "/F"],
+                capture_output=True,
+                check=False,
+                timeout=8,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+    os.makedirs(target_dir, exist_ok=True)
+    for name, source in payload_sources.items():
+        shutil.copy2(source, os.path.join(target_dir, name))
+
+    setup_source = os.path.abspath(sys.executable if getattr(sys, "frozen", False) else sys.argv[0])
+    setup_target = ""
+    if os.path.isfile(setup_source) and setup_source.lower().endswith(".exe"):
+        setup_target = os.path.join(target_dir, SETUP_EXE_NAME)
+        if _norm(setup_source) != _norm(setup_target):
+            shutil.copy2(setup_source, setup_target)
+
+    _create_start_menu_shortcut(target_dir)
+    register_uninstall_entry(target_dir, setup_target)
+    return 0
+
+
+def _create_start_menu_shortcut(install_dir: str) -> None:
+    app_path = os.path.join(install_dir, APP_EXE)
+    icon_path = os.path.join(install_dir, "logo.ico")
+    start_menu_dir = os.path.join(
+        os.environ.get("APPDATA", ""),
+        "Microsoft",
+        "Windows",
+        "Start Menu",
+        "Programs",
+        SHORTCUT_NAME,
+    )
+    if not start_menu_dir:
+        return
+    os.makedirs(start_menu_dir, exist_ok=True)
+    create_shortcut(
+        os.path.join(start_menu_dir, SHORTCUT_NAME + ".lnk"),
+        app_path,
+        install_dir,
+        icon_path,
+    )
+
+
 class InstallerApp:
     def __init__(self) -> None:
         self.root = tk.Tk()
@@ -1235,4 +1297,10 @@ if __name__ == "__main__":
         raise SystemExit(1)
     if cli.uninstall:
         raise SystemExit(run_uninstall(cli.target.strip(), quiet=cli.quiet))
+    if cli.quiet:
+        try:
+            raise SystemExit(run_silent_install(cli.target))
+        except Exception as exc:
+            print(f"Silent installation failed: {exc}", file=sys.stderr)
+            raise SystemExit(1)
     InstallerApp().run()
