@@ -554,7 +554,7 @@ class ToastManager:
         b_later.pack(side="left")
 
         self._toasts.append(toast_card)
-        toast_card.after(10000, dismiss)
+        toast_card.after(60000, dismiss)
 
     @staticmethod
     def _format_duration(seconds: int) -> str:
