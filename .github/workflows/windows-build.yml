@@ -83,13 +83,21 @@ jobs:
       - name: Generate WinGet Manifest Candidate
         shell: pwsh
         run: |
-          $manifestRoot = "release-assets\winget\AmneDev.NewLauncher\$env:APP_VERSION"
+          $manifestRoot = "release-assets\winget\amne-dev\nlc\$env:APP_VERSION"
           New-Item -ItemType Directory -Force -Path $manifestRoot | Out-Null
           $installerHash = (Get-FileHash -Algorithm SHA256 "release-assets\NLCSetup.exe").Hash.ToLower()
           $installerUrl = "https://github.com/Amne-Dev/New-launcher/releases/download/v$env:APP_VERSION/NLCSetup.exe"
 
           @"
-          PackageIdentifier: AmneDev.NewLauncher
+          PackageIdentifier: amne-dev.nlc
+          PackageVersion: $env:APP_VERSION
+          DefaultLocale: en-US
+          ManifestType: version
+          ManifestVersion: 1.12.0
+          "@ | Set-Content -Path "$manifestRoot\amne-dev.nlc.yaml"
+
+          @"
+          PackageIdentifier: amne-dev.nlc
           PackageVersion: $env:APP_VERSION
           InstallerType: exe
           Installers:
@@ -100,27 +108,40 @@ jobs:
               Silent: --quiet
               SilentWithProgress: --quiet
           ManifestType: installer
-          ManifestVersion: 1.9.0
-          "@ | Set-Content -Path "$manifestRoot\AmneDev.NewLauncher.installer.yaml"
+          ManifestVersion: 1.12.0
+          "@ | Set-Content -Path "$manifestRoot\amne-dev.nlc.installer.yaml"
 
           @"
-          PackageIdentifier: AmneDev.NewLauncher
+          PackageIdentifier: amne-dev.nlc
           PackageVersion: $env:APP_VERSION
           PackageLocale: en-US
           Publisher: Amne-Dev
           PublisherUrl: https://github.com/Amne-Dev
-          PublisherSupportUrl: https://github.com/Amne-Dev/New-launcher/issues
-          PackageName: New Launcher
-          PackageUrl: https://github.com/Amne-Dev/New-launcher
-          License: MIT
-          LicenseUrl: https://github.com/Amne-Dev/New-launcher/blob/main/LICENSE
+          PublisherSupportUrl: https://discord.gg/yJqFxjTAq2
+          PrivacyUrl: https://web.get-nlc.tech/privacy.html
+          Author: Amne-Dev
+          PackageName: NLC
+          PackageUrl: https://web.get-nlc.tech/
+          License: BSD 3-Clause License
+          LicenseUrl: https://raw.githubusercontent.com/Amne-Dev/New-launcher/main/LICENSE
           ShortDescription: A Minecraft launcher for managing accounts, installations, mods, and skins.
+          Description: New Launcher is a desktop Minecraft launcher for Windows that lets users manage offline, Microsoft, and Ely.by accounts, install and launch multiple Minecraft versions, configure loaders and modpacks, manage mods and skins, customize launcher settings, and receive application updates.
+          Moniker: nlc
           Tags:
+          - modrinth
+          - newlauncher
           - minecraft
           - launcher
+          - modpacks
+          - mods
+          - skins
+          - lightweight
+          ReleaseNotes: https://github.com/Amne-Dev/New-launcher/releases/
+          ReleaseNotesUrl: https://github.com/Amne-Dev/New-launcher/releases/
+          InstallationNotes: 'NLC has been installed successfully. Launch it from the Start Menu or run it with: winget run amne-dev.nlc (Enjoy!)'
           ManifestType: defaultLocale
-          ManifestVersion: 1.9.0
-          "@ | Set-Content -Path "$manifestRoot\AmneDev.NewLauncher.locale.en-US.yaml"
+          ManifestVersion: 1.12.0
+          "@ | Set-Content -Path "$manifestRoot\amne-dev.nlc.locale.en-US.yaml"
 
       - name: Upload Workflow Artifact
         uses: actions/upload-artifact@v4
